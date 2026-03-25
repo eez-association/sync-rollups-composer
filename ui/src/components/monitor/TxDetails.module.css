@@ -1,0 +1,42 @@
+.root {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--bg-inset);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.meta {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.logsTitle {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.logEntry {
+  padding: 4px 8px;
+  margin-bottom: 3px;
+  background: var(--bg-card);
+  border-radius: 4px;
+  font-size: 10px;
+}
+.logHeader {
+  display: flex;
+  gap: 8px;
+}
+.logArgs {
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.logArg {
+  margin-left: 8px;
+}
+.loading {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 8px 0;
+}

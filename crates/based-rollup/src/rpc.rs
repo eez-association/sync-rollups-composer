@@ -1,0 +1,1286 @@
+//! Custom RPC namespace `syncrollups_*` for synchronous composability.
+//!
+//! Provides methods for transaction simulation, state root queries, and
+//! action hash computation — used by the execution planner and external
+//! tooling (UI dashboards, RPC proxies).
+
+use crate::config::RollupConfig;
+use crate::cross_chain::{
+    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, ICrossChainManagerL2,
+};
+use crate::evm_config::RollupEvmConfig;
+use alloy_consensus::BlockHeader;
+use alloy_primitives::{Address, B256, Bytes, I256, U256, keccak256};
+use alloy_sol_types::SolType;
+use jsonrpsee::core::RpcResult;
+use jsonrpsee::proc_macros::rpc;
+use reth_provider::{BlockNumReader, HeaderProvider, StateProviderFactory};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+// ──────────────────────────────────────────────
+//  Serde helpers
+// ──────────────────────────────────────────────
+
+/// Serde default for `bool` fields that should default to `true`.
+fn default_true() -> bool {
+    true
+}
+
+// ──────────────────────────────────────────────
+//  RPC types
+// ──────────────────────────────────────────────
+
+/// Result of simulating a transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulationResult {
+    /// Whether the transaction executed successfully.
+    pub success: bool,
+    /// Gas consumed by the transaction.
+    pub gas_used: u64,
+    /// Return data from the transaction (or revert reason).
+    pub return_data: Bytes,
+    /// State root before execution.
+    pub pre_state_root: B256,
+    /// State root after execution.
+    pub post_state_root: B256,
+    /// Computed action hash for this transaction.
+    pub action_hash: B256,
+    /// Pre-built execution entry ready for L1 submission.
+    pub execution_entry: SerializableExecutionEntry,
+}
+
+/// JSON-serializable execution entry (mirrors CrossChainExecutionEntry).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerializableExecutionEntry {
+    pub state_deltas: Vec<SerializableStateDelta>,
+    pub action_hash: B256,
+    pub next_action: SerializableAction,
+}
+
+/// JSON-serializable state delta.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerializableStateDelta {
+    pub rollup_id: U256,
+    pub current_state: B256,
+    pub new_state: B256,
+    pub ether_delta: I256,
+}
+
+/// JSON-serializable action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerializableAction {
+    pub action_type: String,
+    pub rollup_id: U256,
+    pub destination: Address,
+    pub value: U256,
+    pub data: Bytes,
+    pub failed: bool,
+    pub source_address: Address,
+    pub source_rollup: U256,
+    pub scope: Vec<U256>,
+}
+
+/// Parameters for initiating a cross-chain call via L1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossChainCallParams {
+    /// Target contract address on L2.
+    pub destination: Address,
+    /// Calldata to execute on the destination contract.
+    pub data: Bytes,
+    /// ETH value to send with the cross-chain call (e.g., bridgeEther deposits).
+    /// Must match `msg.value` in the L1 proxy call for action hash to be correct.
+    #[serde(default)]
+    pub value: U256,
+    /// The address initiating the cross-chain call (set as sourceAddress).
+    pub source_address: Address,
+    /// The rollup originating the call (0 for L1-originated).
+    pub source_rollup: U256,
+    /// Effective gas price of the user's L1 tx (for ordering chained state deltas).
+    /// The L1 miner orders txs by gas price descending, so we must match that order.
+    #[serde(default)]
+    pub gas_price: u128,
+    /// Raw signed L1 transaction to forward after `postBatch`.
+    /// Previously sent via a separate `queueL1ForwardTx` call; now bundled atomically.
+    #[serde(default)]
+    pub raw_l1_tx: Bytes,
+    /// Pre-computed L2 return data from the composer RPC's chained simulation.
+    /// When present, skips independent simulate_call and uses this directly.
+    /// Required for identical-call patterns where each call's return data
+    /// depends on state changes from previous calls.
+    #[serde(default)]
+    pub l2_return_data: Option<Bytes>,
+    /// Whether the L2 call succeeded (from composer RPC chained simulation).
+    #[serde(default)]
+    pub l2_call_success: Option<bool>,
+}
+
+/// Parameters for initiating an L2→L1 cross-chain call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct L2CrossChainCallParams {
+    /// Target contract address on L1 (originalAddress from proxy).
+    pub destination: Address,
+    /// Calldata to execute on the L1 target.
+    #[serde(default)]
+    pub data: Bytes,
+    /// ETH value for the cross-chain call.
+    #[serde(default)]
+    pub value: U256,
+    /// Address that initiated the call on L2 (tx sender, NOT bridge).
+    pub source_address: Address,
+    /// Return data from L1 delivery simulation (empty for simple calls/EOA targets).
+    #[serde(default)]
+    pub delivery_return_data: Bytes,
+    /// Whether the L1 delivery simulation reverted.
+    #[serde(default)]
+    pub delivery_failed: bool,
+    /// Held raw L2 transaction for hold-then-forward pattern.
+    /// When non-empty, the proxy held this tx instead of forwarding to upstream;
+    /// the driver injects it into the pool after loading entries.
+    #[serde(default)]
+    pub raw_l2_tx: Bytes,
+    /// Pre-computed L2 return data from the composer RPC's chained simulation.
+    /// When present, overrides independent L2 simulation for the return call.
+    /// Required for identical-call patterns where each call's return data
+    /// depends on state changes from previous calls.
+    #[serde(default)]
+    pub l2_return_data: Option<Bytes>,
+    /// Whether the L2 call succeeded (from composer RPC chained simulation).
+    /// When present alongside `l2_return_data`, skips independent L2 simulation.
+    #[serde(default)]
+    pub l2_call_success: Option<bool>,
+}
+
+/// A queued cross-chain call with its entry pair, gas price, and raw L1 tx.
+/// Replaces the previous dual-queue design (separate entry queue + L1 tx queue)
+/// with a single unified struct that keeps entries and their L1 tx associated.
+///
+/// For simple deposits, only `call_entry` + `result_entry` are populated.
+/// For continuation patterns (multi-call continuations), `extra_l2_entries` and `l1_entries`
+/// are also populated by the table builder.
+#[derive(Debug, Clone)]
+pub struct QueuedCrossChainCall {
+    /// The CALL execution entry (L2 table: consumed by executeIncomingCrossChainCall).
+    pub call_entry: CrossChainExecutionEntry,
+    /// The RESULT execution entry (L2 table: consumed after the call returns).
+    pub result_entry: CrossChainExecutionEntry,
+    /// Effective gas price of the user's L1 tx (for ordering).
+    pub effective_gas_price: u128,
+    /// Raw signed L1 transaction to forward after `postBatch`.
+    pub raw_l1_tx: Bytes,
+    /// Additional L2 table entries for continuation patterns (multi-call continuations).
+    /// Loaded via `loadExecutionTable` alongside the primary CALL+RESULT pair.
+    /// Empty for simple deposits.
+    pub extra_l2_entries: Vec<CrossChainExecutionEntry>,
+    /// Pre-built L1 entries for continuation patterns (multi-call continuations).
+    /// When non-empty, these are used AS-IS in `flush_to_l1` instead of
+    /// converting the CALL+RESULT pair via `convert_pairs_to_l1_entries`.
+    /// Empty for simple deposits (legacy path applies).
+    pub l1_entries: Vec<CrossChainExecutionEntry>,
+}
+
+/// A queued L2→L1 withdrawal with L2 table entries and L1 deferred entries.
+/// The driver drains these into the next block alongside any deposit entries
+/// (unified intermediate roots handle both types in the same block).
+#[derive(Debug, Clone)]
+pub struct QueuedWithdrawal {
+    /// L2 table entries (loaded via loadExecutionTable).
+    pub l2_table_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
+    /// L1 deferred entries (posted via postBatch, consumed by trigger).
+    pub l1_deferred_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
+    /// User address (withdrawal initiator).
+    pub user: Address,
+    /// Withdrawal amount in wei.
+    pub amount: U256,
+    /// Held raw L2 transaction for hold-then-forward pattern.
+    /// When non-empty, the proxy held this tx instead of forwarding to upstream;
+    /// the driver injects it into the pool after loading entries.
+    pub raw_l2_tx: Bytes,
+    /// For multi-call L2→L1: the L2 source address whose L1 proxy is the trigger target.
+    /// When set, the driver computes `proxy(trigger_source, rollup_id)` instead of
+    /// `proxy(user, rollup_id)` for the trigger call.
+    pub trigger_source: Option<Address>,
+    /// For multi-call L2→L1: calldata to send to the trigger proxy.
+    /// When empty, sends empty data (simple withdrawal behavior).
+    pub trigger_calldata: Bytes,
+    /// For multi-call L2→L1: ETH value to send with the trigger call.
+    /// When zero, sends 0 value (simple withdrawal behavior).
+    pub trigger_value: U256,
+    /// Additional trigger calls for multi-call L2→L1 patterns.
+    /// Each entry = (source_address, calldata, value).
+    pub extra_triggers: Vec<(Address, Bytes, U256)>,
+}
+
+/// Result of simulating a contract call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulateCallResult {
+    /// Whether the call succeeded.
+    pub success: bool,
+    /// Return data (or revert data).
+    pub return_data: Bytes,
+}
+
+/// Parameters for building a multi-call execution table (multi-call continuations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildExecutionTableParams {
+    /// Detected L1→L2 cross-chain calls (in execution order).
+    pub calls: Vec<BuildExecutionTableCall>,
+    /// Effective gas price of the user's L1 tx (for ordering).
+    #[serde(default)]
+    pub gas_price: u128,
+    /// Raw signed L1 transaction to forward after `postBatch`.
+    #[serde(default)]
+    pub raw_l1_tx: Bytes,
+}
+
+/// A single detected call for the execution table builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildExecutionTableCall {
+    /// Target address on L2.
+    pub destination: Address,
+    /// Calldata (e.g., receiveTokens calldata from proxy detection).
+    pub data: Bytes,
+    /// ETH value for the cross-chain call.
+    #[serde(default)]
+    pub value: U256,
+    /// Address that initiated the call on L1.
+    pub source_address: Address,
+    /// Return data from simulating this L1->L2 call on L2.
+    /// When non-empty, the RESULT action hash includes this data
+    /// (docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
+    #[serde(default)]
+    pub l2_return_data: Bytes,
+    /// Whether the L2 call succeeded. Defaults to `true` when not provided.
+    #[serde(default = "default_true")]
+    pub call_success: bool,
+}
+
+/// Result of building a multi-call execution table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildExecutionTableResult {
+    /// Number of L2 table entries generated.
+    pub l2_entry_count: usize,
+    /// Number of L1 deferred entries generated.
+    pub l1_entry_count: usize,
+    /// Action hash of the first CALL (tracking ID).
+    pub call_id: B256,
+}
+
+/// Parameters for building an L2→L1 multi-call execution table (reverse multi-call continuations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildL2ToL1ExecutionTableParams {
+    /// L2→L1 calls detected from the L2 tx trace (in execution order).
+    pub l2_calls: Vec<BuildL2ToL1Call>,
+    /// L1→L2 return calls discovered from L1 delivery simulation.
+    #[serde(default)]
+    pub return_calls: Vec<BuildL2ToL1ReturnCall>,
+    /// Effective gas price (unused for L2→L1 but kept for API consistency).
+    #[serde(default)]
+    pub gas_price: u128,
+    /// Raw signed L2 transaction (held for driver injection).
+    #[serde(default)]
+    pub raw_l2_tx: Bytes,
+}
+
+/// A single L2→L1 call for the reverse multi-call continuation execution table builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildL2ToL1Call {
+    /// Target address on L1 (proxy's originalAddress).
+    pub destination: Address,
+    /// Calldata to execute on the L1 target.
+    pub data: Bytes,
+    /// ETH value for the cross-chain call.
+    #[serde(default)]
+    pub value: U256,
+    /// Address that initiated the call on L2.
+    pub source_address: Address,
+    /// Return data from the L1 delivery simulation for this call.
+    /// When non-empty, the L1 RESULT entry hash includes this data.
+    #[serde(default)]
+    pub delivery_return_data: Bytes,
+    /// Whether the L1 delivery simulation reverted.
+    #[serde(default)]
+    pub delivery_failed: bool,
+}
+
+/// A return call (L1→L2) for the reverse multi-call continuation execution table builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildL2ToL1ReturnCall {
+    /// Target address (L1 contract receiving the return call, e.g., Bridge_L1).
+    pub destination: Address,
+    /// Calldata (e.g., receiveTokens).
+    pub data: Bytes,
+    /// ETH value sent with the call.
+    #[serde(default)]
+    pub value: U256,
+    /// Address that initiated the call on L1 (e.g., Bridge_L2's proxy).
+    pub source_address: Address,
+    /// Index of the L2→L1 call whose L1 execution produces this return call.
+    /// `None` means assign to the last L2→L1 call (backward-compatible default).
+    #[serde(default)]
+    pub parent_call_index: Option<usize>,
+    /// Return data from simulating this call on L2 (for L2 RESULT hash).
+    #[serde(default)]
+    pub l2_return_data: Option<Bytes>,
+    /// Whether the L2 simulation reverted.
+    #[serde(default)]
+    pub l2_delivery_failed: bool,
+}
+
+/// Parameters for computing an action hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionParams {
+    pub action_type: String,
+    pub rollup_id: U256,
+    pub destination: Address,
+    pub value: U256,
+    pub data: Bytes,
+    pub failed: bool,
+    pub source_address: Address,
+    pub source_rollup: U256,
+    pub scope: Vec<U256>,
+}
+
+// ──────────────────────────────────────────────
+//  RPC trait definition
+// ──────────────────────────────────────────────
+
+/// The `syncrollups` RPC namespace for synchronous composability.
+#[rpc(server, namespace = "syncrollups")]
+pub trait SyncRollupsApi {
+    /// Simulate a signed transaction and return the execution result with
+    /// state deltas and a pre-built execution entry for L1 submission.
+    #[method(name = "simulateTransaction")]
+    fn simulate_transaction(&self, signed_tx: Bytes) -> RpcResult<SimulationResult>;
+
+    /// Return the current L2 state root (latest canonical block).
+    #[method(name = "getStateRoot")]
+    fn get_state_root(&self) -> RpcResult<B256>;
+
+    /// Return whether this node is fully synced with L1.
+    #[method(name = "isSynced")]
+    fn is_synced(&self) -> RpcResult<bool>;
+
+    /// Compute the action hash for the given action parameters.
+    /// Must match the Solidity `keccak256(abi.encode(action))` computation.
+    #[method(name = "computeActionHash")]
+    fn compute_action_hash(&self, action: ActionParams) -> RpcResult<B256>;
+
+    /// Initiate a cross-chain call via L1. Builds two execution entries
+    /// (CALL + RESULT) and submits them to the Rollups contract on L1
+    /// via `postBatch()`. Returns the L1 transaction hash.
+    #[method(name = "initiateCrossChainCall")]
+    async fn initiate_cross_chain_call(&self, params: CrossChainCallParams) -> RpcResult<B256>;
+
+    /// Simulate a contract call against current L2 state. Returns (success, returnData).
+    /// Used by the L1 proxy to predict cross-chain call results for entry construction.
+    #[method(name = "simulateCall")]
+    fn simulate_call(&self, destination: Address, data: Bytes) -> RpcResult<SimulateCallResult>;
+
+    /// Queue a raw signed L1 transaction for forwarding by the driver.
+    /// The driver forwards these after `postBatch`, ensuring correct ordering.
+    /// Returns the transaction hash (decoded from the signed envelope).
+    #[method(name = "queueL1ForwardTx")]
+    fn queue_l1_forward_tx(&self, raw_tx: Bytes) -> RpcResult<B256>;
+
+    /// Initiate an L2→L1 ETH withdrawal. Builds L2 table entries and L1 deferred
+    /// entries, queues them for the builder. Returns the L2 CALL action hash.
+    /// `raw_l2_tx` is the held user transaction (hold-then-forward pattern).
+    #[method(name = "initiateWithdrawal")]
+    fn initiate_withdrawal(
+        &self,
+        sender: Address,
+        amount: U256,
+        raw_l2_tx: Bytes,
+    ) -> RpcResult<B256>;
+
+    /// Initiate a general L2→L1 cross-chain call. Builds L2 table entries and
+    /// L1 deferred entries with delivery calldata and return data. Queues them
+    /// for the builder. Returns the L2 CALL action hash.
+    #[method(name = "initiateL2CrossChainCall")]
+    fn initiate_l2_cross_chain_call(&self, params: L2CrossChainCallParams) -> RpcResult<B256>;
+
+    /// Build a multi-call execution table for continuation patterns (multi-call continuations).
+    /// Takes multiple L1→L2 calls detected from a single L1 tx, discovers child
+    /// L2→L1 calls analytically, and queues all entries as a single atomic unit.
+    #[method(name = "buildExecutionTable")]
+    fn build_execution_table(
+        &self,
+        params: BuildExecutionTableParams,
+    ) -> RpcResult<BuildExecutionTableResult>;
+
+    /// Build execution table for L2→L1 continuation patterns (reverse multi-call continuations).
+    /// Takes L2→L1 calls and L1→L2 return calls, builds the 3-entry L1 deferred
+    /// structure and L2 table entries, and queues them as a unified withdrawal.
+    #[method(name = "buildL2ToL1ExecutionTable")]
+    fn build_l2_to_l1_execution_table(
+        &self,
+        params: BuildL2ToL1ExecutionTableParams,
+    ) -> RpcResult<BuildExecutionTableResult>;
+}
+
+// Keep backward-compatible type alias for tests
+pub type PendingL1ForwardTxs = Arc<std::sync::Mutex<Vec<Bytes>>>;
+
+// ──────────────────────────────────────────────
+//  RPC implementation
+// ──────────────────────────────────────────────
+
+/// Implementation of the `syncrollups` RPC namespace.
+pub struct SyncRollupsRpc<Provider> {
+    provider: Provider,
+    evm_config: RollupEvmConfig,
+    config: Arc<RollupConfig>,
+    synced: Arc<std::sync::atomic::AtomicBool>,
+    /// Unified queue for cross-chain calls. Each entry bundles the CALL+RESULT
+    /// execution entries with the user's gas price and raw L1 tx.
+    /// The driver drains, sorts by gas price, then submits to L1.
+    queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>>,
+    /// Legacy queue for raw signed L1 txs (kept for backward compatibility with
+    /// `queueL1ForwardTx` RPC method — the unified path uses `queued_cross_chain_calls`).
+    pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
+    /// Queue for L2→L1 withdrawals. Each entry bundles L2 table entries and L1
+    /// deferred entries. The driver drains these alongside deposits (unified roots).
+    queued_withdrawals: Arc<std::sync::Mutex<Vec<QueuedWithdrawal>>>,
+}
+
+impl<Provider> SyncRollupsRpc<Provider> {
+    /// Create a new `SyncRollupsRpc` instance.
+    pub fn new(
+        provider: Provider,
+        evm_config: RollupEvmConfig,
+        config: Arc<RollupConfig>,
+        synced: Arc<std::sync::atomic::AtomicBool>,
+        queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>>,
+        pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
+        queued_withdrawals: Arc<std::sync::Mutex<Vec<QueuedWithdrawal>>>,
+    ) -> Self {
+        Self {
+            provider,
+            evm_config,
+            config,
+            synced,
+            queued_cross_chain_calls,
+            pending_l1_forward_txs,
+            queued_withdrawals,
+        }
+    }
+}
+
+#[jsonrpsee::core::__reexports::async_trait]
+impl<Provider> SyncRollupsApiServer for SyncRollupsRpc<Provider>
+where
+    Provider: StateProviderFactory
+        + HeaderProvider<Header = alloy_consensus::Header>
+        + BlockNumReader
+        + Send
+        + Sync
+        + 'static,
+{
+    fn simulate_transaction(&self, signed_tx: Bytes) -> RpcResult<SimulationResult> {
+        use crate::execution_planner;
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        execution_planner::simulate_transaction(
+            &self.provider,
+            &self.evm_config,
+            &self.config,
+            signed_tx,
+        )
+        .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))
+    }
+
+    fn get_state_root(&self) -> RpcResult<B256> {
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        let best = self
+            .provider
+            .best_block_number()
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let header = self
+            .provider
+            .sealed_header(best)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?
+            .ok_or_else(|| ErrorObjectOwned::owned(-32000, "no header found", None::<()>))?;
+
+        Ok(header.state_root())
+    }
+
+    fn is_synced(&self) -> RpcResult<bool> {
+        Ok(self.synced.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn compute_action_hash(&self, action: ActionParams) -> RpcResult<B256> {
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        compute_action_hash_from_params(&action)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))
+    }
+
+    async fn initiate_cross_chain_call(&self, params: CrossChainCallParams) -> RpcResult<B256> {
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        if self.config.rollups_address.is_zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "ROLLUPS_ADDRESS not configured — cross-chain mode disabled",
+                None::<()>,
+            ));
+        }
+
+        let rollup_id = U256::from(self.config.rollup_id);
+
+        // Simulate the call against current L2 state to capture the actual
+        // return data. CrossChainManagerL2._processCallAtScope() builds a
+        // RESULT action with `data = returnData` from the real call and
+        // looks up the execution table by `keccak256(abi.encode(resultAction))`.
+        // If our pre-built RESULT has different data, _consumeExecution reverts
+        // with ExecutionNotFound.
+        //
+        // Bridge-to-bridge deposits (receiveTokens on Bridge L2) cannot be
+        // simulated directly because Bridge L2 requires calls to come through
+        // the CCM proxy. simulate_call uses Address::ZERO as caller, which
+        // triggers UnauthorizedCaller revert. receiveTokens always succeeds
+        // (mints wrapped tokens) and returns no data, so we skip simulation.
+        let receive_tokens_selector: [u8; 4] = [0x6b, 0x39, 0x96, 0xb0];
+        let is_bridge_receive_tokens = params.data.len() >= 4
+            && params.data[..4] == receive_tokens_selector
+            && params.destination == self.config.bridge_l2_address;
+
+        let (call_success, return_data) = if let (Some(pre_data), Some(pre_success)) =
+            (&params.l2_return_data, params.l2_call_success)
+        {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                data_len = pre_data.len(),
+                success = pre_success,
+                "using pre-computed L2 return data from composer RPC chained simulation"
+            );
+            (pre_success, pre_data.to_vec())
+        } else if is_bridge_receive_tokens {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                destination = %params.destination,
+                "skipping simulation for bridge receiveTokens — always succeeds"
+            );
+            (true, vec![])
+        } else {
+            crate::execution_planner::simulate_call(
+                &self.provider,
+                &self.evm_config,
+                params.destination,
+                params.data.to_vec(),
+            )
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32000,
+                    format!("failed to simulate cross-chain call: {e}"),
+                    None::<()>,
+                )
+            })?
+        };
+
+        let (call_entry, result_entry) = crate::cross_chain::build_cross_chain_call_entries(
+            rollup_id,
+            params.destination,
+            params.data.to_vec(),
+            params.value,
+            params.source_address,
+            params.source_rollup,
+            call_success,
+            return_data,
+        );
+
+        // Compute a deterministic ID for this cross-chain call (for tracking)
+        let call_id = call_entry.action_hash;
+
+        tracing::info!(
+            target: "based_rollup::rpc",
+            destination = %params.destination,
+            source_address = %params.source_address,
+            rollup_id = %rollup_id,
+            %call_id,
+            "queued cross-chain call entries for L1 submission"
+        );
+
+        // Push into the unified queue; the driver will drain, sort by gas price,
+        // then build entries with correctly-ordered chained state deltas.
+        //
+        // NOTE: The RESULT entry's return_data was simulated against the current
+        // state. If state changes before the block is built (e.g. pending txs),
+        // the actual executeIncomingCrossChainCall may produce different return
+        // data, causing _consumeExecution(resultHash) to revert with
+        // ExecutionNotFound. With same-block execution the window is very small
+        // (sub-second), but in high-contention scenarios this can still occur.
+        {
+            let mut queue = self
+                .queued_cross_chain_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if queue.len() >= 500 {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    "cross-chain call queue full",
+                    None::<()>,
+                ));
+            }
+            queue.push(QueuedCrossChainCall {
+                call_entry,
+                result_entry,
+                effective_gas_price: params.gas_price,
+                raw_l1_tx: params.raw_l1_tx.clone(),
+                extra_l2_entries: vec![],
+                l1_entries: vec![],
+            });
+        }
+
+        // Return the CALL action hash as a tracking identifier.
+        Ok(call_id)
+    }
+
+    fn simulate_call(&self, destination: Address, data: Bytes) -> RpcResult<SimulateCallResult> {
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        let (success, return_data) = crate::execution_planner::simulate_call(
+            &self.provider,
+            &self.evm_config,
+            destination,
+            data.to_vec(),
+        )
+        .map_err(|e| {
+            ErrorObjectOwned::owned(-32000, format!("failed to simulate call: {e}"), None::<()>)
+        })?;
+
+        Ok(SimulateCallResult {
+            success,
+            return_data: Bytes::from(return_data),
+        })
+    }
+
+    fn queue_l1_forward_tx(&self, raw_tx: Bytes) -> RpcResult<B256> {
+        use alloy_consensus::transaction::TxEnvelope;
+        use alloy_rlp::Decodable;
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        // Decode to get tx hash
+        let tx_envelope = TxEnvelope::decode(&mut raw_tx.as_ref()).map_err(|e| {
+            ErrorObjectOwned::owned(-32000, format!("invalid tx envelope: {e}"), None::<()>)
+        })?;
+        let tx_hash = *tx_envelope.tx_hash();
+
+        // Push raw bytes into the shared queue
+        {
+            let mut queue = self
+                .pending_l1_forward_txs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if queue.len() >= 1000 {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    "L1 forward tx queue full",
+                    None::<()>,
+                ));
+            }
+            queue.push(raw_tx);
+        }
+
+        tracing::info!(
+            target: "based_rollup::rpc",
+            %tx_hash,
+            "queued L1 forward tx for driver submission"
+        );
+
+        Ok(tx_hash)
+    }
+
+    fn initiate_withdrawal(
+        &self,
+        sender: Address,
+        amount: U256,
+        raw_l2_tx: Bytes,
+    ) -> RpcResult<B256> {
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        if self.config.rollups_address.is_zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "ROLLUPS_ADDRESS not configured — cross-chain mode disabled",
+                None::<()>,
+            ));
+        }
+
+        if amount.is_zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "withdrawal amount must be > 0",
+                None::<()>,
+            ));
+        }
+
+        let entries = crate::cross_chain::build_withdrawal_entries(
+            sender,
+            amount,
+            self.config.rollup_id,
+            self.config.bridge_l2_address,
+            self.config.builder_address,
+        );
+
+        let call_id = entries.l2_table_entries[0].action_hash;
+
+        tracing::info!(
+            target: "based_rollup::rpc",
+            %sender,
+            amount = %amount,
+            %call_id,
+            "queued L2→L1 withdrawal"
+        );
+
+        {
+            let mut queue = self
+                .queued_withdrawals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if queue.len() >= 100 {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    "withdrawal queue full",
+                    None::<()>,
+                ));
+            }
+            queue.push(QueuedWithdrawal {
+                l2_table_entries: entries.l2_table_entries,
+                l1_deferred_entries: entries.l1_deferred_entries,
+                user: entries.user,
+                amount: entries.amount,
+                raw_l2_tx,
+                trigger_source: None,
+                trigger_calldata: Bytes::new(),
+                trigger_value: U256::ZERO,
+                extra_triggers: vec![],
+            });
+        }
+
+        Ok(call_id)
+    }
+
+    fn initiate_l2_cross_chain_call(&self, params: L2CrossChainCallParams) -> RpcResult<B256> {
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        if self.config.rollups_address.is_zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "ROLLUPS_ADDRESS not configured — cross-chain mode disabled",
+                None::<()>,
+            ));
+        }
+
+        // For general L2→L1 calls, source_address IS the trigger_user (L2 tx sender).
+        // For withdrawals (separate path), bridge_l2 is source but user is trigger.
+        let entries = crate::cross_chain::build_l2_to_l1_call_entries(
+            params.destination,
+            params.data.to_vec(),
+            params.value,
+            params.source_address, // msg.sender in L2 proxy fallback
+            params.source_address, // trigger_user = L2 sender (gets L1 proxy)
+            self.config.rollup_id,
+            self.config.builder_address,
+            params.delivery_return_data.to_vec(),
+            params.delivery_failed,
+        );
+
+        let call_id = entries.l2_table_entries[0].action_hash;
+
+        tracing::info!(
+            target: "based_rollup::rpc",
+            destination = %params.destination,
+            source = %params.source_address,
+            value = %params.value,
+            data_len = params.data.len(),
+            %call_id,
+            "queued L2→L1 cross-chain call"
+        );
+
+        {
+            let mut queue = self
+                .queued_withdrawals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if queue.len() >= 100 {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    "L2→L1 queue full",
+                    None::<()>,
+                ));
+            }
+            queue.push(QueuedWithdrawal {
+                l2_table_entries: entries.l2_table_entries,
+                l1_deferred_entries: entries.l1_deferred_entries,
+                user: entries.user,
+                amount: entries.amount,
+                raw_l2_tx: params.raw_l2_tx.clone(),
+                trigger_source: None,
+                trigger_calldata: Bytes::new(),
+                trigger_value: U256::ZERO,
+                extra_triggers: vec![],
+            });
+        }
+
+        Ok(call_id)
+    }
+
+    fn build_execution_table(
+        &self,
+        params: BuildExecutionTableParams,
+    ) -> RpcResult<BuildExecutionTableResult> {
+        use crate::table_builder::{
+            L1DetectedCall, analyze_continuation_calls, build_continuation_entries,
+        };
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        if self.config.rollups_address.is_zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "ROLLUPS_ADDRESS not configured — cross-chain mode disabled",
+                None::<()>,
+            ));
+        }
+
+        if params.calls.len() < 2 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "buildExecutionTable requires at least 2 calls (use initiateCrossChainCall for single calls)",
+                None::<()>,
+            ));
+        }
+
+        let rollup_id = U256::from(self.config.rollup_id);
+
+        // Convert RPC params to L1DetectedCall structs
+        let l1_calls: Vec<L1DetectedCall> = params
+            .calls
+            .iter()
+            .map(|c| L1DetectedCall {
+                destination: c.destination,
+                data: c.data.to_vec(),
+                value: c.value,
+                source_address: c.source_address,
+                l2_return_data: c.l2_return_data.to_vec(),
+                call_success: c.call_success,
+            })
+            .collect();
+
+        // Analyze calls to discover continuation patterns and child L2→L1 calls
+        let detected_calls = analyze_continuation_calls(
+            &l1_calls,
+            self.config.rollup_id,
+            self.config.bridge_l2_address,
+            self.config.bridge_l1_address,
+        );
+
+        if detected_calls.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "no continuation pattern detected — use initiateCrossChainCall instead",
+                None::<()>,
+            ));
+        }
+
+        // Build continuation entries using the table builder
+        let continuation = build_continuation_entries(&detected_calls, rollup_id);
+
+        if continuation.l2_entries.is_empty() || continuation.l1_entries.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "table builder produced no entries",
+                None::<()>,
+            ));
+        }
+
+        let l2_count = continuation.l2_entries.len();
+        let l1_count = continuation.l1_entries.len();
+
+        // The primary CALL+RESULT pair is the first L1→L2 call (CALL_A).
+        // Build it using the existing build_cross_chain_call_entries for compatibility.
+        let first_call = &params.calls[0];
+
+        // Use L2 return data from the L1 proxy's simulation when available.
+        // Fall back to local EVM simulation (legacy path).
+        let (call_success, return_data) = if !first_call.l2_return_data.is_empty()
+            || !first_call.call_success
+        {
+            (first_call.call_success, first_call.l2_return_data.to_vec())
+        } else {
+            crate::execution_planner::simulate_call(
+                &self.provider,
+                &self.evm_config,
+                first_call.destination,
+                first_call.data.to_vec(),
+            )
+            .unwrap_or_else(|_| {
+                // Simulation may fail (e.g., proxy doesn't exist yet).
+                // For multi-call continuations, receiveTokens returns void anyway.
+                (true, vec![])
+            })
+        };
+
+        let (call_entry, result_entry) = crate::cross_chain::build_cross_chain_call_entries(
+            rollup_id,
+            first_call.destination,
+            first_call.data.to_vec(),
+            first_call.value,
+            first_call.source_address,
+            U256::ZERO, // source_rollup = MAINNET
+            call_success,
+            return_data,
+        );
+
+        let call_id = call_entry.action_hash;
+
+        tracing::info!(
+            target: "based_rollup::rpc",
+            call_count = params.calls.len(),
+            l2_entries = l2_count,
+            l1_entries = l1_count,
+            %call_id,
+            "built execution table for continuation pattern"
+        );
+
+        // Queue as a single atomic unit with extra_l2_entries and l1_entries
+        {
+            let mut queue = self
+                .queued_cross_chain_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if queue.len() >= 500 {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    "cross-chain call queue full",
+                    None::<()>,
+                ));
+            }
+            queue.push(QueuedCrossChainCall {
+                call_entry,
+                result_entry,
+                effective_gas_price: params.gas_price,
+                raw_l1_tx: params.raw_l1_tx.clone(),
+                extra_l2_entries: continuation.l2_entries,
+                l1_entries: continuation.l1_entries,
+            });
+        }
+
+        Ok(BuildExecutionTableResult {
+            l2_entry_count: l2_count,
+            l1_entry_count: l1_count,
+            call_id,
+        })
+    }
+
+    fn build_l2_to_l1_execution_table(
+        &self,
+        params: BuildL2ToL1ExecutionTableParams,
+    ) -> RpcResult<BuildExecutionTableResult> {
+        use crate::table_builder::{
+            L2DetectedCall, L2ReturnCall, analyze_l2_to_l1_continuation_calls,
+            build_l2_to_l1_continuation_entries,
+        };
+        use jsonrpsee::types::ErrorObjectOwned;
+
+        if self.config.rollups_address.is_zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "ROLLUPS_ADDRESS not configured — cross-chain mode disabled",
+                None::<()>,
+            ));
+        }
+
+        if params.l2_calls.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "buildL2ToL1ExecutionTable requires at least one L2→L1 call",
+                None::<()>,
+            ));
+        }
+
+        let rollup_id = U256::from(self.config.rollup_id);
+
+        // Convert RPC params to table_builder types.
+        let l2_calls: Vec<L2DetectedCall> = params
+            .l2_calls
+            .iter()
+            .map(|c| L2DetectedCall {
+                destination: c.destination,
+                data: c.data.to_vec(),
+                value: c.value,
+                source_address: c.source_address,
+                delivery_return_data: c.delivery_return_data.to_vec(),
+                delivery_failed: c.delivery_failed,
+            })
+            .collect();
+
+        let return_calls: Vec<L2ReturnCall> = params
+            .return_calls
+            .iter()
+            .map(|c| L2ReturnCall {
+                destination: c.destination,
+                data: c.data.to_vec(),
+                value: c.value,
+                source_address: c.source_address,
+                parent_call_index: c.parent_call_index,
+                l2_return_data: c.l2_return_data.as_ref().map(|b| b.to_vec()).unwrap_or_default(),
+                l2_delivery_failed: c.l2_delivery_failed,
+            })
+            .collect();
+
+        // Analyze calls to discover the continuation structure.
+        let detected = analyze_l2_to_l1_continuation_calls(
+            &l2_calls,
+            &return_calls,
+            self.config.rollup_id,
+            self.config.bridge_l2_address,
+            self.config.bridge_l1_address,
+        );
+
+        if detected.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "no L2→L1 continuation pattern detected",
+                None::<()>,
+            ));
+        }
+
+        for (i, dc) in detected.iter().enumerate() {
+            let action_hash = crate::table_builder::compute_action_hash(&dc.call_action);
+            tracing::info!(
+                target: "based_rollup::rpc",
+                idx = i,
+                direction = ?dc.direction,
+                is_continuation = dc.is_continuation,
+                parent = ?dc.parent_call_index,
+                action_hash = %action_hash,
+                destination = %dc.call_action.destination,
+                source = %dc.call_action.source_address,
+                data_len = dc.call_action.data.len(),
+                "analyzed L2->L1 continuation call"
+            );
+        }
+
+        // Build the 3-entry L1 structure and L2 table entries.
+        let continuation =
+            build_l2_to_l1_continuation_entries(&detected, rollup_id, self.config.builder_address);
+
+        let l2_count = continuation.l2_entries.len();
+        let l1_count = continuation.l1_entries.len();
+
+        for (i, e) in continuation.l2_entries.iter().enumerate() {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                idx = i,
+                action_hash = %e.action_hash,
+                next_action_type = ?e.next_action.action_type,
+                next_action_dest = %e.next_action.destination,
+                "L2->L1 continuation: L2 table entry"
+            );
+        }
+        for (i, e) in continuation.l1_entries.iter().enumerate() {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                idx = i,
+                action_hash = %e.action_hash,
+                next_action_type = ?e.next_action.action_type,
+                next_action_dest = %e.next_action.destination,
+                next_action_data_len = e.next_action.data.len(),
+                "L2->L1 continuation: L1 deferred entry"
+            );
+        }
+
+        if continuation.l2_entries.is_empty() || continuation.l1_entries.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "L2→L1 table builder produced no entries",
+                None::<()>,
+            ));
+        }
+
+        // Use the first L2→L1 call's action hash as the tracking ID.
+        let call_id = continuation.l2_entries[0].action_hash;
+
+        tracing::info!(
+            target: "based_rollup::rpc",
+            l2_calls = params.l2_calls.len(),
+            return_calls_count = params.return_calls.len(),
+            l2_entries = l2_count,
+            l1_entries = l1_count,
+            %call_id,
+            "built L2→L1 execution table for reverse multi-call continuation"
+        );
+
+        // Queue as a QueuedWithdrawal with L2 table entries and L1 deferred entries.
+        // The L1 deferred entries go to pending_withdrawal_l1_entries in the driver,
+        // which handles them via the trigger flow (postBatch + createProxy + trigger).
+        {
+            let mut queue = self
+                .queued_withdrawals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if queue.len() >= 100 {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    "L2→L1 queue full",
+                    None::<()>,
+                ));
+            }
+            // For multi-call L2→L1 patterns, the trigger must call the L1 proxy
+            // for the first L2→L1 call's source_address with its calldata/value.
+            // This produces the correct action hash matching L1 deferred Entry 0.
+            let first_call = &params.l2_calls[0];
+            queue.push(QueuedWithdrawal {
+                l2_table_entries: continuation.l2_entries,
+                l1_deferred_entries: continuation.l1_entries,
+                user: first_call.source_address,
+                amount: params
+                    .l2_calls
+                    .iter()
+                    .map(|c| c.value)
+                    .fold(U256::ZERO, |a, b| a + b),
+                raw_l2_tx: params.raw_l2_tx.clone(),
+                trigger_source: Some(first_call.source_address),
+                trigger_calldata: first_call.data.clone(),
+                trigger_value: first_call.value,
+                // Extra triggers for subsequent L2→L1 calls (2nd, 3rd, etc.).
+                // The first trigger handles call[0]; extras handle call[1..].
+                extra_triggers: params
+                    .l2_calls
+                    .iter()
+                    .skip(1)
+                    .map(|c| (c.source_address, c.data.clone(), c.value))
+                    .collect(),
+            });
+        }
+
+        {
+            let trigger_source = params.l2_calls[0].source_address;
+            let trigger_calldata_len = params.l2_calls[0].data.len();
+            let extra_count = params.l2_calls.len().saturating_sub(1);
+            tracing::info!(
+                target: "based_rollup::rpc",
+                trigger_source = %trigger_source,
+                trigger_calldata_len,
+                extra_trigger_count = extra_count,
+                "queued L2->L1 multi-call withdrawal with triggers"
+            );
+            for (i, c) in params.l2_calls.iter().skip(1).enumerate() {
+                tracing::info!(
+                    target: "based_rollup::rpc",
+                    idx = i,
+                    source = %c.source_address,
+                    calldata_len = c.data.len(),
+                    calldata_prefix = %format!("0x{}", hex::encode(&c.data[..c.data.len().min(8)])),
+                    value = %c.value,
+                    "extra trigger"
+                );
+            }
+        }
+
+        Ok(BuildExecutionTableResult {
+            l2_entry_count: l2_count,
+            l1_entry_count: l1_count,
+            call_id,
+        })
+    }
+}
+
+// ──────────────────────────────────────────────
+//  Helpers
+// ──────────────────────────────────────────────
+
+/// Compute the action hash matching the Solidity `keccak256(abi.encode(action))`.
+///
+/// Returns an error if `action_type` is not one of the known variants:
+/// CALL, RESULT, L2TX, REVERT, REVERT_CONTINUE.
+pub fn compute_action_hash_from_params(params: &ActionParams) -> Result<B256, String> {
+    let action_type = match params.action_type.to_uppercase().as_str() {
+        "CALL" => ICrossChainManagerL2::ActionType::CALL,
+        "RESULT" => ICrossChainManagerL2::ActionType::RESULT,
+        "L2TX" => ICrossChainManagerL2::ActionType::L2TX,
+        "REVERT" => ICrossChainManagerL2::ActionType::REVERT,
+        "REVERT_CONTINUE" => ICrossChainManagerL2::ActionType::REVERT_CONTINUE,
+        other => {
+            return Err(format!(
+                "unknown action type '{other}': expected one of CALL, RESULT, L2TX, REVERT, REVERT_CONTINUE"
+            ));
+        }
+    };
+
+    let sol_action = ICrossChainManagerL2::Action {
+        actionType: action_type,
+        rollupId: params.rollup_id,
+        destination: params.destination,
+        value: params.value,
+        data: params.data.clone(),
+        failed: params.failed,
+        sourceAddress: params.source_address,
+        sourceRollup: params.source_rollup,
+        scope: params.scope.clone(),
+    };
+
+    Ok(keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &sol_action,
+    )))
+}
+
+/// Convert a [`CrossChainExecutionEntry`] to the serializable RPC type.
+pub fn entry_to_serializable(entry: &CrossChainExecutionEntry) -> SerializableExecutionEntry {
+    SerializableExecutionEntry {
+        state_deltas: entry
+            .state_deltas
+            .iter()
+            .map(|d| SerializableStateDelta {
+                rollup_id: d.rollup_id,
+                current_state: d.current_state,
+                new_state: d.new_state,
+                ether_delta: d.ether_delta,
+            })
+            .collect(),
+        action_hash: entry.action_hash,
+        next_action: action_to_serializable(&entry.next_action),
+    }
+}
+
+fn action_to_serializable(action: &CrossChainAction) -> SerializableAction {
+    SerializableAction {
+        action_type: match action.action_type {
+            CrossChainActionType::Call => "CALL".to_string(),
+            CrossChainActionType::Result => "RESULT".to_string(),
+            CrossChainActionType::L2Tx => "L2TX".to_string(),
+            CrossChainActionType::Revert => "REVERT".to_string(),
+            CrossChainActionType::RevertContinue => "REVERT_CONTINUE".to_string(),
+        },
+        rollup_id: action.rollup_id,
+        destination: action.destination,
+        value: action.value,
+        data: Bytes::from(action.data.clone()),
+        failed: action.failed,
+        source_address: action.source_address,
+        source_rollup: action.source_rollup,
+        scope: action.scope.clone(),
+    }
+}
+
+#[cfg(test)]
+#[path = "rpc_tests.rs"]
+mod tests;

@@ -1,0 +1,563 @@
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   BlockFlowDiagram — Premium L1 + L2 flow visualization
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/* ── Outer wrapper ── */
+
+.wrap {
+  margin-bottom: var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-raised);
+  padding: var(--sp-5) var(--sp-6);
+  overflow-x: auto;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.24),
+    0 4px 16px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  animation: diagramFadeIn 0.4s ease-out both;
+}
+
+@keyframes diagramFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ══════════════════════════════════
+   Shared lane styles
+   ══════════════════════════════════ */
+
+.l1Lane,
+.l2Lane {
+  position: relative;
+  border-radius: 12px;
+  padding: 20px 24px;
+  transition: border-color 0.3s var(--ease);
+}
+
+/* ══════════════════════════════════
+   L1 lane
+   ══════════════════════════════════ */
+
+.l1Lane {
+  border: 1px solid rgba(99, 102, 241, 0.12);
+  background:
+    linear-gradient(135deg, rgba(99, 102, 241, 0.04) 0%, rgba(99, 102, 241, 0.01) 100%);
+  box-shadow:
+    0 0 0 1px rgba(99, 102, 241, 0.06),
+    0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.l1Lane:hover {
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+.l1LaneLabel {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 800;
+  color: rgba(99, 102, 241, 0.3);
+  letter-spacing: 0.12em;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+.l1BlockInfo {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--accent-light);
+  font-weight: 600;
+  margin-bottom: 12px;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
+/* ── L1 flow: 3-column grid with center chip on axis ── */
+
+.l1FlowGrid {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: flex-start;
+  animation: flowSlideIn 0.5s ease-out both;
+}
+
+.l1FlowLeft {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+}
+
+.l1FlowCenter {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.l1FlowRight {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+@keyframes flowSlideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.l1FlowConnector {
+  height: 2px;
+  width: 28px;
+  flex-shrink: 0;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.45), rgba(99, 102, 241, 0.15));
+  align-self: flex-start;
+  margin-top: 18px;
+  border-radius: 1px;
+}
+
+/* L1 chips */
+
+.l1Chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 16px;
+  white-space: nowrap;
+  transition:
+    background 0.2s var(--ease),
+    border-color 0.2s var(--ease),
+    box-shadow 0.2s var(--ease),
+    transform 0.15s var(--ease);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.l1Chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+}
+
+.l1ChipActive {
+  color: var(--accent-light);
+  background: linear-gradient(145deg, rgba(99, 102, 241, 0.08), rgba(99, 102, 241, 0.03));
+  border-color: rgba(99, 102, 241, 0.28);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    0 0 12px rgba(99, 102, 241, 0.06);
+}
+
+.l1ChipActive:hover {
+  border-color: rgba(99, 102, 241, 0.4);
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.2),
+    0 0 16px rgba(99, 102, 241, 0.1);
+}
+
+.l1ChipLabel {
+  font-weight: 700;
+  font-size: 9.5px;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+
+.l1ChipActive .l1ChipLabel {
+  color: var(--accent-light);
+}
+
+.l1ChipSub {
+  font-size: 7.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+}
+
+/* Cross-chain separator */
+
+.l1CcSeparator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 0 32px;
+}
+
+.l1CcSepLine {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.2), transparent);
+}
+
+.l1CcSepLabel {
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 600;
+  color: rgba(99, 102, 241, 0.4);
+  white-space: nowrap;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ══════════════════════════════════
+   L2 section
+   ══════════════════════════════════ */
+
+.l2Section {
+  margin-top: 4px;
+}
+
+/* Derivation connector */
+
+.deriveConnector {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0;
+  padding: 0 32px;
+}
+
+.deriveLine {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(52, 211, 153, 0.3), transparent);
+}
+
+.deriveLabel {
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 600;
+  color: rgba(52, 211, 153, 0.5);
+  white-space: nowrap;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* L2 lane container */
+
+.l2Lane {
+  border: 1px solid rgba(52, 211, 153, 0.12);
+  background:
+    linear-gradient(135deg, rgba(52, 211, 153, 0.04) 0%, rgba(52, 211, 153, 0.01) 100%);
+  box-shadow:
+    0 0 0 1px rgba(52, 211, 153, 0.06),
+    0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.l2Lane:hover {
+  border-color: rgba(52, 211, 153, 0.2);
+}
+
+.l2LaneLabel {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 800;
+  color: rgba(52, 211, 153, 0.3);
+  letter-spacing: 0.12em;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+.l2BlockInfo {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--green);
+  font-weight: 600;
+  margin-bottom: 12px;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
+.l2Loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  font-style: italic;
+  margin-bottom: 8px;
+}
+
+.l2Spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border-bright);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.l2SpinnerTiny {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--border-bright);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
+/* ── L2 flow: horizontal sequence of items ── */
+
+.l2Flow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  animation: flowSlideIn 0.5s ease-out 0.15s both;
+}
+
+/* Horizontal connector between flow items */
+.l2FlowConnector {
+  height: 2px;
+  width: 28px;
+  flex-shrink: 0;
+  background: linear-gradient(90deg, rgba(52, 211, 153, 0.15), rgba(52, 211, 153, 0.45), rgba(52, 211, 153, 0.15));
+  align-self: flex-start;
+  margin-top: 16px;
+  border-radius: 1px;
+}
+
+/* L2 chips */
+
+.l2Chip {
+  display: flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--green);
+  background: linear-gradient(145deg, rgba(52, 211, 153, 0.08), rgba(52, 211, 153, 0.03));
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  border-radius: 8px;
+  padding: 7px 16px;
+  white-space: nowrap;
+  transition:
+    background 0.2s var(--ease),
+    border-color 0.2s var(--ease),
+    box-shadow 0.2s var(--ease),
+    transform 0.15s var(--ease);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    0 0 10px rgba(52, 211, 153, 0.04);
+}
+
+.l2Chip:hover {
+  transform: translateY(-1px);
+  border-color: rgba(52, 211, 153, 0.4);
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.2),
+    0 0 14px rgba(52, 211, 153, 0.08);
+}
+
+.l2ChipUser {
+  color: var(--text);
+  background: var(--bg-card);
+  border-color: var(--border-bright);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.l2ChipUser:hover {
+  border-color: var(--border-hover);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+}
+
+.l2ChipLabel {
+  letter-spacing: 0.01em;
+}
+
+/* ── Trace group — wraps a full tx call tree ── */
+
+.traceGroup {
+  border: 1px solid rgba(52, 211, 153, 0.12);
+  border-radius: 10px;
+  background: linear-gradient(145deg, rgba(52, 211, 153, 0.03), rgba(52, 211, 153, 0.005));
+  padding: 10px 12px;
+  box-shadow:
+    0 1px 4px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(52, 211, 153, 0.03);
+  transition: border-color 0.2s var(--ease);
+}
+
+.traceGroup:hover {
+  border-color: rgba(52, 211, 153, 0.22);
+}
+
+/* ── Cascade trace blocks ── */
+
+.traceLevel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+/* Vertical connector from parent to child within cascade */
+.traceConnector {
+  width: 2px;
+  height: 8px;
+  background: linear-gradient(180deg, rgba(52, 211, 153, 0.5), rgba(52, 211, 153, 0.2));
+  flex-shrink: 0;
+  margin-left: 16px;
+  border-radius: 1px;
+}
+
+/* The card for each call */
+.traceBlock {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 12px;
+  min-width: 100px;
+  width: fit-content;
+  transition:
+    border-color 0.2s var(--ease),
+    box-shadow 0.2s var(--ease),
+    transform 0.15s var(--ease);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.traceBlock:hover {
+  border-color: var(--border-hover);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  transform: translateY(-0.5px);
+}
+
+.traceBlockRoot {
+  border-color: rgba(52, 211, 153, 0.3);
+  background: linear-gradient(145deg, rgba(52, 211, 153, 0.05), rgba(52, 211, 153, 0.015));
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.1),
+    0 0 8px rgba(52, 211, 153, 0.04);
+}
+
+.traceBlockRoot:hover {
+  border-color: rgba(52, 211, 153, 0.45);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.18),
+    0 0 12px rgba(52, 211, 153, 0.08);
+}
+
+.traceBlockHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.traceCallType {
+  font-family: var(--mono);
+  font-size: 7px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+}
+
+.traceCallTypeRoot {
+  color: var(--green);
+  border-color: rgba(52, 211, 153, 0.25);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.traceBlockFn {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text-bright);
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.traceBlockAddrs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 2px;
+}
+
+.traceAddr {
+  font-family: var(--mono);
+  font-size: 7.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.traceAddrArrow {
+  font-size: 8px;
+  color: rgba(52, 211, 153, 0.5);
+  margin: 0 1px;
+}
+
+/* Children container — indented to show nesting */
+.traceChildren {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 2px;
+  padding-left: 24px;
+}
+
+/* Empty state */
+.l2Empty {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 8px 0;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 600px) {
+  .wrap {
+    padding: var(--sp-3);
+    border-radius: 10px;
+  }
+
+  .l1Lane,
+  .l2Lane {
+    padding: 14px 16px;
+  }
+
+  .l1CcSeparator,
+  .deriveConnector {
+    padding: 0 16px;
+  }
+
+  .traceBlockAddrs {
+    display: none;
+  }
+
+  .l1Chip,
+  .l2Chip {
+    padding: 6px 10px;
+    font-size: 8px;
+  }
+
+  .l1FlowConnector,
+  .l2FlowConnector {
+    width: 16px;
+  }
+}

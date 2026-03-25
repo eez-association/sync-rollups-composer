@@ -1,0 +1,104 @@
+[package]
+name = "based-rollup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "based-rollup"
+path = "src/main.rs"
+
+[dependencies]
+# Reth
+reth.workspace = true
+reth-node-builder.workspace = true
+reth-node-api.workspace = true
+reth-node-ethereum.workspace = true
+reth-consensus.workspace = true
+reth-execution-types.workspace = true
+reth-primitives-traits.workspace = true
+reth-payload-builder.workspace = true
+reth-payload-primitives.workspace = true
+reth-engine-primitives.workspace = true
+reth-ethereum-engine-primitives.workspace = true
+reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
+reth-chainspec.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-ethereum-forks.workspace = true
+reth-provider.workspace = true
+reth-revm.workspace = true
+reth-stages-types.workspace = true
+reth-transaction-pool.workspace = true
+
+# Alloy EVM
+alloy-evm.workspace = true
+
+# Revm
+revm.workspace = true
+
+# Alloy
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-sol-types.workspace = true
+alloy-provider.workspace = true
+alloy-rpc-types.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-network.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
+
+# Genesis / trie (for genesis-state-root subcommand)
+alloy-genesis.workspace = true
+alloy-trie.workspace = true
+
+# RLP encoding
+alloy-rlp.workspace = true
+
+# JSON-RPC
+jsonrpsee.workspace = true
+
+# HTTP (for RPC proxy)
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+reqwest.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Hex encoding
+hex = "0.4"
+
+# Error handling
+eyre.workspace = true
+
+[features]
+test-utils = []
+
+[dev-dependencies]
+based-rollup = { path = ".", features = ["test-utils"] }
+alloy-eips.workspace = true
+alloy-signer.workspace = true
+reth-evm = { workspace = true, features = ["test-utils"] }
+reth-provider = { workspace = true, features = ["test-utils"] }
+serde_json.workspace = true
+hex = "0.4"
+criterion = "0.5"
+proptest = "1"
+
+[[bench]]
+name = "throughput"
+harness = false

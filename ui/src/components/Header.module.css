@@ -1,0 +1,669 @@
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Header — sticky nav bar with chain selector + wallet dropdown
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+.header {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--sp-6);
+  height: 54px;
+  background: var(--header-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  gap: var(--sp-3);
+}
+
+/* ── Left side ── */
+
+.left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+.logo {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.logoIcon {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
+.sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* ── Desktop navigation ── */
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.navLink {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: color var(--duration) var(--ease),
+              background var(--duration) var(--ease);
+}
+
+.navLink:hover {
+  color: var(--text);
+  background: var(--overlay-light);
+}
+
+.navActive {
+  color: var(--text-bright);
+  background: var(--accent-dim);
+}
+
+/* ── Center: health strip (fills space between nav and controls) ── */
+
+.center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  justify-content: center;
+}
+
+/* ── Right side ── */
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-shrink: 0;
+}
+
+/* ── Chain switcher pills ── */
+
+.chainSwitcher {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.chainBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color var(--duration) var(--ease),
+    background var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+}
+
+.chainBtn:hover {
+  color: var(--text);
+  background: var(--overlay-light);
+}
+
+.chainBtnDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: background var(--duration) var(--ease),
+              box-shadow var(--duration) var(--ease);
+  flex-shrink: 0;
+}
+
+.chainBal {
+  font-weight: 500;
+  font-size: 9px;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.chainBalShort {
+  display: none;
+  font-weight: 500;
+  font-size: 9px;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* L1 active: indigo */
+.chainBtnL1Active {
+  color: #818cf8;
+  background: rgba(129, 140, 248, 0.10);
+}
+
+.chainBtnL1Active .chainBtnDot {
+  background: #818cf8;
+  box-shadow: 0 0 6px rgba(129, 140, 248, 0.6);
+}
+
+/* L2 active: emerald */
+.chainBtnL2Active {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.10);
+}
+
+.chainBtnL2Active .chainBtnDot {
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+}
+
+/* ── Wallet area (pill + dropdown wrapper) ── */
+
+.walletArea {
+  position: relative;
+}
+
+/* ── Wallet trigger pill ── */
+
+.walletPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color var(--duration) var(--ease),
+    background var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+}
+
+.walletPill:hover {
+  border-color: var(--border-bright);
+  background: var(--bg-card-hover);
+}
+
+.walletPillDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
+  flex-shrink: 0;
+}
+
+.walletPillChevron {
+  transition: transform var(--duration) var(--ease);
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+.walletPillChevronOpen {
+  transform: rotate(180deg);
+}
+
+/* ── Dropdown panel ── */
+
+.dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 260px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.35),
+    0 2px 8px rgba(0, 0, 0, 0.20);
+  animation: fadeSlideUp 0.15s ease-out both;
+  z-index: 300;
+  overflow: hidden;
+}
+
+.ddHeader {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ddAddr {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+  text-decoration: none;
+  transition: color var(--duration) var(--ease);
+}
+
+.ddAddr:hover {
+  color: var(--accent-light);
+}
+
+/* ── Dropdown sections ── */
+
+.ddSection {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ddSection:last-child {
+  border-bottom: none;
+}
+
+/* ── Balance rows ── */
+
+.ddBalanceRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.ddBalanceLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.ddDotL1 {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #818cf8;
+  box-shadow: 0 0 4px rgba(129, 140, 248, 0.4);
+  flex-shrink: 0;
+}
+
+.ddDotL2 {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 4px rgba(52, 211, 153, 0.4);
+  flex-shrink: 0;
+}
+
+.ddBalanceValue {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Action rows (theme, disconnect) ── */
+
+.ddRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background var(--duration) var(--ease),
+    color var(--duration) var(--ease);
+}
+
+.ddRow:hover {
+  background: var(--overlay-light);
+}
+
+.ddRowDanger {
+  color: var(--red);
+}
+
+.ddRowDanger:hover {
+  background: rgba(248, 113, 113, 0.08);
+}
+
+/* ── Theme toggle (removed from bar, now in dropdown) ── */
+
+.themeToggle {
+  color: var(--text-dim);
+  transition: color var(--duration) var(--ease);
+}
+
+.themeToggle:hover {
+  color: var(--yellow);
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Hamburger button — mobile only
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+.hamburger {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 36px;
+  height: 36px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  padding: 8px;
+  transition:
+    border-color var(--duration) var(--ease),
+    background var(--duration) var(--ease);
+  flex-shrink: 0;
+}
+
+.hamburger:hover {
+  border-color: var(--border-bright);
+  background: var(--overlay-light);
+}
+
+.hamburgerBar {
+  display: block;
+  width: 16px;
+  height: 1.5px;
+  background: var(--text-dim);
+  border-radius: 2px;
+  transition:
+    transform var(--duration-slow) var(--ease),
+    opacity var(--duration) var(--ease);
+  transform-origin: center;
+}
+
+.hamburgerOpen .hamburgerBar:nth-child(1) {
+  transform: translateY(5.5px) rotate(45deg);
+}
+
+.hamburgerOpen .hamburgerBar:nth-child(2) {
+  opacity: 0;
+  transform: scaleX(0);
+}
+
+.hamburgerOpen .hamburgerBar:nth-child(3) {
+  transform: translateY(-5.5px) rotate(-45deg);
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Mobile overlay menu
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+.mobileMenu {
+  position: fixed;
+  inset: 54px 0 0 0;
+  z-index: 190;
+  display: none;
+  animation: slideDown var(--duration-slow) var(--ease) both;
+}
+
+.mobileBackdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.mobileMenuInner {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  animation: slideDown var(--duration-slow) var(--ease) both;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.35),
+    0 2px 8px rgba(0, 0, 0, 0.20);
+}
+
+.mobileSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.mobileSectionLabel {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.5;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mobileNavItem {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  background: none;
+  border: none;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  text-align: left;
+  transition: color var(--duration) var(--ease),
+              background var(--duration) var(--ease);
+}
+
+.mobileNavItem:hover {
+  color: var(--text-bright);
+  background: var(--overlay-light);
+}
+
+.mobileNavActive {
+  color: var(--accent-light);
+  background: var(--accent-dim);
+  font-weight: 600;
+}
+
+.mobileChainRow {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.mobileChainBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+
+.mobileChainBtnL1:hover {
+  border-color: rgba(129, 140, 248, 0.35);
+  color: #818cf8;
+}
+
+.mobileChainBtnL2:hover {
+  border-color: rgba(52, 211, 153, 0.35);
+  color: #34d399;
+}
+
+/* Active L1 */
+.mobileChainBtnL1.mobileChainActive {
+  border-color: rgba(129, 140, 248, 0.4);
+  background: rgba(129, 140, 248, 0.08);
+  color: #818cf8;
+}
+
+.mobileChainBtnL1.mobileChainActive .chainBtnDot {
+  background: #818cf8;
+  box-shadow: 0 0 6px rgba(129, 140, 248, 0.5);
+}
+
+/* Active L2 */
+.mobileChainBtnL2.mobileChainActive {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: rgba(52, 211, 153, 0.08);
+  color: #34d399;
+}
+
+.mobileChainBtnL2.mobileChainActive .chainBtnDot {
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
+}
+
+/* Mobile wallet section */
+
+.mobileWallet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.mobileWalletRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.mobileThemeBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 12px;
+  color: var(--text-dim);
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.mobileCommit {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  opacity: 0.4;
+  text-align: right;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Responsive breakpoints
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+@media (max-width: 768px) {
+  .header {
+    flex-wrap: wrap;
+    height: auto;
+    padding: var(--sp-2) var(--sp-4);
+    gap: var(--sp-2);
+  }
+
+  /* Row 1: logo + chain selector + hamburger */
+  .left {
+    gap: var(--sp-2);
+    flex: 0 0 auto;
+  }
+
+  /* Hide nav links and separators — keep logo */
+  .nav,
+  .walletArea,
+  .sep {
+    display: none;
+  }
+
+  /* Chain selector stays visible on mobile (inside .right) */
+  .chainSwitcher {
+    display: flex;
+  }
+
+  .right {
+    margin-left: auto;
+    gap: var(--sp-2);
+  }
+
+  /* Row 2: health bar full width */
+  .center {
+    order: 3;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding: var(--sp-2) 0 0;
+    border-top: 1px solid var(--border);
+    gap: 6px 10px;
+    font-size: 10px;
+  }
+
+  /* Balance: show short (2 decimals), hide full */
+  .chainBal {
+    display: none;
+  }
+
+  .chainBalShort {
+    display: inline;
+  }
+
+  .hamburger {
+    display: flex;
+  }
+
+  .mobileMenu {
+    display: block;
+  }
+}

@@ -1,0 +1,72 @@
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  font-size: 0.65rem;
+}
+.field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.inputGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.label {
+  font-size: 0.45rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.input {
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text);
+  font-size: 0.6rem;
+  font-family: var(--mono);
+  outline: none;
+}
+.input:disabled {
+  background: var(--bg-card);
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dotConnected {
+  background: var(--green);
+  box-shadow: 0 0 4px var(--green);
+}
+.dotDisconnected {
+  background: var(--text-dim);
+  box-shadow: 0 0 4px var(--text-dim);
+}
+.connectBtn {
+  padding: 4px 12px;
+  border-radius: 5px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: var(--mono);
+  transition: all 0.15s;
+}
+.connectBtnActive {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.connectBtnDisconnect {
+  border: 1px solid var(--red);
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--red);
+}

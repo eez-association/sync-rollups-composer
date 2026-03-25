@@ -1,0 +1,302 @@
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   NodeHealth — unified status bar
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px var(--sp-6);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-x: auto;
+  white-space: nowrap;
+  border-top: 1px solid var(--border);
+}
+
+/* ── Separators ── */
+
+.sep {
+  width: 1px;
+  height: 16px;
+  background: linear-gradient(180deg, transparent, var(--border), transparent);
+  flex-shrink: 0;
+}
+
+/* ── Status indicators ── */
+
+.statusGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.statusText {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: all 0.3s ease;
+}
+
+.dot.ok {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+}
+
+.dot.err {
+  background: var(--red);
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.6);
+  animation: pulseGlow 1.5s ease-in-out infinite;
+}
+
+.dot.warn {
+  background: var(--yellow);
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.5);
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+/* ── Chain groups ── */
+
+.chainGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.chainPill {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.pillL1 {
+  background: linear-gradient(135deg, rgba(129, 140, 248, 0.15), rgba(129, 140, 248, 0.08));
+  color: #818cf8;
+  border: 1px solid rgba(129, 140, 248, 0.25);
+}
+
+.pillL1:hover {
+  background: linear-gradient(135deg, rgba(129, 140, 248, 0.25), rgba(129, 140, 248, 0.15));
+  border-color: rgba(129, 140, 248, 0.4);
+  box-shadow: 0 0 10px rgba(129, 140, 248, 0.15);
+}
+
+.pillL2 {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.15), rgba(52, 211, 153, 0.08));
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.25);
+}
+
+.pillL2:hover {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.25), rgba(52, 211, 153, 0.15));
+  border-color: rgba(52, 211, 153, 0.4);
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.15);
+}
+
+/* Block number — primary data, clickable link */
+
+.blockLink {
+  color: var(--text-bright);
+  font-weight: 700;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.blockLink:hover {
+  color: var(--accent-light);
+}
+
+/* L1 block number — indigo tint */
+.chainGroup[data-chain="l1"] .blockLink {
+  color: rgba(129, 140, 248, 0.9);
+}
+
+.chainGroup[data-chain="l1"] .blockLink:hover {
+  color: #818cf8;
+}
+
+/* L2 block number — emerald tint */
+.chainGroup[data-chain="l2"] .blockLink {
+  color: rgba(52, 211, 153, 0.9);
+}
+
+.chainGroup[data-chain="l2"] .blockLink:hover {
+  color: #34d399;
+}
+
+.blockNum {
+  color: var(--text);
+  font-weight: 700;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Meta info (tx count, gas) */
+
+.meta {
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.65;
+}
+
+/* L1 meta — subtle indigo */
+.chainGroup[data-chain="l1"] .meta {
+  color: rgba(129, 140, 248, 0.55);
+  opacity: 1;
+}
+
+/* L2 meta — subtle emerald */
+.chainGroup[data-chain="l2"] .meta {
+  color: rgba(52, 211, 153, 0.65);
+  opacity: 1;
+}
+
+.gas {}
+
+.age {
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.45;
+}
+
+/* L1 age — subtle indigo */
+.chainGroup[data-chain="l1"] .age {
+  color: rgba(129, 140, 248, 0.35);
+  opacity: 1;
+}
+
+/* L2 age — subtle emerald */
+.chainGroup[data-chain="l2"] .age {
+  color: rgba(52, 211, 153, 0.4);
+  opacity: 1;
+}
+
+/* ── Right cluster ── */
+
+.rightCluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Sync badge */
+
+.syncBadge {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 100px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.synced {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.12), rgba(52, 211, 153, 0.06));
+  color: var(--green);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+}
+
+.syncing {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(251, 191, 36, 0.06));
+  color: var(--yellow);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+/* Alert badges */
+
+.alertBadge {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--yellow);
+  padding: 1px 6px;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.15);
+  border-radius: 4px;
+}
+
+.rewindBadge {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--red);
+  padding: 1px 6px;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.15);
+  border-radius: 4px;
+}
+
+/* Sync dot — mobile replacement for syncBadge */
+
+.syncDot {
+  display: none;  /* hidden on desktop, shown on mobile */
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.syncDotOk {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+}
+
+.syncDotWarn {
+  background: var(--yellow);
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.5);
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+/* Commit hash */
+
+.commit {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  opacity: 0.4;
+  letter-spacing: 0.02em;
+}
+
+/* ── Responsive (health bar is inside Header .center) ── */
+
+@media (max-width: 768px) {
+  .syncBadge {
+    display: none;
+  }
+
+  .syncDot {
+    display: block;
+  }
+
+  .commit,
+  .gas {
+    display: none;
+  }
+
+  /* Health dot hidden — syncDot replaces it */
+  .dot {
+    display: none;
+  }
+
+  .alertBadge,
+  .rewindBadge {
+    font-size: 8px;
+    padding: 1px 4px;
+  }
+}

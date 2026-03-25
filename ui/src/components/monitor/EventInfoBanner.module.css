@@ -1,0 +1,32 @@
+.banner {
+  text-align: center;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+.step {
+  font-size: 0.95rem;
+  margin-bottom: 2px;
+}
+.liveBadge {
+  font-size: 0.6rem;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--green);
+  font-weight: 700;
+}
+.eventLine {
+  color: var(--cyan);
+  font-size: 0.8rem;
+}
+.chainLabel {
+  display: inline-block;
+  padding: 0 4px;
+  font-weight: 700;
+}
+.meta {
+  color: var(--text-dim);
+  font-size: 0.6rem;
+  margin-top: 2px;
+}

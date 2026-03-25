@@ -1,0 +1,3 @@
+[submodule "contracts/sync-rollups"]
+	path = contracts/sync-rollups
+	url = https://github.com/eez-association/sync-rollups.git

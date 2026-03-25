@@ -1,0 +1,49 @@
+.root {}
+.title {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  margin-bottom: 10px;
+  opacity: 0.6;
+}
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.flowNode {
+  padding: 8px 16px;
+  border-radius: 6px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.flowNodeLabel {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.flowNodeSub {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+.arrowItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+.arrowLabel {
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  margin-bottom: 3px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

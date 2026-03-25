@@ -1,0 +1,99 @@
+# deployments/gnosis-100/docker-compose.yml — Based Rollup on Gnosis Chain
+#
+# Uses Gnosis Chain (chain ID 100) as L1 instead of a local devnet.
+#
+# Prerequisites:
+#   1. Run deploy.sh to deploy contracts and generate rollup-gnosis.env
+#   2. Copy .env.example to .env and fill in secrets
+#   3. Fund the builder account with xDAI on Gnosis Chain
+#
+# Usage (from repo root):
+#   docker compose -f deployments/gnosis-100/docker-compose.yml --env-file deployments/gnosis-100/.env up -d
+#   docker compose -f deployments/gnosis-100/docker-compose.yml --env-file deployments/gnosis-100/.env logs -f builder
+#
+# Add L2 explorer:
+#   docker compose -f deployments/gnosis-100/docker-compose.yml \
+#                  -f deployments/shared/docker-compose.explorer.yml \
+#                  -f deployments/gnosis-100/docker-compose.explorer.yml \
+#                  --env-file deployments/gnosis-100/.env up -d
+
+services:
+  # Config seeder — copies rollup-gnosis.env into the shared volume
+  init-config:
+    image: busybox:1.36
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ ! -f /shared/rollup.env ]; then
+          if [ ! -f /config/rollup-gnosis.env ]; then
+            echo "ERROR: rollup-gnosis.env not found. Run deploy.sh first."
+            exit 1
+          fi
+          cp /config/rollup-gnosis.env /shared/rollup.env
+          echo "Seeded /shared/rollup.env from rollup-gnosis.env"
+        else
+          echo "rollup.env already exists in shared volume — skipping"
+        fi
+        cat /shared/rollup.env
+    volumes:
+      - ./rollup-gnosis.env:/config/rollup-gnosis.env:ro
+      - gnosis-shared:/shared
+
+  builder:
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: builder
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile
+      target: runtime
+    stop_grace_period: 30s
+    volumes:
+      - ../shared/scripts:/app/scripts:ro
+      - gnosis-shared:/shared
+      - gnosis-builder-data:/data
+    ports:
+      - "9545:8545"   # L2 JSON-RPC
+      - "9548:8547"   # L2 RPC Proxy
+      - "9556:9556"   # L1 RPC Proxy
+      - "9560:9100"   # Health endpoint
+      - "127.0.0.1:9550:8546"   # L2 WebSocket
+    environment:
+      BLOCK_TIME: "5"
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in .env}"
+      L1_RPC_URL: "${GNOSIS_RPC_URL:-}"
+      BRIDGE_L1_ADDRESS: "${BRIDGE_L1_ADDRESS:-}"
+      BRIDGE_L2_ADDRESS: "${BRIDGE_L2_ADDRESS:-}"
+      HEALTH_PORT: "${HEALTH_PORT:-9100}"
+    healthcheck:
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+
+  fullnode1:
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: fullnode
+    stop_grace_period: 30s
+    volumes:
+      - ../shared/scripts:/app/scripts:ro
+      - gnosis-shared:/shared:ro
+      - gnosis-fullnode1-data:/data
+    environment:
+      BLOCK_TIME: "5"
+      L1_RPC_URL: "${GNOSIS_RPC_URL:-}"
+    ports:
+      - "9546:8545"
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+volumes:
+  gnosis-shared:
+  gnosis-builder-data:
+  gnosis-fullnode1-data:

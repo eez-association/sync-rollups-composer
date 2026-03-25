@@ -1,0 +1,139 @@
+/* ── ChainStrip — compact L1/L2 single-line bar ── */
+
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-family: var(--mono);
+  animation: fadeSlideUp 0.4s ease-out both;
+  animation-delay: 0.05s;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* ── Slots ── */
+
+.slot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.slotL1 {
+  /* left-aligned, no special override needed */
+}
+
+.slotL2 {
+  justify-content: flex-end;
+}
+
+/* ── Vertical divider between L1 and L2 ── */
+
+.divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  flex-shrink: 0;
+  margin: 0 20px;
+}
+
+/* ── Chain label pill ── */
+
+.chainPill {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 7px;
+  border-radius: var(--radius-xs);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.pillL1 {
+  background: rgba(251, 191, 36, 0.10);
+  color: var(--yellow);
+  border: 1px solid rgba(251, 191, 36, 0.20);
+}
+
+.pillL2 {
+  background: var(--accent-dim);
+  color: var(--accent-light);
+  border: 1px solid rgba(99, 102, 241, 0.18);
+}
+
+/* ── Block number ── */
+
+.blockNum {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  flex-shrink: 0;
+}
+
+/* ── Meta row (txs · gas · age) ── */
+
+.metaRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.metaPiece {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.metaDot {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--border-bright);
+  flex-shrink: 0;
+}
+
+/* ── Sync badge ── */
+
+.syncBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  flex-shrink: 0;
+}
+
+.synced {
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid var(--green-border);
+}
+
+.syncing {
+  background: var(--yellow-dim);
+  color: var(--yellow);
+  border: 1px solid var(--yellow-border);
+}
+
+.pulse {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulseGlow 2s ease-in-out infinite;
+}

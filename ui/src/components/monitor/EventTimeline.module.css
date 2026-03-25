@@ -1,0 +1,76 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-card);
+  border-left: 1px solid var(--border);
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.toggle {
+  display: flex;
+  gap: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.toggleBtn {
+  font-size: 0.5rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  transition: all 0.15s;
+}
+.toggleActive {
+  background: var(--accent);
+  color: #fff;
+}
+.toggleInactive {
+  background: transparent;
+  color: var(--text-dim);
+}
+.controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.latestBtn {
+  font-size: 0.55rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--green);
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--green);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-weight: 700;
+}
+.liveBadge {
+  font-size: 0.55rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--green);
+  font-weight: 700;
+}
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 6px;
+}
+.emptyMsg {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.55rem;
+  padding: 16px;
+  opacity: 0.4;
+}

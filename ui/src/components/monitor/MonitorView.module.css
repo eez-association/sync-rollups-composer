@@ -1,0 +1,49 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+}
+.header {
+  text-align: center;
+  padding: 12px 16px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 0;
+}
+.subtitle {
+  color: var(--text-dim);
+  font-size: 0.65rem;
+  margin-top: 2px;
+}
+.body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.main {
+  flex: 1;
+  overflow: auto;
+  padding: 0 12px 24px;
+}
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  height: 100%;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
+.sidebar {
+  width: 360px;
+  flex-shrink: 0;
+}
+.section {
+  margin-bottom: 10px;
+}

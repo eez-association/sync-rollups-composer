@@ -1,0 +1,33 @@
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.panel {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  padding: 6px 10px;
+}
+.panelTitle {
+  font-size: 0.55rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.5;
+  margin-bottom: 5px;
+}
+.stateRow {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.58rem;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+.stateKey {
+  color: var(--text-dim);
+}
+.stateValue {
+  font-weight: 700;
+  transition: color 1s ease;
+}

@@ -1,0 +1,60 @@
+# deployments/shared/docker-compose.base.yml — Reusable service templates
+#
+# Each network-specific docker-compose.yml extends these base definitions.
+# Do NOT run this file directly — always use a network-specific compose file.
+#
+# Example (from repo root):
+#   docker compose -f deployments/testnet-eez/docker-compose.yml up -d
+
+services:
+  builder:
+    image: based-rollup:local
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    entrypoint: ["/app/scripts/start-rollup.sh"]
+    environment:
+      SHARED_DIR: /shared
+      DATADIR: /data
+      GENESIS: /etc/based-rollup/genesis.json
+      BUILDER_MODE: "true"
+      ROLLUP_ID: "1"
+      PROXY_PORT: "8547"
+      L1_PROXY_PORT: "9556"
+      L1_GAS_OVERBID_PCT: "${L1_GAS_OVERBID_PCT:-20}"
+    # Ports are defined in each deployment's docker-compose.yml, not here.
+    # This allows multiple devnets to run simultaneously on the same host.
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-X", "POST", "-H", "Content-Type: application/json",
+             "-d", "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}",
+             "http://localhost:8545"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  fullnode:
+    image: based-rollup:local
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    entrypoint: ["/app/scripts/start-rollup.sh"]
+    environment:
+      SHARED_DIR: /shared
+      DATADIR: /data
+      GENESIS: /etc/based-rollup/genesis.json
+      BUILDER_MODE: "false"
+      ROLLUP_ID: "1"
+      BUILDER_WS_URL: "ws://builder:8546"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-X", "POST", "-H", "Content-Type: application/json",
+             "-d", "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}",
+             "http://localhost:8545"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s

@@ -1,0 +1,10 @@
+[profile.default]
+src = "."
+out = "out"
+cache_path = "cache"
+solc_version = "0.8.33"
+libs = ["sync-rollups/lib"]
+extra_output_files = ["abi"]
+via_ir = true
+optimizer = true
+optimizer_runs = 200

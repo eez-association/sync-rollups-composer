@@ -1,0 +1,30 @@
+# Build artifacts
+target/
+contracts/out/
+contracts/cache/
+contracts/sync-rollups/out/
+contracts/sync-rollups/cache/
+
+# Git
+.git/
+
+# IDE / OS
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/
+
+# Environment
+.env
+*.env
+
+# Test artifacts
+crates/based-rollup/proptest-regressions/
+
+# UI (not needed for Rust build)
+ui/
+
+# Docker
+Dockerfile
+docker-compose*.yml

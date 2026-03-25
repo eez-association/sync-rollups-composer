@@ -1,0 +1,2168 @@
+//! Cross-chain composability types for synchronous rollup execution.
+//!
+//! These types mirror the Solidity structs in EEZ's `ICrossChainManager.sol`:
+//! - `ActionType` / `Action` — represent cross-chain call/result/revert actions
+//! - `StateDelta` — rollup state transitions (state root + ether balance changes)
+//! - `ExecutionEntry` — a pre-computed execution table entry consumed by builder protocol transactions
+//!
+//! The execution flow:
+//! 1. An off-chain prover pre-computes cross-chain state transitions
+//! 2. Entries are posted to L1 via `Rollups.postBatch()` with a ZK/ECDSA proof
+//! 3. On L2, the driver loads entries into `CrossChainManagerL2` via `loadExecutionTable()`
+//! 4. L2 contracts interact through `CrossChainProxy` contracts, consuming table entries
+
+use alloy_primitives::{Address, B256, Bytes, I256, U256, keccak256};
+use alloy_rpc_types::Log;
+use alloy_sol_types::{SolCall, SolEvent, SolType, sol};
+use serde::{Deserialize, Serialize};
+use tracing::warn;
+
+// ──────────────────────────────────────────────
+//  ABI bindings generated from EEZ contracts
+// ──────────────────────────────────────────────
+
+sol! {
+    /// CrossChainManagerL2.loadExecutionTable(ExecutionEntry[] entries)
+    #[derive(Debug, PartialEq)]
+    interface ICrossChainManagerL2 {
+        enum ActionType {
+            CALL,
+            RESULT,
+            L2TX,
+            REVERT,
+            REVERT_CONTINUE
+        }
+
+        struct Action {
+            ActionType actionType;
+            uint256 rollupId;
+            address destination;
+            uint256 value;
+            bytes data;
+            bool failed;
+            address sourceAddress;
+            uint256 sourceRollup;
+            uint256[] scope;
+        }
+
+        struct StateDelta {
+            uint256 rollupId;
+            bytes32 currentState;
+            bytes32 newState;
+            int256 etherDelta;
+        }
+
+        struct ExecutionEntry {
+            StateDelta[] stateDeltas;
+            bytes32 actionHash;
+            Action nextAction;
+        }
+
+        function loadExecutionTable(ExecutionEntry[] calldata entries) external;
+        function executeIncomingCrossChainCall(
+            address destination,
+            uint256 value,
+            bytes calldata data,
+            address sourceAddress,
+            uint256 sourceRollup,
+            uint256[] calldata scope
+        ) external returns (bytes memory result);
+
+        /// Rollups.BatchPosted event — emitted when execution entries are posted via postBatch().
+        event BatchPosted(ExecutionEntry[] entries, bytes32 publicInputsHash);
+
+        /// Rollups.ExecutionConsumed event — emitted when a deferred entry is consumed
+        /// by a user's proxy call on L1 (executeCrossChainCall succeeds).
+        event ExecutionConsumed(bytes32 indexed actionHash, Action action);
+
+        /// Rollups.postBatch — submit execution entries with proof to L1.
+        /// Defined here (not on Rollups) so we can reuse the same type namespace.
+        function postBatch(
+            ExecutionEntry[] entries,
+            uint256 blobCount,
+            bytes callData,
+            bytes proof
+        );
+    }
+}
+
+sol! {
+    /// Bridge contract ABI bindings.
+    interface IBridge {
+        function initialize(address _manager, uint256 _rollupId, address _admin) external;
+        function setCanonicalBridgeAddress(address bridgeAddress) external;
+
+        /// Bridge.receiveTokens — called cross-chain to mint/release tokens.
+        /// Used for ABI decode/encode in continuation entry construction.
+        function receiveTokens(
+            address token,
+            uint256 originRollupId,
+            address destinationAddress,
+            uint256 amount,
+            string memory name,
+            string memory symbol,
+            uint8 decimals,
+            uint256 sourceRollupId
+        ) external;
+    }
+}
+
+sol! {
+    /// Read-only view on the Bridge contract for querying canonical address.
+    interface IBridgeView {
+        function canonicalBridgeAddress() external view returns (address);
+    }
+}
+
+// ──────────────────────────────────────────────
+//  Rust-native types for driver/derivation use
+// ──────────────────────────────────────────────
+
+/// Consumed events map: actionHash → Vec of consumed CALL actions.
+/// Vec preserves duplicate consumed events with the same actionHash
+/// (e.g., CallTwice calling increment() twice produces 2 events with same hash).
+pub type ConsumedMap = std::collections::HashMap<B256, Vec<CrossChainAction>>;
+
+/// Check if a set of cross-chain calls contains duplicates (same action identity).
+/// Uses full 4-tuple (destination, calldata, value, sourceAddress) matching the
+/// fields that compose the actionHash. Direction-agnostic — used by both
+/// L1→L2 and L2→L1 composer RPCs.
+pub fn has_duplicate_calls(calls: &[(Address, &[u8], U256, Address)]) -> bool {
+    let mut seen = std::collections::HashMap::new();
+    for (dest, data, value, source) in calls {
+        let count = seen.entry((*dest, *data, *value, *source)).or_insert(0usize);
+        *count += 1;
+        if *count > 1 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Address where CrossChainManagerL2 is predeployed on L2.
+pub const CROSS_CHAIN_MANAGER_L2_ADDRESS: Address = Address::new([
+    0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03,
+]);
+
+/// Action types in the cross-chain execution protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrossChainActionType {
+    Call,
+    Result,
+    L2Tx,
+    Revert,
+    RevertContinue,
+}
+
+/// A cross-chain action (Rust mirror of Solidity `Action` struct).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossChainAction {
+    pub action_type: CrossChainActionType,
+    pub rollup_id: U256,
+    pub destination: Address,
+    pub value: U256,
+    pub data: Vec<u8>,
+    pub failed: bool,
+    pub source_address: Address,
+    pub source_rollup: U256,
+    pub scope: Vec<U256>,
+}
+
+/// A state delta for a rollup (Rust mirror of Solidity `StateDelta` struct).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossChainStateDelta {
+    pub rollup_id: U256,
+    pub current_state: B256,
+    pub new_state: B256,
+    pub ether_delta: I256,
+}
+
+/// An execution table entry (Rust mirror of Solidity `ExecutionEntry` struct).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossChainExecutionEntry {
+    pub state_deltas: Vec<CrossChainStateDelta>,
+    pub action_hash: B256,
+    pub next_action: CrossChainAction,
+}
+
+// ──────────────────────────────────────────────
+//  Rust → Solidity ABI conversion helpers
+// ──────────────────────────────────────────────
+
+impl CrossChainActionType {
+    /// Convert to the Solidity ABI enum representation.
+    fn to_sol(self) -> ICrossChainManagerL2::ActionType {
+        match self {
+            Self::Call => ICrossChainManagerL2::ActionType::CALL,
+            Self::Result => ICrossChainManagerL2::ActionType::RESULT,
+            Self::L2Tx => ICrossChainManagerL2::ActionType::L2TX,
+            Self::Revert => ICrossChainManagerL2::ActionType::REVERT,
+            Self::RevertContinue => ICrossChainManagerL2::ActionType::REVERT_CONTINUE,
+        }
+    }
+}
+
+impl CrossChainAction {
+    /// Convert to the Solidity ABI struct representation.
+    pub fn to_sol_action(&self) -> ICrossChainManagerL2::Action {
+        ICrossChainManagerL2::Action {
+            actionType: self.action_type.to_sol(),
+            rollupId: self.rollup_id,
+            destination: self.destination,
+            value: self.value,
+            data: self.data.clone().into(),
+            failed: self.failed,
+            sourceAddress: self.source_address,
+            sourceRollup: self.source_rollup,
+            scope: self.scope.clone(),
+        }
+    }
+}
+
+impl CrossChainStateDelta {
+    /// Convert to the Solidity ABI struct representation.
+    fn to_sol(&self) -> ICrossChainManagerL2::StateDelta {
+        ICrossChainManagerL2::StateDelta {
+            rollupId: self.rollup_id,
+            currentState: self.current_state,
+            newState: self.new_state,
+            etherDelta: self.ether_delta,
+        }
+    }
+}
+
+impl CrossChainExecutionEntry {
+    /// Convert to the Solidity ABI struct representation.
+    fn to_sol(&self) -> ICrossChainManagerL2::ExecutionEntry {
+        ICrossChainManagerL2::ExecutionEntry {
+            stateDeltas: self.state_deltas.iter().map(|d| d.to_sol()).collect(),
+            actionHash: self.action_hash,
+            nextAction: self.next_action.to_sol_action(),
+        }
+    }
+}
+
+/// Count-based dedup filter for iterative cross-chain call discovery.
+///
+/// During iterative `debug_traceCallMany` expansion, each iteration re-detects
+/// ALL calls (not just new ones). A naive set-based filter (`!existing.contains(new)`)
+/// incorrectly removes legitimate duplicate calls — e.g., when `CallTwice` calls
+/// `increment()` twice with identical `(destination, calldata)`.
+///
+/// This function uses count-based comparison: for each item in `new_items`, it tries
+/// to match against an unused item in `existing`. If a match is found, the existing
+/// item is "consumed" (marked used) and the new item is dropped. If no unused match
+/// exists, the new item is genuinely new and kept in the result.
+///
+/// The `eq` closure defines what constitutes a "match" between two items.
+pub fn filter_new_by_count<T>(
+    new_items: Vec<T>,
+    existing: &[T],
+    eq: impl Fn(&T, &T) -> bool,
+) -> Vec<T> {
+    let mut used = vec![false; existing.len()];
+    let mut result = Vec::new();
+    for item in new_items {
+        let matched = existing.iter().enumerate().position(|(i, ex)| {
+            !used[i] && eq(&item, ex)
+        });
+        if let Some(idx) = matched {
+            used[idx] = true;
+        } else {
+            result.push(item);
+        }
+    }
+    result
+}
+
+/// Encode the calldata for `CrossChainManagerL2.loadExecutionTable(entries)`.
+pub fn encode_load_execution_table_calldata(entries: &[CrossChainExecutionEntry]) -> Bytes {
+    let sol_entries: Vec<ICrossChainManagerL2::ExecutionEntry> =
+        entries.iter().map(|e| e.to_sol()).collect();
+    let call = ICrossChainManagerL2::loadExecutionTableCall {
+        entries: sol_entries,
+    };
+    Bytes::from(call.abi_encode())
+}
+
+/// Encode the calldata for `Rollups.postBatch(entries, blobCount, callData, proof)`.
+pub fn encode_post_batch_calldata(
+    entries: &[CrossChainExecutionEntry],
+    call_data: Bytes,
+    proof: Bytes,
+) -> Bytes {
+    let sol_entries: Vec<ICrossChainManagerL2::ExecutionEntry> =
+        entries.iter().map(|e| e.to_sol()).collect();
+    let call = ICrossChainManagerL2::postBatchCall {
+        entries: sol_entries,
+        blobCount: U256::ZERO,
+        callData: call_data,
+        proof,
+    };
+    Bytes::from(call.abi_encode())
+}
+
+/// Compute entry hashes for a set of execution entries, mirroring Rollups.sol's
+/// `postBatch` computation. Each entry hash includes the entry's state deltas,
+/// the verification keys for each delta's rollup, the action hash, and the
+/// encoded next action.
+///
+/// The `verification_key` parameter is the VK for this rollup (all deltas in
+/// our entries reference the same rollup).
+pub fn compute_entry_hashes(
+    entries: &[CrossChainExecutionEntry],
+    verification_key: B256,
+) -> Vec<B256> {
+    entries
+        .iter()
+        .map(|entry| {
+            let sol_entry = entry.to_sol();
+
+            // abi.encode(entries[i].stateDeltas) — dynamic array of structs
+            let encoded_deltas = alloy_sol_types::SolValue::abi_encode(&sol_entry.stateDeltas);
+
+            // Verification keys: one per state delta, all the same for our rollup
+            let vks: Vec<B256> = sol_entry
+                .stateDeltas
+                .iter()
+                .map(|_| verification_key)
+                .collect();
+            // abi.encode(vks) — encode as bytes32[] dynamic array
+            let encoded_vks = alloy_sol_types::SolValue::abi_encode(&vks);
+
+            // abi.encode(entries[i].nextAction)
+            let encoded_action = ICrossChainManagerL2::Action::abi_encode(&sol_entry.nextAction);
+
+            // keccak256(abi.encodePacked(
+            //     abi.encode(stateDeltas),
+            //     abi.encode(vks),
+            //     actionHash,
+            //     abi.encode(nextAction)
+            // ))
+            let mut packed = Vec::new();
+            packed.extend_from_slice(&encoded_deltas);
+            packed.extend_from_slice(&encoded_vks);
+            packed.extend_from_slice(sol_entry.actionHash.as_slice());
+            packed.extend_from_slice(&encoded_action);
+
+            keccak256(&packed)
+        })
+        .collect()
+}
+
+/// Compute the `publicInputsHash` that Rollups.sol computes inside `postBatch`.
+///
+/// This mirrors the Solidity computation:
+/// ```solidity
+/// keccak256(abi.encodePacked(
+///     blockhash(block.number - 1),
+///     block.timestamp,
+///     abi.encode(entryHashes),
+///     abi.encode(blobHashes),
+///     keccak256(callData)
+/// ))
+/// ```
+///
+/// `parent_block_hash` is `blockhash(block.number - 1)` and `block_timestamp` is
+/// `block.timestamp` at the time `postBatch` executes on L1.
+pub fn compute_public_inputs_hash(
+    entry_hashes: &[B256],
+    call_data: &Bytes,
+    parent_block_hash: B256,
+    block_timestamp: u64,
+) -> B256 {
+    // abi.encode(entryHashes) — encode as bytes32[] dynamic array
+    let encoded_entry_hashes = alloy_sol_types::SolValue::abi_encode(&entry_hashes.to_vec());
+
+    // abi.encode(blobHashes) — always empty (blobCount = 0)
+    let empty_blob_hashes: Vec<B256> = vec![];
+    let encoded_blob_hashes = alloy_sol_types::SolValue::abi_encode(&empty_blob_hashes);
+
+    // keccak256(callData)
+    let call_data_hash = keccak256(call_data.as_ref());
+
+    // abi.encodePacked(blockhash, block.timestamp, abi.encode(entryHashes), abi.encode(blobHashes), keccak256(callData))
+    let mut packed = Vec::new();
+    packed.extend_from_slice(parent_block_hash.as_slice()); // bytes32
+    packed.extend_from_slice(&B256::from(U256::from(block_timestamp)).0); // uint256
+    packed.extend_from_slice(&encoded_entry_hashes);
+    packed.extend_from_slice(&encoded_blob_hashes);
+    packed.extend_from_slice(call_data_hash.as_slice()); // bytes32
+
+    keccak256(&packed)
+}
+
+/// Encode L2 block data as `callData` for `postBatch()`.
+/// Format: `abi.encode(uint256[] l2BlockNumbers, bytes[] transactions)` — flat parameter
+/// encoding without tuple wrapper.
+pub fn encode_block_calldata(block_numbers: &[u64], transactions: &[Bytes]) -> Bytes {
+    use alloy_sol_types::SolType;
+    let numbers: Vec<U256> = block_numbers.iter().map(|&n| U256::from(n)).collect();
+    let encoded = <(
+        alloy_sol_types::sol_data::Array<alloy_sol_types::sol_data::Uint<256>>,
+        alloy_sol_types::sol_data::Array<alloy_sol_types::sol_data::Bytes>,
+    )>::abi_encode_sequence(&(numbers, transactions.to_vec()));
+    Bytes::from(encoded)
+}
+
+/// Decode L2 block data from `callData` in a `postBatch()` transaction.
+/// Returns (l2_block_numbers, transactions) pairs.
+pub fn decode_block_calldata(data: &Bytes) -> Result<(Vec<u64>, Vec<Bytes>), String> {
+    use alloy_sol_types::SolType;
+    type BlockCalldata = (
+        alloy_sol_types::sol_data::Array<alloy_sol_types::sol_data::Uint<256>>,
+        alloy_sol_types::sol_data::Array<alloy_sol_types::sol_data::Bytes>,
+    );
+    let decoded = BlockCalldata::abi_decode_sequence(data)
+        .map_err(|e| format!("failed to decode block calldata: {e}"))?;
+    let numbers: Vec<u64> = decoded.0.iter().map(|n| n.to::<u64>()).collect();
+    Ok((numbers, decoded.1))
+}
+
+/// Build immediate execution entries for block submission.
+/// Each block gets one entry with a StateDelta tracking state root transitions.
+pub fn build_block_entries(
+    blocks: &[(u64, B256, B256, Bytes)], // (l2_block_number, pre_state_root, post_state_root, transactions)
+    rollup_id: u64,
+) -> Vec<CrossChainExecutionEntry> {
+    blocks
+        .iter()
+        .map(
+            |(_l2_block_number, pre_state_root, post_state_root, _transactions)| {
+                CrossChainExecutionEntry {
+                    state_deltas: vec![CrossChainStateDelta {
+                        rollup_id: U256::from(rollup_id),
+                        current_state: *pre_state_root,
+                        new_state: *post_state_root,
+                        ether_delta: I256::ZERO,
+                    }],
+                    action_hash: B256::ZERO, // immediate — applied during postBatch()
+                    next_action: CrossChainAction {
+                        action_type: CrossChainActionType::L2Tx,
+                        rollup_id: U256::ZERO,
+                        destination: Address::ZERO,
+                        value: U256::ZERO,
+                        data: vec![],
+                        failed: false,
+                        source_address: Address::ZERO,
+                        source_rollup: U256::ZERO,
+                        scope: vec![],
+                    },
+                }
+            },
+        )
+        .collect()
+}
+
+/// Build a single aggregate immediate entry for a batch of blocks.
+/// Spans `currentState = pre_state_root` → `newState = post_state_root`,
+/// covering the entire batch in one entry. Saves gas by not creating
+/// per-block entries (empty blocks add zero overhead).
+pub fn build_aggregate_block_entry(
+    pre_state_root: B256,
+    post_state_root: B256,
+    rollup_id: u64,
+) -> CrossChainExecutionEntry {
+    CrossChainExecutionEntry {
+        state_deltas: vec![CrossChainStateDelta {
+            rollup_id: U256::from(rollup_id),
+            current_state: pre_state_root,
+            new_state: post_state_root,
+            ether_delta: I256::ZERO,
+        }],
+        action_hash: B256::ZERO, // immediate — applied during postBatch()
+        next_action: CrossChainAction {
+            action_type: CrossChainActionType::L2Tx,
+            rollup_id: U256::ZERO,
+            destination: Address::ZERO,
+            value: U256::ZERO,
+            data: vec![],
+            failed: false,
+            source_address: Address::ZERO,
+            source_rollup: U256::ZERO,
+            scope: vec![],
+        },
+    }
+}
+
+/// Decode a `postBatch(entries, blobCount, callData, proof)` call from raw calldata.
+/// Returns (entries, callData) or an error.
+pub fn decode_post_batch_calldata(
+    data: &Bytes,
+) -> Result<(Vec<CrossChainExecutionEntry>, Bytes), String> {
+    use alloy_sol_types::SolCall;
+    let decoded = ICrossChainManagerL2::postBatchCall::abi_decode(data)
+        .map_err(|e| format!("failed to decode postBatch calldata: {e}"))?;
+    let entries: Vec<CrossChainExecutionEntry> = decoded
+        .entries
+        .iter()
+        .map(CrossChainExecutionEntry::from_sol)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((entries, decoded.callData))
+}
+
+/// Encode the calldata for `CrossChainManagerL2.executeIncomingCrossChainCall(...)`.
+pub fn encode_execute_incoming_call_calldata(action: &CrossChainAction) -> Bytes {
+    let call = ICrossChainManagerL2::executeIncomingCrossChainCallCall {
+        destination: action.destination,
+        value: action.value,
+        data: action.data.clone().into(),
+        sourceAddress: action.source_address,
+        sourceRollup: action.source_rollup,
+        scope: action.scope.clone(),
+    };
+    Bytes::from(call.abi_encode())
+}
+
+// ──────────────────────────────────────────────
+//  L1 event parsing (Rollups.sol → Rust types)
+// ──────────────────────────────────────────────
+
+// ──────────────────────────────────────────────
+//  Solidity → Rust conversion helpers
+// ──────────────────────────────────────────────
+
+impl CrossChainActionType {
+    /// Convert from the Solidity ABI enum representation.
+    ///
+    /// Returns an error for unknown enum variants rather than silently
+    /// defaulting, since an unknown action type from L1 likely indicates
+    /// a contract upgrade or data corruption.
+    fn from_sol(sol_type: ICrossChainManagerL2::ActionType) -> Result<Self, String> {
+        match sol_type {
+            ICrossChainManagerL2::ActionType::CALL => Ok(Self::Call),
+            ICrossChainManagerL2::ActionType::RESULT => Ok(Self::Result),
+            ICrossChainManagerL2::ActionType::L2TX => Ok(Self::L2Tx),
+            ICrossChainManagerL2::ActionType::REVERT => Ok(Self::Revert),
+            ICrossChainManagerL2::ActionType::REVERT_CONTINUE => Ok(Self::RevertContinue),
+            other => Err(format!("unknown ActionType variant: {other:?}")),
+        }
+    }
+}
+
+impl CrossChainAction {
+    /// Convert from the Solidity ABI struct representation.
+    fn from_sol(sol: &ICrossChainManagerL2::Action) -> Result<Self, String> {
+        Ok(Self {
+            action_type: CrossChainActionType::from_sol(sol.actionType)?,
+            rollup_id: sol.rollupId,
+            destination: sol.destination,
+            value: sol.value,
+            data: sol.data.to_vec(),
+            failed: sol.failed,
+            source_address: sol.sourceAddress,
+            source_rollup: sol.sourceRollup,
+            scope: sol.scope.clone(),
+        })
+    }
+}
+
+impl CrossChainStateDelta {
+    /// Convert from the Solidity ABI struct representation.
+    fn from_sol(sol: &ICrossChainManagerL2::StateDelta) -> Self {
+        Self {
+            rollup_id: sol.rollupId,
+            current_state: sol.currentState,
+            new_state: sol.newState,
+            ether_delta: sol.etherDelta,
+        }
+    }
+}
+
+impl CrossChainExecutionEntry {
+    /// Convert from the Solidity ABI struct representation.
+    pub fn from_sol(sol: &ICrossChainManagerL2::ExecutionEntry) -> Result<Self, String> {
+        Ok(Self {
+            state_deltas: sol
+                .stateDeltas
+                .iter()
+                .map(CrossChainStateDelta::from_sol)
+                .collect(),
+            action_hash: sol.actionHash,
+            next_action: CrossChainAction::from_sol(&sol.nextAction)?,
+        })
+    }
+}
+
+/// Build a single execution entry for a non-nested cross-chain call.
+///
+/// This is the shared logic used by both `rpc::initiate_cross_chain_call` and
+/// `l1_proxy` when detecting cross-chain calls in L1 traces.
+///
+/// Returns a pair of entries for **L2 execution**:
+/// - `call_entry`: actionHash = hash(CALL), nextAction = CALL action
+///   (triggers `executeIncomingCrossChainCall` on L2)
+/// - `result_entry`: actionHash = hash(RESULT), nextAction = RESULT action
+///   (loaded into the L2 execution table)
+///
+/// For **L1 submission**, use [`convert_pairs_to_l1_entries`] to transform
+/// pairs into the non-nested format (actionHash=CALL, nextAction=RESULT).
+pub fn build_cross_chain_call_entries(
+    rollup_id: U256,
+    destination: Address,
+    data: Vec<u8>,
+    value: U256,
+    source_address: Address,
+    source_rollup: U256,
+    call_success: bool,
+    return_data: Vec<u8>,
+) -> (CrossChainExecutionEntry, CrossChainExecutionEntry) {
+    // Build CALL action: triggers executeIncomingCrossChainCall on L2,
+    // and its hash is used by L1 for entry lookup.
+    // The `value` field MUST match `msg.value` in the L1 proxy call — otherwise
+    // the action hash won't match what Rollups.sol computes during
+    // executeCrossChainCall and the entry will revert with ExecutionNotFound.
+    let call_action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id,
+        destination,
+        value,
+        data,
+        failed: false,
+        source_address,
+        source_rollup,
+        scope: vec![],
+    };
+
+    // Build RESULT action: loaded into L2 execution table, consumed when
+    // the cross-chain call completes. Return data is simulated so the
+    // action hash matches what _processCallAtScope() computes.
+    let result_action = CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: return_data,
+        failed: !call_success,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+
+    let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &call_action.to_sol_action(),
+    ));
+    let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &result_action.to_sol_action(),
+    ));
+
+    let call_entry = CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash: call_action_hash,
+        next_action: call_action,
+    };
+    let result_entry = CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash: result_action_hash,
+        next_action: result_action,
+    };
+
+    (call_entry, result_entry)
+}
+
+/// Withdrawal entries for L2→L1 ETH withdrawals.
+///
+/// Contains both L2 table entries (loaded via loadExecutionTable, consumed by the
+/// user's Bridge.bridgeEther tx on L2) and L1 deferred entries (posted via postBatch,
+/// consumed by the builder's trigger tx on L1).
+#[derive(Debug, Clone)]
+pub struct WithdrawalEntries {
+    /// L2 table entries: CALL+RESULT pair loaded into CCM execution table.
+    /// The CALL is consumed when Bridge.bridgeEther(0) executes on L2.
+    pub l2_table_entries: Vec<CrossChainExecutionEntry>,
+    /// L1 deferred entries: nested CALL+RESULT pair posted via postBatch.
+    /// Consumed when the builder's trigger tx calls the L1 proxy.
+    pub l1_deferred_entries: Vec<CrossChainExecutionEntry>,
+    /// User address (initiator of the withdrawal on L2).
+    pub user: Address,
+    /// Withdrawal amount in wei.
+    pub amount: U256,
+}
+
+/// Build L2→L1 call entries for a general cross-chain call.
+///
+/// Generalizes withdrawal entries to support arbitrary L1 targets, calldata,
+/// and return data (from L1 simulation). Withdrawal is a special case where
+/// destination=user, data=[], source_address=bridge_l2, delivery_return_data=[].
+///
+/// L2 table entries are consumed by CCM.executeCrossChainCall on L2 when the
+/// user's tx hits the proxy. L1 deferred entries are posted via postBatch and
+/// consumed by the builder's trigger tx calling proxy(trigger_user, rollup_id).
+///
+/// Parameters:
+/// - `destination`: L1 target address (originalAddress from the L2 proxy)
+/// - `data`: calldata for the L1 execution (empty for withdrawals)
+/// - `value`: ETH value to deliver on L1
+/// - `source_address`: msg.sender in the L2 proxy fallback (bridge for withdrawals,
+///   L2 tx sender for general proxy calls)
+/// - `trigger_user`: the L2 initiator who gets an L1 proxy(trigger_user, rollup_id).
+///   For withdrawals this equals `destination` (user). For general L2→L1 calls
+///   this is the L2 sender (distinct from the L1 target).
+/// - `rollup_id`: our rollup's ID
+/// - `builder_address`: builder key that will trigger on L1
+/// - `delivery_return_data`: return data from L1 simulation (empty for EOA/withdrawals)
+/// - `delivery_failed`: whether the L1 simulation reverted (false for withdrawals)
+#[allow(clippy::too_many_arguments)]
+pub fn build_l2_to_l1_call_entries(
+    destination: Address,
+    data: Vec<u8>,
+    value: U256,
+    source_address: Address,
+    trigger_user: Address,
+    rollup_id: u64,
+    builder_address: Address,
+    delivery_return_data: Vec<u8>,
+    delivery_failed: bool,
+) -> WithdrawalEntries {
+    let rollup_id_u256 = U256::from(rollup_id);
+
+    // ── L2 table entries ──
+    // These match what CCM.executeCrossChainCall will build when
+    // proxy(destination, 0) is called on L2.
+    //
+    // CCM action fields (from CrossChainManagerL2.sol:98-124):
+    //   action.actionType = CALL
+    //   action.rollupId = proxyInfo.originalRollupId = 0 (proxy for L1)
+    //   action.destination = proxyInfo.originalAddress = destination
+    //   action.value = msg.value = value
+    //   action.data = callData = data
+    //   action.sourceAddress = msg.sender in proxy fallback = source_address
+    //   action.sourceRollup = ROLLUP_ID = rollup_id
+    //   action.scope = [] (empty)
+    let l2_call_action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: U256::ZERO, // target = L1 (rollup 0)
+        destination,
+        value,
+        data: data.clone(),
+        failed: false,
+        source_address,
+        source_rollup: rollup_id_u256,
+        scope: vec![],
+    };
+    let l2_result_action = CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id: U256::ZERO,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: delivery_return_data.clone(),
+        failed: delivery_failed,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+
+    let l2_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l2_call_action.to_sol_action(),
+    ));
+    let l2_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l2_result_action.to_sol_action(),
+    ));
+
+    let l2_table_entries = vec![
+        CrossChainExecutionEntry {
+            state_deltas: vec![],
+            action_hash: l2_call_hash,
+            // nextAction = RESULT: after the L2 side completes, _resolveScopes
+            // sees RESULT → returns immediately.
+            next_action: l2_result_action.clone(),
+        },
+        CrossChainExecutionEntry {
+            state_deltas: vec![],
+            action_hash: l2_result_hash,
+            next_action: l2_result_action,
+        },
+    ];
+
+    // ── L1 deferred entries (nested format) ──
+    // Entry 1: Trigger CALL — matches what Rollups.executeCrossChainCall builds
+    // when proxy(trigger_user, rollup_id) is called with empty data and value=0.
+    //
+    // Rollups.sol action fields (Rollups.sol:280-290):
+    //   action.actionType = CALL
+    //   action.rollupId = proxyInfo.originalRollupId = rollup_id (proxy for our rollup)
+    //   action.destination = proxyInfo.originalAddress = trigger_user
+    //   action.value = msg.value = 0 (trigger sends no ETH)
+    //   action.data = callData = "" (proxy fallback passes msg.data which is empty)
+    //   action.sourceAddress = msg.sender in proxy fallback = builder_address
+    //     (builder calls proxy directly, so msg.sender = builder)
+    //   action.sourceRollup = MAINNET_ROLLUP_ID = 0 (L1 domain, hardcoded in Rollups.sol)
+    //   action.scope = [] (empty)
+    let l1_trigger_action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: rollup_id_u256,
+        destination: trigger_user,
+        value: U256::ZERO, // trigger sends 0 ETH
+        data: vec![],
+        failed: false,
+        source_address: builder_address, // builder is msg.sender to L1 proxy
+        source_rollup: U256::ZERO,       // MAINNET_ROLLUP_ID = 0 (L1 domain)
+        scope: vec![],
+    };
+    let l1_trigger_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l1_trigger_action.to_sol_action(),
+    ));
+
+    // nextAction for trigger CALL = delivery CALL (executes on L1 via _processCallAtScope)
+    // For withdrawals: sends ETH to user. For general calls: calls destination with data.
+    let l1_delivery_action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: U256::ZERO, // L1 scope
+        destination,
+        value,
+        data,
+        failed: false,
+        source_address: trigger_user, // L2 initiator is the source on L1
+        source_rollup: rollup_id_u256,
+        scope: vec![U256::ZERO],
+    };
+
+    // Entry 2: Delivery RESULT — matches what _processCallAtScope builds
+    // after executing the delivery call on L1.
+    // For withdrawals (EOA): returnData empty, failed=false.
+    // For contract calls: returnData and failed come from L1 simulation.
+    let l1_delivery_result = CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id: U256::ZERO,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: delivery_return_data,
+        failed: delivery_failed,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let l1_delivery_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l1_delivery_result.to_sol_action(),
+    ));
+
+    // Nested format: [trigger CALL entry, delivery RESULT entry]
+    // The trigger CALL's nextAction is the delivery CALL (enters newScope).
+    // The delivery RESULT's nextAction is a terminal RESULT (exits scope).
+    let l1_deferred_entries = vec![
+        CrossChainExecutionEntry {
+            state_deltas: vec![], // filled later by attach_chained_state_deltas
+            action_hash: l1_trigger_hash,
+            next_action: l1_delivery_action,
+        },
+        CrossChainExecutionEntry {
+            state_deltas: vec![], // filled later: etherDelta = -amount
+            action_hash: l1_delivery_result_hash,
+            next_action: l1_delivery_result,
+        },
+    ];
+
+    WithdrawalEntries {
+        l2_table_entries,
+        l1_deferred_entries,
+        user: trigger_user,
+        amount: value,
+    }
+}
+
+/// Build withdrawal entries for an L2→L1 ETH withdrawal.
+///
+/// Thin wrapper around `build_l2_to_l1_call_entries` for the withdrawal special case:
+/// - destination = user (ETH goes to user on L1)
+/// - data = [] (no calldata, just ETH transfer)
+/// - source_address = bridge_l2_address (Bridge calls proxy on behalf of user)
+/// - trigger_user = user (same as destination for withdrawals)
+/// - delivery_return_data = [] (recipient is EOA)
+/// - delivery_failed = false
+///
+/// The withdrawal flow:
+/// 1. User calls Bridge.bridgeEther{value:X}(0) on L2
+/// 2. Bridge creates proxy(user, 0), calls proxy{value:X}("")
+/// 3. Proxy → CCM.executeCrossChainCall(user, "") with msg.value=X
+/// 4. CCM builds CALL action, looks up `_executions[actionHash]` → consumes L2 table entry
+///
+/// On L1, the builder's trigger:
+/// 1. Calls proxy(user, rollup_id) on L1 with empty data and value=0
+/// 2. Proxy → Rollups.executeCrossChainCall(user, "") with msg.value=0
+/// 3. Matches L1 deferred CALL entry, nextAction = delivery CALL
+/// 4. `_processCallAtScope` sends ETH to user
+pub fn build_withdrawal_entries(
+    user: Address,
+    amount: U256,
+    rollup_id: u64,
+    bridge_l2_address: Address,
+    builder_address: Address,
+) -> WithdrawalEntries {
+    build_l2_to_l1_call_entries(
+        user,              // destination: ETH goes to user on L1
+        vec![],            // data: no calldata for ETH withdrawal
+        amount,            // value: withdrawal amount
+        bridge_l2_address, // source_address: Bridge is msg.sender to L2 proxy
+        user,              // trigger_user: same as destination for withdrawals
+        rollup_id,
+        builder_address,
+        vec![], // delivery_return_data: EOA recipient, no return data
+        false,  // delivery_failed: withdrawals always succeed
+    )
+}
+
+/// Check if an L1 deferred entry is a withdrawal entry (nested format with delivery CALL).
+///
+/// Withdrawal entries have `nextAction.action_type == CALL` (delivery action),
+/// unlike deposit entries which have `nextAction.action_type == RESULT` (non-nested).
+pub fn is_withdrawal_entry(entry: &CrossChainExecutionEntry) -> bool {
+    entry.next_action.action_type == CrossChainActionType::Call
+}
+
+/// Convert L2-format entry pairs to L1-format entries for submission.
+///
+/// L2 uses pairs: `[CALL trigger, RESULT table entry]` per cross-chain call.
+/// L1 uses a single non-nested entry: `actionHash=hash(CALL), nextAction=RESULT`.
+/// This prevents Rollups.sol from entering `newScope()` for simple calls.
+///
+/// State deltas (if attached) are carried from the CALL entry (even index).
+pub fn convert_pairs_to_l1_entries(
+    entries: &[CrossChainExecutionEntry],
+) -> Vec<CrossChainExecutionEntry> {
+    entries
+        .chunks(2)
+        .filter_map(|pair| {
+            if pair.len() == 2 {
+                Some(CrossChainExecutionEntry {
+                    state_deltas: pair[0].state_deltas.clone(),
+                    action_hash: pair[0].action_hash,
+                    next_action: pair[1].next_action.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Reconstruct L2-format entry pairs from L1-format entries and CALL actions.
+///
+/// During derivation, fullnodes receive L1-format entries (actionHash=hash(CALL),
+/// nextAction=RESULT) from `BatchPosted` events, plus the original CALL actions
+/// from `ExecutionConsumed` events. This function reconstructs the L2-format
+/// pairs that `evm_config` expects: `[CALL trigger, RESULT table entry]`.
+///
+/// Matching is by action hash (not position) because the `l1_entries` may be
+/// a filtered subset of the original entries (e.g., only consumed entries).
+pub fn convert_l1_entries_to_l2_pairs(
+    l1_entries: &[CrossChainExecutionEntry],
+    call_actions: &[CrossChainAction],
+) -> Vec<CrossChainExecutionEntry> {
+    // Build a lookup: hash(CALL action) → Vec of CALL actions (occurrence-aware).
+    // Multiple consumed events with the same actionHash are preserved so that
+    // duplicate-call patterns (e.g., CallTwice) can be matched 1:1.
+    let mut action_map: std::collections::HashMap<B256, Vec<&CrossChainAction>> =
+        std::collections::HashMap::new();
+    for a in call_actions {
+        let hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&a.to_sol_action()));
+        action_map.entry(hash).or_default().push(a);
+    }
+    // Track which occurrence of each hash has been consumed so far.
+    let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
+
+    // Detect if this batch has continuation entries (flash loans).
+    // Continuation entries have nextAction.action_type == CALL.
+    let has_continuations = l1_entries
+        .iter()
+        .any(|e| e.next_action.action_type == CrossChainActionType::Call);
+
+    let mut result = Vec::with_capacity(l1_entries.len() * 2);
+    for entry in l1_entries {
+        // Skip continuation entries (nextAction is CALL, not RESULT).
+        // These are handled by reconstruct_continuation_l2_entries.
+        if entry.next_action.action_type == CrossChainActionType::Call {
+            continue;
+        }
+        let idx = consumed_idx.entry(entry.action_hash).or_insert(0);
+        if let Some(call_action) = action_map
+            .get(&entry.action_hash)
+            .and_then(|actions| actions.get(*idx))
+        {
+            *idx += 1;
+            // When continuations are present, skip entries whose consumed action
+            // is NOT a CALL (e.g., RESULT resolution entries from scope navigation).
+            // These are reconstructed by reconstruct_continuation_l2_entries.
+            if has_continuations && call_action.action_type != CrossChainActionType::Call {
+                continue;
+            }
+            // Reconstruct CALL trigger entry
+            let call_entry = CrossChainExecutionEntry {
+                state_deltas: entry.state_deltas.clone(),
+                action_hash: entry.action_hash,
+                next_action: (*call_action).clone(),
+            };
+            // Reconstruct RESULT table entry
+            let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+                &entry.next_action.to_sol_action(),
+            ));
+            let result_entry = CrossChainExecutionEntry {
+                state_deltas: vec![],
+                action_hash: result_action_hash,
+                next_action: entry.next_action.clone(),
+            };
+            result.push(call_entry);
+            // Skip RESULT table entry when continuations are present — the continuation
+            // entries (reconstruct_continuation_l2_entries) provide their own RESULT entries.
+            // Including this one would conflict: same actionHash but wrong nextAction.
+            if !has_continuations {
+                result.push(result_entry);
+            }
+        } else {
+            // No matching CALL action — pass through as-is
+            result.push(entry.clone());
+        }
+    }
+    result
+}
+
+/// Reconstruct L2 continuation entries for flash loan patterns.
+///
+/// During flash loans, an L1 entry may have `nextAction.action_type == CALL` (continuation)
+/// instead of the usual `RESULT` (simple deposit). This signals a reentrant cross-chain
+/// call pattern where CALL_A triggers on L2, then a child CALL_C fires back to L1 (or
+/// another rollup), and the result resolves back on L2.
+///
+/// For each such continuation L1 entry (actionHash=hash(CALL_B), nextAction=CALL_C with scope),
+/// this function generates 3 additional L2 entries that the CCM execution table needs:
+///
+/// 1. `hash(RESULT(our_rollup, void)) → CALL_B` — consumed after the parent CALL returns on L2
+/// 2. `hash(CALL_C_unscoped) → RESULT(target_rollup, data)` — consumed by the reentrant bridge call
+/// 3. `hash(RESULT(our_rollup, void)) → RESULT(our_rollup, data)` — terminal entry
+///
+/// Entries 2 and 3 use real delivery return data from the L1 resolution entries when
+/// available (paired by traversal order). Falls back to void for backward compatibility.
+/// Entries 1 and 3 use void for the action_hash because L2 return data is not available
+/// to the fullnode without L2 simulation.
+///
+/// These entries are appended AFTER the standard pairs reconstructed by
+/// `convert_l1_entries_to_l2_pairs`, preserving the order expected by `loadExecutionTable`.
+///
+/// Returns an empty vec if no continuation patterns are found (simple deposits only).
+pub fn reconstruct_continuation_l2_entries(
+    l1_entries: &[CrossChainExecutionEntry],
+    call_actions: &[CrossChainAction],
+) -> Vec<CrossChainExecutionEntry> {
+    use std::collections::HashMap;
+
+    // Build lookup: hash(action) → action for all consumed actions.
+    // This includes CALL triggers (consumed by executeCrossChainCall) and
+    // RESULT actions (consumed by scope resolution via _consumeExecution).
+    let action_map: HashMap<B256, &CrossChainAction> = call_actions
+        .iter()
+        .map(|a| {
+            let hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&a.to_sol_action()));
+            (hash, a)
+        })
+        .collect();
+
+    // Determine our_rollup_id from the L1 entries' state deltas.
+    // The rollupId in state deltas identifies which rollup this batch belongs to.
+    let our_rollup_id = l1_entries
+        .iter()
+        .flat_map(|e| &e.state_deltas)
+        .map(|d| d.rollup_id)
+        .find(|id| !id.is_zero())
+        .unwrap_or(U256::from(1));
+
+    // Build hash-based lookup for L1 entries: action_hash → Vec<entry>.
+    // Uses Vec to preserve multiple entries with the same hash — the protocol
+    // supports duplicate calls (e.g., CallTwice calling increment() twice
+    // produces two entries with the same action_hash).
+    let mut l1_entry_map: std::collections::HashMap<B256, Vec<&CrossChainExecutionEntry>> =
+        std::collections::HashMap::new();
+    for entry in l1_entries.iter() {
+        l1_entry_map
+            .entry(entry.action_hash)
+            .or_default()
+            .push(entry);
+    }
+    // Track consumption index per hash for occurrence-aware matching.
+    // Each lookup consumes the NEXT entry, not always the first (#256).
+    let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
+
+    let mut continuation_entries = Vec::new();
+
+    for entry in l1_entries {
+        // Continuation pattern: nextAction is a CALL (not RESULT)
+        if entry.next_action.action_type != CrossChainActionType::Call {
+            continue;
+        }
+
+        // This is a continuation L1 entry: actionHash=hash(CALL_B), nextAction=CALL_C(scoped)
+        let call_c_scoped = &entry.next_action;
+
+        // Find CALL_B from the call_actions map (it's the consumed action for this entry)
+        let call_b = match action_map.get(&entry.action_hash) {
+            Some(action) => (*action).clone(),
+            None => {
+                warn!(
+                    target: "based_rollup::cross_chain",
+                    action_hash = %entry.action_hash,
+                    "continuation entry has no matching CALL action in consumed map — skipping"
+                );
+                continue;
+            }
+        };
+
+        // ── Hash-based lookup for return data (#254 codex review) ──
+        //
+        // Instead of fragile positional pairing, compute the expected hashes
+        // and look up the matching L1 entries directly:
+        //
+        // L1 entries structure:
+        //   hash(trigger_CALL) → delivery_CALL(scope=[0])      ← this entry
+        //   hash(CALL_C_unscoped) → RESULT(data=inner_return)  ← inner call result
+        //   hash(scope_RESULT)  → RESULT(data=delivery_return) ← scope resolution
+
+        // Build CALL_C_unscoped to compute its hash for lookup.
+        let call_c_unscoped = CrossChainAction {
+            action_type: call_c_scoped.action_type,
+            rollup_id: call_c_scoped.rollup_id,
+            destination: call_c_scoped.destination,
+            value: call_c_scoped.value,
+            data: call_c_scoped.data.clone(),
+            failed: call_c_scoped.failed,
+            source_address: call_c_scoped.source_address,
+            source_rollup: call_c_scoped.source_rollup,
+            scope: vec![],
+        };
+        let call_c_unscoped_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+            &call_c_unscoped.to_sol_action(),
+        ));
+
+        // Look up inner call result: hash(CALL_C_unscoped) → RESULT(inner_data)
+        // Occurrence-aware: consume the NEXT matching entry, not always the first (#256).
+        let (inner_data, inner_failed) = {
+            let idx = consumed_idx.entry(call_c_unscoped_hash).or_insert(0);
+            l1_entry_map
+                .get(&call_c_unscoped_hash)
+                .and_then(|entries| {
+                    let matching: Vec<_> = entries.iter()
+                        .filter(|e| e.next_action.action_type == CrossChainActionType::Result)
+                        .collect();
+                    matching.get(*idx).map(|e| {
+                        *idx += 1;
+                        (e.next_action.data.clone(), e.next_action.failed)
+                    })
+                })
+                .unwrap_or_else(|| (vec![], false))
+        };
+
+        // Compute scope resolution hash to find delivery return data.
+        // On L1, _processCallAtScope builds RESULT{data=inner_data} after
+        // the inner call returns. The scope resolution entry consumes this hash.
+        let scope_result_for_lookup = CrossChainAction {
+            action_type: CrossChainActionType::Result,
+            rollup_id: call_c_scoped.rollup_id,
+            destination: Address::ZERO,
+            value: U256::ZERO,
+            data: inner_data.clone(),
+            failed: inner_failed,
+            source_address: Address::ZERO,
+            source_rollup: U256::ZERO,
+            scope: vec![],
+        };
+        let scope_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+            &scope_result_for_lookup.to_sol_action(),
+        ));
+
+        // Look up scope resolution: hash(scope_RESULT) → RESULT(delivery_data)
+        // Occurrence-aware: consume the NEXT matching entry (#256).
+        let (delivery_data, delivery_failed) = {
+            let idx = consumed_idx.entry(scope_result_hash).or_insert(0);
+            l1_entry_map
+                .get(&scope_result_hash)
+                .and_then(|entries| {
+                    let matching: Vec<_> = entries.iter()
+                        .filter(|e| e.next_action.action_type == CrossChainActionType::Result)
+                        .collect();
+                    matching.get(*idx).map(|e| {
+                        *idx += 1;
+                        (e.next_action.data.clone(), e.next_action.failed)
+                    })
+                })
+            .unwrap_or_else(|| (vec![], false))
+        };
+
+        // Entry 1: hash(RESULT(our_rollup, inner_data)) → CALL_B
+        // This is consumed after the parent CALL_A returns on L2.
+        //
+        // On-chain, _processCallAtScope builds RESULT{data: executeOnBehalf_return}
+        // after the parent call. The return data from the L2 parent call matches
+        // the inner call's return data extracted from the L1 entries (inner_data).
+        // Using the actual data (instead of void) ensures the hash matches what
+        // the on-chain CCM computes for non-void continuation patterns.
+        let result_our_rollup = CrossChainAction {
+            action_type: CrossChainActionType::Result,
+            rollup_id: our_rollup_id,
+            destination: Address::ZERO,
+            value: U256::ZERO,
+            data: inner_data.clone(),
+            failed: inner_failed,
+            source_address: Address::ZERO,
+            source_rollup: U256::ZERO,
+            scope: vec![],
+        };
+        let result_our_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+            &result_our_rollup.to_sol_action(),
+        ));
+        continuation_entries.push(CrossChainExecutionEntry {
+            state_deltas: vec![],
+            action_hash: result_our_hash,
+            next_action: call_b,
+        });
+
+        // Entry 2: hash(CALL_C_unscoped) → RESULT(target_rollup, inner_data)
+        // call_c_unscoped and call_c_unscoped_hash already computed above for lookup.
+        // RESULT targeting the rollup that CALL_C was aimed at, with the
+        // inner call's return data (what executeCrossChainCall returns to the
+        // L1 caller). This is inner_data, NOT delivery_data — the distinction
+        // matters when the outer function transforms the return.
+        let result_target = CrossChainAction {
+            action_type: CrossChainActionType::Result,
+            rollup_id: call_c_scoped.rollup_id,
+            destination: Address::ZERO,
+            value: U256::ZERO,
+            data: inner_data,
+            failed: inner_failed,
+            source_address: Address::ZERO,
+            source_rollup: U256::ZERO,
+            scope: vec![],
+        };
+        continuation_entries.push(CrossChainExecutionEntry {
+            state_deltas: vec![],
+            action_hash: call_c_unscoped_hash,
+            next_action: result_target,
+        });
+
+        // Entry 3: hash(RESULT(our_rollup, inner_data)) → RESULT(our_rollup, delivery_data)
+        // Terminal entry — same action_hash as Entry 1 (result_our_hash).
+        //
+        // The next_action carries real delivery return data from L1 so that
+        // _resolveScopes returns it to the L2 caller.
+        let result_terminal = CrossChainAction {
+            action_type: CrossChainActionType::Result,
+            rollup_id: our_rollup_id,
+            destination: Address::ZERO,
+            value: U256::ZERO,
+            data: delivery_data,
+            failed: delivery_failed,
+            source_address: Address::ZERO,
+            source_rollup: U256::ZERO,
+            scope: vec![],
+        };
+        continuation_entries.push(CrossChainExecutionEntry {
+            state_deltas: vec![],
+            action_hash: result_our_hash,
+            next_action: result_terminal,
+        });
+    }
+
+    continuation_entries
+}
+
+/// Attach chained state deltas to L2-format cross-chain entry pairs.
+///
+/// Entries are arranged as `[CALL₁, RESULT₁, CALL₂, RESULT₂, ...]`.
+/// Given N pairs and N+1 intermediate state roots `[Y, X₁, X₂, ..., X]`,
+/// each CALL entry (even index) gets a `StateDelta(roots[i] → roots[i+1])`.
+/// RESULT entries (odd index) get no state deltas.
+///
+/// # Panics
+/// Panics if `intermediate_roots.len() != entries.len() / 2 + 1`.
+pub fn attach_chained_state_deltas(
+    entries: &mut [CrossChainExecutionEntry],
+    intermediate_roots: &[B256],
+    rollup_id: u64,
+) {
+    let pair_count = entries.len() / 2;
+    assert_eq!(
+        intermediate_roots.len(),
+        pair_count + 1,
+        "need {} intermediate roots for {} pairs, got {}",
+        pair_count + 1,
+        pair_count,
+        intermediate_roots.len(),
+    );
+
+    for i in 0..pair_count {
+        // The ether_delta for a cross-chain call entry equals the ETH value
+        // deposited by the call. This must match the `_etherDelta` accumulated
+        // by Rollups.sol during `executeCrossChainCall` (which tracks msg.value).
+        // Without this, postBatch reverts with `EtherDeltaMismatch`.
+        let call_value = entries[i * 2].next_action.value;
+        let ether_delta = if call_value.is_zero() {
+            I256::ZERO
+        } else {
+            I256::try_from(call_value).unwrap_or(I256::ZERO)
+        };
+        entries[i * 2].state_deltas = vec![CrossChainStateDelta {
+            rollup_id: U256::from(rollup_id),
+            current_state: intermediate_roots[i],
+            new_state: intermediate_roots[i + 1],
+            ether_delta,
+        }];
+    }
+}
+
+/// The signature hash of the `BatchPosted` event for log filtering.
+pub fn batch_posted_signature_hash() -> B256 {
+    ICrossChainManagerL2::BatchPosted::SIGNATURE_HASH
+}
+
+/// The signature hash of the `ExecutionConsumed` event for log filtering.
+pub fn execution_consumed_signature_hash() -> B256 {
+    ICrossChainManagerL2::ExecutionConsumed::SIGNATURE_HASH
+}
+
+/// Parse `ExecutionConsumed` event logs and return consumed action hashes with
+/// their full CALL actions.
+///
+/// Each `ExecutionConsumed` log has `actionHash` as the first indexed topic
+/// (topic[1]) and the full `Action` struct in the event data. The CALL action
+/// contains destination, data, sourceAddress — everything fullnodes need to
+/// reconstruct L2-format entry pairs during derivation.
+///
+/// Returns a `ConsumedMap` (actionHash → Vec<CrossChainAction>) preserving all
+/// occurrences. Duplicate-call patterns (e.g., CallTwice) emit multiple
+/// `ExecutionConsumed` events with the same actionHash; each is recorded so
+/// that occurrence-aware consumption in derivation can match them 1:1.
+pub fn parse_execution_consumed_logs(logs: &[Log]) -> ConsumedMap {
+    let mut consumed: ConsumedMap = std::collections::HashMap::new();
+    for log in logs {
+        let topics = log.inner.topics();
+        if topics.len() < 2 {
+            warn!(
+                target: "based_rollup::cross_chain",
+                "skipping ExecutionConsumed log with fewer than 2 topics"
+            );
+            continue;
+        }
+        let action_hash = topics[1];
+
+        // Decode the full Action from event data
+        match ICrossChainManagerL2::ExecutionConsumed::decode_log_data(&log.inner.data) {
+            Ok(event) => match CrossChainAction::from_sol(&event.action) {
+                Ok(action) => {
+                    consumed.entry(action_hash).or_default().push(action);
+                }
+                Err(err) => {
+                    warn!(
+                        target: "based_rollup::cross_chain",
+                        %err,
+                        %action_hash,
+                        "failed to convert ExecutionConsumed action"
+                    );
+                    // Still record the hash so the entry is treated as consumed
+                    // even if we can't decode the action (defensive).
+                    // Only push placeholder if no decoded entry exists yet for this hash.
+                    let entries = consumed.entry(action_hash).or_default();
+                    if entries.is_empty() {
+                        entries.push(CrossChainAction {
+                            action_type: CrossChainActionType::Call,
+                            rollup_id: U256::ZERO,
+                            destination: Address::ZERO,
+                            value: U256::ZERO,
+                            data: Vec::new(),
+                            failed: false,
+                            source_address: Address::ZERO,
+                            source_rollup: U256::ZERO,
+                            scope: Vec::new(),
+                        });
+                    }
+                }
+            },
+            Err(err) => {
+                warn!(
+                    target: "based_rollup::cross_chain",
+                    %err,
+                    %action_hash,
+                    "failed to decode ExecutionConsumed event data — using hash only"
+                );
+                // Only push placeholder if no decoded entry exists yet for this hash.
+                let entries = consumed.entry(action_hash).or_default();
+                if entries.is_empty() {
+                    entries.push(CrossChainAction {
+                        action_type: CrossChainActionType::Call,
+                        rollup_id: U256::ZERO,
+                        destination: Address::ZERO,
+                        value: U256::ZERO,
+                        data: Vec::new(),
+                        failed: false,
+                        source_address: Address::ZERO,
+                        source_rollup: U256::ZERO,
+                        scope: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+    consumed
+}
+
+/// A parsed execution entry with the L1 block it was posted in.
+#[derive(Debug, Clone)]
+pub struct DerivedExecutionEntry {
+    pub entry: CrossChainExecutionEntry,
+    pub l1_block_number: u64,
+}
+
+/// Parse `BatchPosted` event logs into execution entries, filtering for the given rollup ID.
+///
+/// Returns entries where at least one state delta references `rollup_id`,
+/// along with the L1 block number each entry was posted in.
+pub fn parse_batch_posted_logs(logs: &[Log], rollup_id: U256) -> Vec<DerivedExecutionEntry> {
+    let mut entries = Vec::new();
+
+    for log in logs {
+        let l1_block = match log.block_number {
+            Some(n) => n,
+            None => {
+                warn!(
+                    target: "based_rollup::cross_chain",
+                    "skipping BatchPosted log with no block_number"
+                );
+                continue;
+            }
+        };
+
+        let event = match ICrossChainManagerL2::BatchPosted::decode_log_data(&log.inner.data) {
+            Ok(e) => e,
+            Err(err) => {
+                warn!(
+                    target: "based_rollup::cross_chain",
+                    %err,
+                    "failed to decode BatchPosted event"
+                );
+                continue;
+            }
+        };
+
+        for sol_entry in &event.entries {
+            // Include this entry if any state delta references our rollup OR
+            // if the nextAction targets our rollup (incoming cross-chain call).
+            // Without the nextAction check, incoming calls would be silently dropped.
+            let has_state_delta = sol_entry
+                .stateDeltas
+                .iter()
+                .any(|d| d.rollupId == rollup_id);
+            let has_incoming_action = sol_entry.nextAction.rollupId == rollup_id;
+            let relevant = has_state_delta || has_incoming_action;
+            if relevant {
+                match CrossChainExecutionEntry::from_sol(sol_entry) {
+                    Ok(entry) => {
+                        entries.push(DerivedExecutionEntry {
+                            entry,
+                            l1_block_number: l1_block,
+                        });
+                    }
+                    Err(err) => {
+                        warn!(
+                            target: "based_rollup::cross_chain",
+                            %err,
+                            l1_block,
+                            "skipping execution entry with invalid action type"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    entries
+}
+
+// ──────────────────────────────────────────────
+//  Builder-signed transaction construction helpers
+// ──────────────────────────────────────────────
+
+use alloy_consensus::TxLegacy;
+use alloy_signer_local::PrivateKeySigner;
+use reth_ethereum_primitives::TransactionSigned;
+
+/// Gas limits for builder protocol transactions.
+/// These are upper bounds for the gas_limit field in each tx. The actual gas used
+/// is much lower (e.g. ~500K total for a normal block's protocol txs), but we keep
+/// moderate headroom to avoid reverts from underestimation.
+const DEPLOY_GAS_LIMIT: u64 = 5_000_000;
+/// setContext writes 4 storage slots (BlockContext struct) to the contexts mapping
+/// plus updates `latest` — cold SSTOREs cost ~20K each, total ~200K gas.
+const SET_CONTEXT_GAS_LIMIT: u64 = 250_000;
+/// loadExecutionTable writes N entries to storage — each entry requires ~100K gas
+/// for the per-actionHash self-clean (delete + push) and pendingEntryCount update.
+/// 3M supports up to ~30 entries, covering MAX_RECURSIVE_DEPTH=5 (9 entries for
+/// 5-round PingPong) with headroom.
+const LOAD_TABLE_GAS_LIMIT: u64 = 3_000_000;
+/// Cross-chain calls can trigger complex execution: WrappedToken deployment
+/// via CREATE2 (~700K), proxy creation, nested callbacks, etc. 2M provides
+/// headroom beyond the ~956K observed for flash loan receiveTokens while
+/// keeping 3+ protocol txs within the ~30M block gas limit.
+const EXECUTE_INCOMING_GAS_LIMIT: u64 = 2_000_000;
+
+/// Build and sign a legacy transaction helper.
+fn build_signed_legacy_tx(
+    to: Option<Address>,
+    data: Vec<u8>,
+    signer: &PrivateKeySigner,
+    nonce: u64,
+    chain_id: u64,
+    gas_price: u128,
+    gas_limit: u64,
+    value: u128,
+) -> eyre::Result<TransactionSigned> {
+    use alloy_network::TxSignerSync;
+
+    let mut tx = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce,
+        gas_price,
+        gas_limit,
+        to: match to {
+            Some(addr) => alloy_primitives::TxKind::Call(addr),
+            None => alloy_primitives::TxKind::Create,
+        },
+        value: alloy_primitives::U256::from(value),
+        input: alloy_primitives::Bytes::from(data),
+    };
+    let sig = signer.sign_transaction_sync(&mut tx)?;
+    // EthereumTypedTransaction<TxEip4844>::Legacy(tx).into_envelope(sig)
+    // produces EthereumTxEnvelope<TxEip4844> which is reth's TransactionSigned
+    let typed_tx = reth_ethereum_primitives::Transaction::Legacy(tx);
+    Ok(typed_tx.into_envelope(sig))
+}
+
+/// Sign a setContext transaction.
+pub fn build_set_context_tx(
+    l1_block_number: u64,
+    l1_block_hash: B256,
+    l2_context_address: Address,
+    signer: &PrivateKeySigner,
+    nonce: u64,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    let calldata = crate::payload_builder::encode_set_context_calldata(
+        &crate::payload_builder::L1BlockInfo {
+            l1_block_number,
+            l1_block_hash,
+        },
+    );
+    build_signed_legacy_tx(
+        Some(l2_context_address),
+        calldata.to_vec(),
+        signer,
+        nonce,
+        chain_id,
+        gas_price,
+        SET_CONTEXT_GAS_LIMIT,
+        0,
+    )
+}
+
+/// Sign a loadExecutionTable transaction.
+pub fn build_load_table_tx(
+    entries: &[CrossChainExecutionEntry],
+    ccm_address: Address,
+    signer: &PrivateKeySigner,
+    nonce: u64,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    let calldata = encode_load_execution_table_calldata(entries);
+    build_signed_legacy_tx(
+        Some(ccm_address),
+        calldata.to_vec(),
+        signer,
+        nonce,
+        chain_id,
+        gas_price,
+        LOAD_TABLE_GAS_LIMIT,
+        0,
+    )
+}
+
+/// Sign an executeIncomingCrossChainCall transaction.
+pub fn build_execute_incoming_tx(
+    action: &CrossChainAction,
+    ccm_address: Address,
+    signer: &PrivateKeySigner,
+    nonce: u64,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    let calldata = encode_execute_incoming_call_calldata(action);
+    build_signed_legacy_tx(
+        Some(ccm_address),
+        calldata.to_vec(),
+        signer,
+        nonce,
+        chain_id,
+        gas_price,
+        EXECUTE_INCOMING_GAS_LIMIT,
+        0,
+    )
+}
+
+/// Sign CREATE transaction for L2Context deployment (block 1).
+pub fn build_deploy_l2context_tx(
+    authorized_caller: Address,
+    signer: &PrivateKeySigner,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    // Constructor: L2Context(address _authorizedCaller)
+    // We need the creation bytecode. For now, use the compiled bytecode
+    // from forge. The bytecode includes constructor args appended.
+    let bytecode = l2context_creation_bytecode();
+    // ABI-encode constructor arg: address padded to 32 bytes
+    let mut deploy_data = bytecode;
+    deploy_data.extend_from_slice(
+        &<alloy_sol_types::sol_data::Address as alloy_sol_types::SolType>::abi_encode(
+            &authorized_caller,
+        ),
+    );
+    build_signed_legacy_tx(
+        None, // CREATE
+        deploy_data,
+        signer,
+        0, // nonce=0 for first deployment
+        chain_id,
+        gas_price,
+        DEPLOY_GAS_LIMIT,
+        0,
+    )
+}
+
+/// Sign CREATE transaction for CrossChainManagerL2 deployment (block 1).
+pub fn build_deploy_ccm_tx(
+    rollup_id: u64,
+    system_address: Address,
+    signer: &PrivateKeySigner,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    let bytecode = ccm_creation_bytecode();
+    // Constructor args: (uint256 _rollupId, address _systemAddress)
+    let mut deploy_data = bytecode;
+    deploy_data.extend_from_slice(&<(
+        alloy_sol_types::sol_data::Uint<256>,
+        alloy_sol_types::sol_data::Address,
+    )>::abi_encode(&(
+        U256::from(rollup_id),
+        system_address,
+    )));
+    build_signed_legacy_tx(
+        None, // CREATE
+        deploy_data,
+        signer,
+        1, // nonce=1 for second deployment
+        chain_id,
+        gas_price,
+        DEPLOY_GAS_LIMIT,
+        0,
+    )
+}
+
+/// Sign CREATE transaction for Bridge deployment on L2 (block 1, nonce=2).
+/// Bridge has no constructor args — initialized separately via `build_initialize_bridge_tx`.
+pub fn build_deploy_bridge_tx(
+    signer: &PrivateKeySigner,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    let bytecode = bridge_creation_bytecode();
+    build_signed_legacy_tx(
+        None, // CREATE
+        bytecode,
+        signer,
+        2, // nonce=2 (after L2Context=0, CCM=1)
+        chain_id,
+        gas_price,
+        DEPLOY_GAS_LIMIT,
+        0,
+    )
+}
+
+/// Sign initialize transaction for Bridge on L2 (block 1, nonce=3).
+/// Calls `initialize(address _manager, uint256 _rollupId, address _admin)`.
+pub fn build_initialize_bridge_tx(
+    ccm_address: Address,
+    rollup_id: u64,
+    admin: Address,
+    bridge_address: Address,
+    signer: &PrivateKeySigner,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    // initialize(address,uint256,address) selector + args
+    let calldata = IBridge::initializeCall {
+        _manager: ccm_address,
+        _rollupId: U256::from(rollup_id),
+        _admin: admin,
+    }
+    .abi_encode();
+    build_signed_legacy_tx(
+        Some(bridge_address),
+        calldata,
+        signer,
+        3, // nonce=3
+        chain_id,
+        gas_price,
+        SET_CONTEXT_GAS_LIMIT, // 250K is plenty for initialize
+        0,
+    )
+}
+
+/// Build a signed transaction that calls `Bridge.setCanonicalBridgeAddress(address)`.
+///
+/// Used as a protocol transaction in block 2 to set the canonical bridge address
+/// on the L2 bridge contract. Required for flash loan continuation entries where
+/// Bridge_L2._bridgeAddress() must return the L1 bridge address.
+pub fn build_set_canonical_bridge_tx(
+    bridge_l2_address: Address,
+    canonical_address: Address,
+    signer: &PrivateKeySigner,
+    nonce: u64,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    let calldata = IBridge::setCanonicalBridgeAddressCall {
+        bridgeAddress: canonical_address,
+    }
+    .abi_encode();
+    build_signed_legacy_tx(
+        Some(bridge_l2_address),
+        calldata,
+        signer,
+        nonce,
+        chain_id,
+        gas_price,
+        SET_CONTEXT_GAS_LIMIT,
+        0,
+    )
+}
+
+/// Sign a legacy ETH transfer for bootstrap funding at block 1.
+pub fn build_bootstrap_transfer_tx(
+    to: Address,
+    amount_wei: u128,
+    signer: &PrivateKeySigner,
+    nonce: u64,
+    chain_id: u64,
+    gas_price: u128,
+) -> eyre::Result<TransactionSigned> {
+    build_signed_legacy_tx(
+        Some(to),
+        Vec::new(),
+        signer,
+        nonce,
+        chain_id,
+        gas_price,
+        21_000,
+        amount_wei,
+    )
+}
+
+/// Estimate total gas budget for a set of builder protocol transactions.
+/// Uses the gas_limit from each tx as a conservative upper bound.
+pub fn estimate_builder_tx_gas(txs: &[TransactionSigned]) -> u64 {
+    use alloy_consensus::Transaction;
+    txs.iter().map(|tx| tx.gas_limit()).sum()
+}
+
+/// Partition execution entries into table entries (for loadExecutionTable)
+/// and trigger entries (CALL actions targeting our rollup, for executeIncomingCrossChainCall).
+pub fn partition_entries(
+    entries: &[CrossChainExecutionEntry],
+    our_rollup_id: U256,
+) -> (Vec<CrossChainExecutionEntry>, Vec<CrossChainExecutionEntry>) {
+    let mut table_entries = Vec::new();
+    let mut trigger_entries = Vec::new();
+    for entry in entries {
+        // A trigger is an entry whose action_hash == hash(next_action).
+        // This is true for CALL triggers from convert_l1_entries_to_l2_pairs
+        // (action_hash=hash(CALL_A), next_action=CALL_A) but NOT for continuation
+        // table entries (action_hash=hash(RESULT), next_action=CALL_B).
+        let is_call_to_us = entry.next_action.action_type == CrossChainActionType::Call
+            && entry.next_action.rollup_id == our_rollup_id;
+        let next_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+            &entry.next_action.to_sol_action(),
+        ));
+        if is_call_to_us && next_hash == entry.action_hash {
+            trigger_entries.push(entry.clone());
+        } else {
+            table_entries.push(entry.clone());
+        }
+    }
+    (table_entries, trigger_entries)
+}
+
+/// L2Context creation bytecode (compiled from L2Context.sol with parameterized constructor).
+/// This must be regenerated when L2Context.sol changes via `forge build`.
+///
+/// The bytecode is loaded from the `L2_CONTEXT_BYTECODE` env var at runtime
+/// (set by deploy.sh) or from the forge build artifacts.
+/// Falls back to empty bytecode with a warning if not available.
+pub fn l2context_creation_bytecode() -> Vec<u8> {
+    let bytecode = if let Ok(hex) = std::env::var("L2_CONTEXT_BYTECODE") {
+        let hex = hex.strip_prefix("0x").unwrap_or(&hex);
+        hex::decode(hex).unwrap_or_else(|_| {
+            tracing::warn!("failed to decode L2_CONTEXT_BYTECODE hex, using empty bytecode");
+            Vec::new()
+        })
+    } else {
+        // Try to load from forge build output
+        let path = std::path::Path::new("contracts/out/L2Context.sol/L2Context.json");
+        load_bytecode_from_artifact(path)
+    };
+    if bytecode.is_empty() {
+        tracing::error!(
+            "L2Context creation bytecode is empty — contract will deploy with no code! \
+             Set L2_CONTEXT_BYTECODE env var or ensure forge build artifacts are available"
+        );
+    }
+    bytecode
+}
+
+/// CrossChainManagerL2 creation bytecode.
+pub fn ccm_creation_bytecode() -> Vec<u8> {
+    let bytecode = if let Ok(hex) = std::env::var("CCM_BYTECODE") {
+        let hex = hex.strip_prefix("0x").unwrap_or(&hex);
+        hex::decode(hex).unwrap_or_else(|_| {
+            tracing::warn!("failed to decode CCM_BYTECODE hex, using empty bytecode");
+            Vec::new()
+        })
+    } else {
+        let path =
+            std::path::Path::new("contracts/out/CrossChainManagerL2.sol/CrossChainManagerL2.json");
+        load_bytecode_from_artifact(path)
+    };
+    if bytecode.is_empty() {
+        tracing::error!(
+            "CCM creation bytecode is empty — contract will deploy with no code! \
+             Set CCM_BYTECODE env var or ensure forge build artifacts are available"
+        );
+    }
+    bytecode
+}
+
+/// Bridge creation bytecode (no constructor args).
+pub fn bridge_creation_bytecode() -> Vec<u8> {
+    let bytecode = if let Ok(hex) = std::env::var("BRIDGE_BYTECODE") {
+        let hex = hex.strip_prefix("0x").unwrap_or(&hex);
+        hex::decode(hex).unwrap_or_else(|_| {
+            tracing::warn!("failed to decode BRIDGE_BYTECODE hex, using empty bytecode");
+            Vec::new()
+        })
+    } else {
+        let path = std::path::Path::new("contracts/out/Bridge.sol/Bridge.json");
+        let bc = load_bytecode_from_artifact(path);
+        if bc.is_empty() {
+            let alt = std::path::Path::new("contracts/sync-rollups/out/Bridge.sol/Bridge.json");
+            load_bytecode_from_artifact(alt)
+        } else {
+            bc
+        }
+    };
+    if bytecode.is_empty() {
+        tracing::error!(
+            "Bridge creation bytecode is empty — contract will deploy with no code! \
+             Set BRIDGE_BYTECODE env var or ensure forge build artifacts are available"
+        );
+    }
+    bytecode
+}
+
+/// Load creation bytecode from a forge artifact JSON file.
+fn load_bytecode_from_artifact(path: &std::path::Path) -> Vec<u8> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+    let Some(hex_str) = json["bytecode"]["object"].as_str() else {
+        return Vec::new();
+    };
+    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    hex::decode(hex_str).unwrap_or_default()
+}
+
+// ──────────────────────────────────────────────
+//  L1 withdrawal trigger helpers
+// ──────────────────────────────────────────────
+
+sol! {
+    /// Rollups.createCrossChainProxy(address,uint256)
+    interface IRollups {
+        function createCrossChainProxy(address originalAddress, uint256 originalRollupId) external returns (address);
+        function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId) external view returns (address);
+    }
+}
+
+/// ABI-encode `createCrossChainProxy(address, uint256)` calldata.
+pub fn encode_create_proxy_calldata(user: Address, rollup_id: u64) -> Bytes {
+    let calldata = IRollups::createCrossChainProxyCall {
+        originalAddress: user,
+        originalRollupId: U256::from(rollup_id),
+    }
+    .abi_encode();
+    Bytes::from(calldata)
+}
+
+// ──────────────────────────────────────────────
+//  Protocol transaction identification (§4f)
+// ──────────────────────────────────────────────
+
+/// 4-byte function selector for `executeIncomingCrossChainCall(address,uint256,bytes,address,uint256,uint256[])`.
+///
+/// Computed from the sol! binding:
+/// `ICrossChainManagerL2::executeIncomingCrossChainCallCall::SELECTOR`
+pub const EXECUTE_REMOTE_CALL_SELECTOR: [u8; 4] =
+    ICrossChainManagerL2::executeIncomingCrossChainCallCall::SELECTOR;
+
+/// 4-byte function selector for `loadExecutionTable(ExecutionEntry[])`.
+///
+/// Computed from the sol! binding:
+/// `ICrossChainManagerL2::loadExecutionTableCall::SELECTOR`
+pub const LOAD_EXECUTION_TABLE_SELECTOR: [u8; 4] =
+    ICrossChainManagerL2::loadExecutionTableCall::SELECTOR;
+
+/// Check if a transaction targets the CrossChainManagerL2 with `executeIncomingCrossChainCall`.
+///
+/// Used by derivation (docs/DERIVATION.md §4f) to identify protocol transactions that may need
+/// filtering when the corresponding cross-chain entry was not consumed on L1.
+pub fn is_ccm_execute_remote_call(tx: &TransactionSigned, ccm_address: Address) -> bool {
+    use alloy_consensus::Transaction;
+
+    tx.to() == Some(ccm_address)
+        && tx.input().len() >= 4
+        && tx.input()[..4] == EXECUTE_REMOTE_CALL_SELECTOR
+}
+
+/// Check if a transaction targets the CrossChainManagerL2 with `loadExecutionTable`.
+///
+/// Used when ALL deferred entries in a batch were unconsumed (e.g., all withdrawal
+/// triggers reverted on L1). In that case, `loadExecutionTable` must also be stripped
+/// to prevent phantom entries in the CCM's execution table that could be consumed by
+/// user Bridge.bridgeEther txs, burning ETH on L2 with no L1 delivery.
+pub fn is_ccm_load_execution_table(tx: &TransactionSigned, ccm_address: Address) -> bool {
+    use alloy_consensus::Transaction;
+
+    tx.to() == Some(ccm_address)
+        && tx.input().len() >= 4
+        && tx.input()[..4] == LOAD_EXECUTION_TABLE_SELECTOR
+}
+
+/// Filter unconsumed `executeIncomingCrossChainCall` protocol txs from a block's transaction list.
+///
+/// Per docs/DERIVATION.md §4f: `loadExecutionTable` is normally ALWAYS kept (harmless internal
+/// bookkeeping). Only `executeIncomingCrossChainCall` txs for unconsumed entries are
+/// discarded.
+///
+/// `consumed_trigger_count` is the number of consumed trigger entries
+/// (`executeIncomingCrossChainCall` txs to KEEP). Since consumption follows the chained
+/// delta ordering (§3e), consumed entries are always a prefix — the first
+/// `consumed_trigger_count` `executeIncomingCrossChainCall` txs are kept, the rest are
+/// discarded.
+///
+/// When `strip_load_table` is true, `loadExecutionTable` txs are ALSO stripped. This is
+/// used when ALL deferred entries in the batch were unconsumed (e.g., all withdrawal
+/// triggers reverted on L1). Stripping the table prevents phantom entries in the CCM
+/// that could be consumed by user Bridge.bridgeEther txs, burning ETH on L2 with no
+/// L1 delivery.
+///
+/// Returns the filtered transaction list re-encoded as RLP bytes.
+pub fn filter_unconsumed_execute_remote_calls(
+    encoded_transactions: &Bytes,
+    ccm_address: Address,
+    consumed_trigger_count: usize,
+    strip_load_table: bool,
+) -> eyre::Result<Bytes> {
+    use alloy_rlp::Decodable;
+
+    if encoded_transactions.is_empty() {
+        return Ok(Bytes::new());
+    }
+
+    let txs: Vec<TransactionSigned> = Decodable::decode(&mut encoded_transactions.as_ref())
+        .map_err(|e| eyre::eyre!("failed to RLP-decode transactions: {e}"))?;
+
+    let mut execute_count: usize = 0;
+    let filtered: Vec<TransactionSigned> = txs
+        .into_iter()
+        .filter(|tx| {
+            if is_ccm_execute_remote_call(tx, ccm_address) {
+                execute_count += 1;
+                // Keep the first `consumed_trigger_count` executeRemoteCall txs
+                execute_count <= consumed_trigger_count
+            } else if strip_load_table && is_ccm_load_execution_table(tx, ccm_address) {
+                // Strip loadExecutionTable when ALL deferred entries were unconsumed
+                false
+            } else {
+                // Keep all other txs (setContext, loadTable, user txs)
+                true
+            }
+        })
+        .collect();
+
+    let mut buf = Vec::new();
+    alloy_rlp::encode_list(&filtered, &mut buf);
+    Ok(Bytes::from(buf))
+}
+
+// ──────────────────────────────────────────────
+//  Withdrawal transaction identification and filtering
+// ──────────────────────────────────────────────
+
+/// 4-byte function selector for `Bridge.bridgeEther(uint256,address)`.
+///
+/// Selector = 0xf402d9f3.
+const BRIDGE_ETHER_SELECTOR: [u8; 4] = [0xf4, 0x02, 0xd9, 0xf3];
+
+/// Check if a transaction is a `Bridge.bridgeEther(0)` withdrawal tx.
+///
+/// Withdrawal txs target the Bridge L2 contract with `bridgeEther(0)` where
+/// rollupId=0 means "withdraw to L1".
+pub fn is_bridge_ether_withdrawal(tx: &TransactionSigned, bridge_l2_address: Address) -> bool {
+    use alloy_consensus::Transaction;
+
+    tx.to() == Some(bridge_l2_address)
+        && tx.input().len() >= 68
+        && tx.input()[..4] == BRIDGE_ETHER_SELECTOR
+        && U256::from_be_slice(&tx.input()[4..36]).is_zero()
+}
+
+/// Unified filter for both deposit and withdrawal txs in a mixed block.
+///
+/// Iterates the block's transaction list and applies prefix-counting to both
+/// `executeRemoteCall` (deposit) and `bridgeEther(0)` (withdrawal) txs independently.
+/// All other txs (setContext, loadExecutionTable, user txs) are always kept.
+///
+/// `keep_deposit_count`: number of `executeRemoteCall` txs to keep (prefix).
+/// `keep_withdrawal_count`: number of `bridgeEther(0)` txs to keep (prefix).
+pub fn filter_block_entries(
+    encoded_transactions: &Bytes,
+    ccm_address: Address,
+    bridge_l2_address: Address,
+    keep_deposit_count: usize,
+    keep_withdrawal_count: usize,
+) -> eyre::Result<Bytes> {
+    use alloy_rlp::Decodable;
+
+    if encoded_transactions.is_empty() {
+        return Ok(Bytes::new());
+    }
+
+    let txs: Vec<TransactionSigned> = Decodable::decode(&mut encoded_transactions.as_ref())
+        .map_err(|e| eyre::eyre!("failed to RLP-decode transactions: {e}"))?;
+
+    let mut deposit_count: usize = 0;
+    let mut withdrawal_count: usize = 0;
+    let filtered: Vec<TransactionSigned> = txs
+        .into_iter()
+        .filter(|tx| {
+            if is_ccm_execute_remote_call(tx, ccm_address) {
+                deposit_count += 1;
+                deposit_count <= keep_deposit_count
+            } else if is_bridge_ether_withdrawal(tx, bridge_l2_address) {
+                withdrawal_count += 1;
+                withdrawal_count <= keep_withdrawal_count
+            } else {
+                // Keep all other txs (setContext, loadExecutionTable, user txs)
+                true
+            }
+        })
+        .collect();
+
+    let mut buf = Vec::new();
+    alloy_rlp::encode_list(&filtered, &mut buf);
+    Ok(Bytes::from(buf))
+}
+
+/// Attach chained state deltas to both deposit and withdrawal entry pairs
+/// using a unified intermediate root chain.
+///
+/// `intermediate_roots` has D+W+1 values where D = `num_deposits`, W = withdrawal pairs.
+/// The root chain is:
+/// ```text
+/// R(0,0) = no deposits, no withdrawals (clean)
+/// R(1,0) = 1 deposit applied
+/// ...
+/// R(D,0) = all deposits, no withdrawals
+/// R(D,1) = all deposits + 1 withdrawal
+/// ...
+/// R(D,W) = all txs = speculative
+/// ```
+///
+/// For deposit pair i (0-indexed):
+/// - CALL (index i*2): `StateDelta(rollupId, roots[i], roots[i+1], etherDelta=+call_value)`
+/// - RESULT (index i*2+1): no state delta (same as `attach_chained_state_deltas`)
+///
+/// For withdrawal pair j (0-indexed):
+/// - CALL (index j*2): `StateDelta(rollupId, roots[D+j], roots[D+j+1], etherDelta=0)`
+/// - RESULT (index j*2+1): `StateDelta(rollupId, roots[D+j+1], roots[D+j+1], etherDelta=-amount)`
+pub fn attach_unified_chained_state_deltas(
+    deposit_entries: &mut [CrossChainExecutionEntry],
+    withdrawal_entries: &mut [CrossChainExecutionEntry],
+    intermediate_roots: &[B256],
+    rollup_id: u64,
+    num_deposits: usize,
+) {
+    let num_withdrawals = withdrawal_entries.len() / 2;
+    assert_eq!(
+        intermediate_roots.len(),
+        num_deposits + num_withdrawals + 1,
+        "need {} intermediate roots for {} deposits + {} withdrawals, got {}",
+        num_deposits + num_withdrawals + 1,
+        num_deposits,
+        num_withdrawals,
+        intermediate_roots.len(),
+    );
+
+    let rollup_id_u256 = U256::from(rollup_id);
+
+    // Deposit entries: pairs at indices [0..2*num_deposits)
+    for i in 0..num_deposits {
+        let call_value = deposit_entries[i * 2].next_action.value;
+        let ether_delta = if call_value.is_zero() {
+            I256::ZERO
+        } else {
+            I256::try_from(call_value).unwrap_or(I256::ZERO)
+        };
+        deposit_entries[i * 2].state_deltas = vec![CrossChainStateDelta {
+            rollup_id: rollup_id_u256,
+            current_state: intermediate_roots[i],
+            new_state: intermediate_roots[i + 1],
+            ether_delta,
+        }];
+        // RESULT entry: no state delta (same as attach_chained_state_deltas)
+    }
+
+    // Withdrawal entries: pairs at indices [0..2*num_withdrawals)
+    for j in 0..num_withdrawals {
+        let root_offset = num_deposits + j;
+        // CALL entry: state advances roots[D+j] -> roots[D+j+1], etherDelta = 0
+        withdrawal_entries[j * 2].state_deltas = vec![CrossChainStateDelta {
+            rollup_id: rollup_id_u256,
+            current_state: intermediate_roots[root_offset],
+            new_state: intermediate_roots[root_offset + 1],
+            ether_delta: I256::ZERO,
+        }];
+
+        if withdrawal_entries.len() > j * 2 + 1 {
+            // RESULT entry: identity state, etherDelta = -amount
+            let withdraw_amount = withdrawal_entries[j * 2].next_action.value;
+            withdrawal_entries[j * 2 + 1].state_deltas = vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: intermediate_roots[root_offset + 1],
+                new_state: intermediate_roots[root_offset + 1],
+                ether_delta: -I256::try_from(withdraw_amount).unwrap_or(I256::ZERO),
+            }];
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "cross_chain_tests.rs"]
+mod tests;

@@ -1,0 +1,20 @@
+.container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  overflow-x: auto;
+}
+.empty {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.55rem;
+}
+.svg {
+  width: 100%;
+  display: block;
+}

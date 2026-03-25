@@ -1,0 +1,70 @@
+# deployments/devnet-eez/docker-compose.dev.yml — Dev overlay for EEZ devnet
+#
+# Mounts locally compiled binary for fast iteration without Docker rebuilds.
+#
+# First time:
+#   cargo build --release
+#   sudo docker compose -f deployments/devnet-eez/docker-compose.yml \
+#                       -f deployments/devnet-eez/docker-compose.dev.yml up -d
+#
+# Iterate (no rebuild, no down, no re-deploy):
+#   cargo build --release
+#   sudo docker compose -f deployments/devnet-eez/docker-compose.yml \
+#                       -f deployments/devnet-eez/docker-compose.dev.yml \
+#                       restart builder fullnode1 fullnode2
+
+services:
+  deploy:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile.dev
+      target: deploy
+    image: based-rollup:dev-deploy
+    environment:
+      DEPLOY_FLASH_LOAN: "true"
+    volumes:
+      - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
+      - ./genesis-l2.json:/etc/based-rollup/genesis.json
+      - ../../contracts/out:/app/contracts/out
+      - ../../contracts/sync-rollups/out:/app/contracts/sync-rollups/out
+      - ../../contracts/sync-rollups/cache:/app/contracts/sync-rollups/cache
+
+  deploy-l2:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile.dev
+      target: deploy
+    image: based-rollup:dev-deploy
+    environment:
+      DEPLOY_FLASH_LOAN: "true"
+    volumes:
+      - ../../contracts/sync-rollups/out:/app/contracts/sync-rollups/out
+      - ../../contracts/sync-rollups/cache:/app/contracts/sync-rollups/cache
+
+  builder:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile.dev
+      target: runtime
+    image: based-rollup:dev
+    environment:
+      GENESIS: /shared/genesis.json
+    volumes:
+      - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
+      - ./genesis-l2.json:/etc/based-rollup/genesis.json
+
+  fullnode1:
+    image: based-rollup:dev
+    environment:
+      GENESIS: /shared/genesis.json
+    volumes:
+      - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
+      - ./genesis-l2.json:/etc/based-rollup/genesis.json
+
+  fullnode2:
+    image: based-rollup:dev
+    environment:
+      GENESIS: /shared/genesis.json
+    volumes:
+      - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
+      - ./genesis-l2.json:/etc/based-rollup/genesis.json

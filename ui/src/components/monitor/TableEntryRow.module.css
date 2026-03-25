@@ -1,0 +1,89 @@
+.row {
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  margin-bottom: 4px;
+  overflow: hidden;
+  transition: all 0.3s;
+  font-size: 0.6rem;
+}
+.rowAdded {
+  border-color: var(--cyan);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.15);
+  animation: entryAdd 0.4s ease-out;
+}
+.rowConsuming {
+  border-color: var(--red);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.12);
+  opacity: 0.35;
+  animation: entryConsume 0.4s ease-out;
+}
+.rowConsumed {
+  opacity: 0.25;
+}
+.summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.summaryStrikethrough {
+  text-decoration: line-through;
+}
+.indexBadge {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--bg-inset);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.45rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.hashText {
+  flex: 1;
+  line-height: 1.4;
+  min-width: 0;
+}
+.delta {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.5rem;
+  opacity: 0.7;
+  margin-top: 1px;
+}
+.expandIcon {
+  flex-shrink: 0;
+  font-size: 0.5rem;
+  color: var(--text-dim);
+  margin-top: 1px;
+  cursor: pointer;
+}
+.details {
+  border-top: 1px solid var(--border);
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.2);
+  font-size: 0.55rem;
+}
+.sectionHeader {
+  font-size: 0.5rem;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 3px;
+}
+.kvGrid {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 1px 8px;
+  font-size: 0.53rem;
+}
+.hashSection {
+  margin-bottom: 6px;
+}

@@ -1,0 +1,362 @@
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+  animation: fadeSlideUp 0.4s ease-out 0.05s both;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: var(--shadow-card);
+}
+
+.card:hover {
+  border-color: var(--border-bright);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.cardTitle {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  transition: all 0.2s;
+}
+
+.dot.ok {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
+}
+
+.dot.err {
+  background: var(--red);
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.5);
+}
+
+/* --- STEPS --- */
+
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 20px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.stepCircle {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--border-bright);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  transition: all 0.2s;
+}
+
+.stepLabel {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 500;
+  font-family: var(--sans);
+  transition: color 0.2s;
+}
+
+.stepActive .stepCircle {
+  border-color: var(--accent);
+  color: var(--accent-light);
+  background: var(--accent-dim);
+}
+
+.stepActive .stepLabel {
+  color: var(--text);
+}
+
+.stepDone .stepCircle {
+  border-color: var(--green);
+  background: var(--green);
+  color: #000;
+}
+
+.stepDone .stepLabel {
+  color: var(--green);
+}
+
+.stepLine {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+  margin: 0 10px;
+}
+
+/* --- TX BAR --- */
+
+.txBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 18px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-dim);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  font-size: 11px;
+  animation: slideDown 0.2s ease-out;
+}
+
+.txConfirmed {
+  background: var(--green-dim);
+  border-color: var(--green-border);
+}
+
+.txFailed {
+  background: var(--red-dim);
+  border-color: var(--red-border);
+}
+
+.txPhase {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.txConfirmed .txPhase { color: var(--green); }
+.txFailed .txPhase { color: var(--red); }
+
+.txIcon { flex-shrink: 0; }
+
+.txMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-dim);
+}
+
+.txHash {
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.txHash:hover { color: var(--accent-light); }
+
+.txGas {
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.txError {
+  font-size: 10px;
+  color: var(--red);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- GRID --- */
+
+.grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+/* --- COUNTER DISPLAY --- */
+
+.display {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px 40px;
+  text-align: center;
+  min-width: 150px;
+  transition: border-color 0.2s;
+  position: relative;
+}
+
+.display:hover {
+  border-color: rgba(52, 211, 153, 0.25);
+}
+
+.number {
+  font-size: 52px;
+  font-weight: 700;
+  color: var(--green);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 40px rgba(52, 211, 153, 0.15);
+  letter-spacing: -0.03em;
+}
+
+.numberPop {
+  animation: pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-top: 8px;
+  letter-spacing: 0.1em;
+  font-weight: 500;
+}
+
+.delta {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--green);
+  background: var(--green-dim);
+  border: 1px solid var(--green-border);
+  padding: 1px 8px;
+  border-radius: 10px;
+  animation: slideDown 0.3s ease-out;
+}
+
+.sessionCount {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+
+/* --- CONTROLS --- */
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  font-family: var(--sans);
+}
+
+.hint code {
+  background: var(--bg-inset);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text);
+}
+
+.hint strong {
+  color: var(--text-bright);
+}
+
+.inputRow {
+  display: flex;
+  gap: 8px;
+}
+
+.input {
+  flex: 1;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.input::placeholder {
+  color: var(--text-dim);
+}
+
+.contractAddr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.contractLabel {
+  font-size: 9px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.contractValue {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+  transition: color 0.15s;
+  flex: 1;
+}
+
+.contractValue:hover {
+  color: var(--accent-light);
+}
+
+/* --- BUTTONS --- */
+
+.btnRow {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .grid { grid-template-columns: 1fr; }
+  .btnRow { flex-wrap: wrap; }
+  .steps { overflow-x: auto; }
+}

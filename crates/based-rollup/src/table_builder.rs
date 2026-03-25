@@ -1,0 +1,1862 @@
+//! Execution table builder for continuation entries (multi-call continuations, multi-hop cross-chain).
+//!
+//! Generates L2 and L1 execution entries from a sequence of detected cross-chain calls.
+//! Simple deposits/withdrawals use the legacy path in `cross_chain.rs`; this module
+//! handles multi-call patterns where CALL_A triggers CALL_B (continuation) which may
+//! itself trigger CALL_C (child call in the opposite direction).
+//!
+//! The entry structure matches `IntegrationTestFlashLoan.t.sol` exactly.
+
+use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_sol_types::{SolCall, SolType};
+use serde::{Deserialize, Serialize};
+
+use crate::cross_chain::{
+    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
+    IBridge, ICrossChainManagerL2,
+};
+
+/// Direction of a cross-chain call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallDirection {
+    /// L1 → L2 (deposit-like): executed on L2 via executeIncomingCrossChainCall
+    L1ToL2,
+    /// L2 → L1 (withdrawal-like): executed on L1 via executeCrossChainCall
+    L2ToL1,
+}
+
+/// A cross-chain call detected by the L1 proxy's trace analysis.
+///
+/// Calls are ordered by detection sequence. Continuation calls follow
+/// the call they continue from; child calls are linked via `parent_call_index`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectedCall {
+    /// Direction of this cross-chain call.
+    pub direction: CallDirection,
+    /// The CALL action for this detected call.
+    pub call_action: CrossChainAction,
+    /// Index of the parent call whose L2 execution triggers this call.
+    /// `None` for root-level calls; `Some(i)` for calls made within call[i]'s
+    /// execution on L2 (e.g., bridgeTokens inside claimAndBridgeBack).
+    pub parent_call_index: Option<usize>,
+    /// Whether this call is a continuation — chained after a previous L1→L2 call
+    /// returns (i.e., the L2 execution table returns this CALL as nextAction
+    /// instead of a terminal RESULT).
+    pub is_continuation: bool,
+    /// Nesting depth of this call in the cross-chain call tree.
+    /// 0 for root-level calls, 1 for children of root calls, 2 for grandchildren, etc.
+    /// Used for logging/debugging only — does NOT affect scope computation
+    /// (each reentrant `executeCrossChainCall` starts its own scope tree from `[]`).
+    #[serde(default)]
+    pub depth: usize,
+    /// Return data from the L1 delivery simulation for this call.
+    /// Used to construct the delivery RESULT action hash on L1 entries.
+    /// When non-empty, the RESULT action includes this data (matching what
+    /// `_processCallAtScope` builds with `data: returnData` after `executeOnBehalf`).
+    /// Empty for calls where the delivery returns no data (e.g., ETH transfers to EOAs).
+    #[serde(default)]
+    pub delivery_return_data: Vec<u8>,
+    /// Return data from simulating the return call's execution on L2.
+    /// Used for the L2 scope resolution RESULT hash. When the return call's target
+    /// returns data (e.g., Counter.increment() → uint256), the RESULT hash must include
+    /// that data. Otherwise result_void is used and the hash mismatches (issue #245).
+    #[serde(default)]
+    pub l2_return_data: Vec<u8>,
+    /// Whether the L2 return call simulation reverted (#246 audit: failed flag).
+    #[serde(default)]
+    pub l2_delivery_failed: bool,
+}
+
+/// Output of `build_continuation_entries`: L2 table entries and L1 deferred entries.
+#[derive(Debug, Clone)]
+pub struct ContinuationEntries {
+    /// Entries loaded into L2 execution table via `loadExecutionTable`.
+    /// These have empty state deltas (filled later by attach_*_state_deltas).
+    pub l2_entries: Vec<CrossChainExecutionEntry>,
+    /// Entries posted to L1 via `postBatch`.
+    /// These have empty state deltas (filled later by the driver).
+    pub l1_entries: Vec<CrossChainExecutionEntry>,
+}
+
+/// Compute the action hash for a `CrossChainAction` using Solidity ABI encoding.
+///
+/// `actionHash = keccak256(abi.encode(action))`
+pub fn compute_action_hash(action: &CrossChainAction) -> B256 {
+    keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &action.to_sol_action(),
+    ))
+}
+
+/// Reorder entries within same-`action_hash` groups so that Solidity's
+/// forward-iteration + swap-and-pop in `_consumeExecution` produces FIFO
+/// consumption order.
+///
+/// Solidity consumes by finding the first entry matching `actionHash`,
+/// then swapping the last element into the consumed position. For N entries
+/// `[E0, E1, ..., E(N-1)]` consumed in creation order, the required storage
+/// layout is `[E0, E(N-1), E(N-2), ..., E1]` — first element stays in place,
+/// remaining are reversed.
+///
+/// **Proof (N=3)**: `[E0, E2, E1]` → consume E0, swap with last(E1) →
+/// `[E1, E2]` → consume E1, swap with last(E2) → `[E2]` → consume E2. FIFO.
+///
+/// For groups of size 1 or 2 this is a no-op (reversing 0 or 1 elements is
+/// identity), so existing 2-entry flash loan output is unchanged.
+fn reorder_for_swap_and_pop(entries: &mut Vec<CrossChainExecutionEntry>) {
+    use std::collections::HashMap;
+
+    // The Solidity CCM uses a single flat array for all entries.
+    // `_consumeExecution` scans from index 0 (FIFO) and uses swap-and-pop to remove.
+    // When an entry is consumed, the LAST array element is moved to the consumed slot.
+    //
+    // For groups of same-hash entries, this swap-and-pop can disrupt FIFO ordering
+    // when OTHER entries (different hash) are consumed in between, because the swap
+    // moves entries from the end of the array into earlier positions.
+    //
+    // Fix: partition the array so that same-hash groups (which need FIFO ordering among
+    // themselves) are placed FIRST, and unique-hash entries are placed LAST. This way,
+    // consuming a unique entry swaps in another unique entry from the end, leaving the
+    // same-hash group undisturbed at the front.
+    //
+    // Within each same-hash group, apply the [E0, E(N-1), ..., E1] reorder so that
+    // FIFO+swap-and-pop within the group produces the correct consumption order.
+
+    // Build a map from action_hash → list of indices (in order of appearance).
+    let mut groups: HashMap<B256, Vec<usize>> = HashMap::new();
+    for (i, entry) in entries.iter().enumerate() {
+        groups.entry(entry.action_hash).or_default().push(i);
+    }
+
+    // Check if any group has 3+ entries (needs reordering).
+    let has_large_groups = groups.values().any(|v| v.len() >= 3);
+    if !has_large_groups {
+        return;
+    }
+
+    // Rebuild the array: same-hash groups with 2+ entries first (reordered),
+    // then unique entries (in original order).
+    let mut reordered: Vec<CrossChainExecutionEntry> = Vec::with_capacity(entries.len());
+
+    // Collect multi-entry groups first.
+    let mut multi_group_hashes: Vec<B256> = groups
+        .iter()
+        .filter(|(_, v)| v.len() >= 2)
+        .map(|(h, _)| *h)
+        .collect();
+    // Sort for determinism (HashMap iteration order is random).
+    multi_group_hashes.sort();
+
+    for hash in &multi_group_hashes {
+        let indices = &groups[hash];
+        let group_entries: Vec<CrossChainExecutionEntry> =
+            indices.iter().map(|&i| entries[i].clone()).collect();
+
+        if group_entries.len() >= 3 {
+            // Apply [E0, E(N-1), E(N-2), ..., E1] reorder for FIFO+swap-and-pop.
+            reordered.push(group_entries[0].clone());
+            for e in group_entries[1..].iter().rev() {
+                reordered.push(e.clone());
+            }
+        } else {
+            // 2-entry group: no reorder needed (FIFO works with 2 entries).
+            reordered.extend(group_entries);
+        }
+    }
+
+    // Append unique entries (group size 1) in original order.
+    let mut unique_indices: Vec<usize> = groups
+        .iter()
+        .filter(|(_, v)| v.len() == 1)
+        .map(|(_, v)| v[0])
+        .collect();
+    unique_indices.sort();
+    for &idx in &unique_indices {
+        reordered.push(entries[idx].clone());
+    }
+
+    *entries = reordered;
+}
+
+/// Build a void RESULT action for the given rollup_id.
+///
+/// Used as terminal entries in the execution table — signals that a call
+/// completed with no return data and no further continuation.
+fn result_void(rollup_id: U256) -> CrossChainAction {
+    // The `data` field must match what Solidity's `_processCallAtScope` builds.
+    // `executeOnBehalf` uses assembly `return(add(result, 0x20), mload(result))`
+    // which returns the RAW inner call result, NOT ABI-encoded `bytes memory`.
+    // For void functions, the inner result is empty → returnData = vec![].
+    // For functions that return data, returnData = raw ABI-encoded return value.
+    CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id,
+        destination: alloy_primitives::Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: false,
+        source_address: alloy_primitives::Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    }
+}
+
+/// Build continuation entries for a sequence of detected cross-chain calls.
+///
+/// This handles the general pattern where an L1 transaction triggers multiple
+/// cross-chain calls that form a continuation chain. The canonical example is
+/// a multi-call continuation:
+///
+/// ```text
+/// CALL_A (L1→L2): bridgeTokens — Bridge_L1 → Bridge_L2.receiveTokens
+/// CALL_B (L1→L2): claimAndBridgeBack — continuation of A
+///   └─ CALL_C (L2→L1): bridgeTokens — child of B, executed at scope=[0]
+/// ```
+///
+/// # L2 Entries (consumed during executeIncomingCrossChainCall on L2)
+///
+/// For each L1→L2 call that has a continuation after it:
+///   - Entry: `hash(RESULT(target_rollup, void))` → next continuation CALL
+///
+/// For each L2→L1 child call within an L2 execution:
+///   - Entry: `hash(CALL_unscoped)` → `RESULT(source_rollup, void)`
+///
+/// Terminal entry (after last continuation):
+///   - Entry: `hash(RESULT(target_rollup, void))` → `RESULT(target_rollup, void)`
+///
+/// # L1 Entries (posted via postBatch, consumed during user tx execution on L1)
+///
+/// For each L1→L2 call without children:
+///   - Entry: `hash(CALL)` → `RESULT(target_rollup, void)` (terminal)
+///
+/// For each L1→L2 call with L2→L1 child calls:
+///   - Entry: `hash(CALL)` → child CALL with `scope=[child_index]`
+///
+/// For each L2→L1 child resolution:
+///   - Entry: `hash(RESULT(child_source_rollup, void))` → `RESULT(target_rollup, void)`
+///
+/// # Arguments
+///
+/// * `calls` - Detected cross-chain calls in order. Must have at least one call.
+/// * `our_rollup_id` - The L2 rollup ID (e.g., 1).
+///
+/// # Returns
+///
+/// `ContinuationEntries` with L2 and L1 entries (state deltas are empty).
+pub fn build_continuation_entries(
+    calls: &[DetectedCall],
+    our_rollup_id: U256,
+) -> ContinuationEntries {
+    if calls.is_empty() {
+        return ContinuationEntries {
+            l2_entries: vec![],
+            l1_entries: vec![],
+        };
+    }
+
+    let mainnet_rollup_id = U256::ZERO;
+    let l2_result_void = result_void(our_rollup_id);
+    let l1_result_void = result_void(mainnet_rollup_id);
+    let empty_deltas: Vec<CrossChainStateDelta> = vec![];
+
+    let mut l2_entries = Vec::new();
+    let mut l1_entries = Vec::new();
+
+    // Collect L1→L2 calls for L2 entry generation
+    let l1_to_l2_calls: Vec<(usize, &DetectedCall)> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.direction == CallDirection::L1ToL2)
+        .collect();
+
+    // ── L2 entries ──
+    // Walk L1→L2 calls. After each one returns on L2, the execution table
+    // either continues with the next L1→L2 call or terminates.
+    for (pos, &(call_idx, _call)) in l1_to_l2_calls.iter().enumerate() {
+        let is_last_l1_to_l2 = pos == l1_to_l2_calls.len() - 1;
+
+        // Find L2→L1 child calls within this call's L2 execution
+        let children: Vec<(usize, &DetectedCall)> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
+            })
+            .collect();
+
+        // If this call is not the first, it was a continuation — the previous
+        // entry already returned this CALL as nextAction. No additional L2 entry
+        // needed for the CALL itself.
+
+        // For each L2→L1 child: entry consumed by reentrant executeCrossChainCall.
+        // The child executes on L1, so delivery_return_data carries its L1 return.
+        for (_child_idx, child) in &children {
+            let child_action_hash = compute_action_hash(&child.call_action);
+            let child_next = if child.delivery_return_data.is_empty() && !child.l2_delivery_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: mainnet_rollup_id,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: child.delivery_return_data.clone(),
+                    failed: child.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            l2_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: child_action_hash,
+                next_action: child_next,
+            });
+        }
+
+        // After this call's execution returns on L2:
+        // _processCallAtScope on L2 builds RESULT{rollupId=L2, data=returnData}
+        // where returnData is the raw return from executeOnBehalf. The action_hash
+        // used to find this entry must match that RESULT hash.
+        //
+        // For L1→L2 calls in the continuation path (e.g., receiveTokens,
+        // claimAndBridgeBack), these are void functions so result_void is correct.
+        // If the DetectedCall carries l2_return_data (future non-void L1→L2 calls),
+        // use it for both the hash and next_action to match the on-chain RESULT.
+        let current_call = l1_to_l2_calls[pos].1;
+        let l2_result_for_call = if !current_call.l2_return_data.is_empty() || current_call.l2_delivery_failed {
+            CrossChainAction {
+                action_type: CrossChainActionType::Result,
+                rollup_id: our_rollup_id,
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: current_call.l2_return_data.clone(),
+                failed: current_call.l2_delivery_failed,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            }
+        } else {
+            l2_result_void.clone()
+        };
+
+        if is_last_l1_to_l2 {
+            // Terminal: RESULT(L2) hash → RESULT(L2)
+            let result_hash = compute_action_hash(&l2_result_for_call);
+            l2_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: result_hash,
+                next_action: l2_result_for_call,
+            });
+        } else {
+            // Continuation: RESULT(L2) hash → next L1→L2 CALL
+            let next_call = &l1_to_l2_calls[pos + 1].1.call_action;
+            let result_hash = compute_action_hash(&l2_result_for_call);
+            l2_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: result_hash,
+                next_action: next_call.clone(),
+            });
+        }
+    }
+
+    // ── Reorder L2 entries ──
+    // The Solidity test shows L2 entries in this order:
+    // 1. Continuation entries (RESULT hash → next CALL) for calls that have continuations
+    // 2. Child call entries (CALL hash → RESULT)
+    // 3. Terminal entry (RESULT hash → RESULT)
+    //
+    // Our loop generates: for each call [children..., continuation/terminal].
+    // For the multi-call continuation case with calls [A, B(cont), C(child of B)]:
+    // - Call A (pos=0, no children): continuation entry (RESULT→CALL_B)
+    // - Call B (pos=1, child C): child entry (CALL_C→RESULT), terminal (RESULT→RESULT)
+    //
+    // This matches the Solidity test order:
+    // Entry 1: RESULT(L2,void) hash → CALL_B
+    // Entry 2: CALL(bridgeReturn) hash → RESULT(MAINNET,void)
+    // Entry 3: RESULT(L2,void) hash → RESULT(L2,void)
+
+    // ── L1 entries ──
+    // One entry per L1→L2 call, plus resolution entries for L2→L1 children.
+    for &(call_idx, detected) in &l1_to_l2_calls {
+        let call_action_hash = compute_action_hash(&detected.call_action);
+
+        // Find L2→L1 children of this call
+        let children: Vec<(usize, &DetectedCall)> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
+            })
+            .collect();
+
+        if children.is_empty() {
+            // Simple: CALL → RESULT(L2) terminal.
+            // The next_action RESULT data is what Rollups.sol returns to the L1 caller.
+            // Use l2_return_data when the L2 call returns data (future non-void L1→L2
+            // calls). Current continuation uses (flash loan) are void so result_void
+            // is correct.
+            let l1_terminal = if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: our_rollup_id,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: detected.l2_return_data.clone(),
+                    failed: detected.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            } else {
+                l2_result_void.clone()
+            };
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: call_action_hash,
+                next_action: l1_terminal,
+            });
+        } else {
+            // Has children: CALL → first child CALL with scope=[0]
+            // (For multiple children, scope indices would be [0], [1], etc.)
+            let first_child = &children[0].1;
+            let mut scoped_child_action = first_child.call_action.clone();
+            scoped_child_action.scope = vec![U256::ZERO];
+
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: call_action_hash,
+                next_action: scoped_child_action,
+            });
+
+            // Resolution entries for each child.
+            // After child executes on L1, _processCallAtScope builds
+            // RESULT{rollupId=child_target_rollup, data=returnData, failed=!success}.
+            // The action_hash must match that RESULT hash. Use delivery_return_data
+            // when the child's L1 target returns data (e.g., non-void L1 contracts).
+            for (child_pos, child) in &children {
+                let _ = child_pos;
+                let child_target_rollup = child.call_action.rollup_id;
+                let child_result = if !child.delivery_return_data.is_empty() || child.l2_delivery_failed {
+                    CrossChainAction {
+                        action_type: CrossChainActionType::Result,
+                        rollup_id: child_target_rollup,
+                        destination: Address::ZERO,
+                        value: U256::ZERO,
+                        data: child.delivery_return_data.clone(),
+                        failed: child.l2_delivery_failed,
+                        source_address: Address::ZERO,
+                        source_rollup: U256::ZERO,
+                        scope: vec![],
+                    }
+                } else {
+                    result_void(child_target_rollup)
+                };
+                let child_result_hash = compute_action_hash(&child_result);
+
+                // Terminal next_action: the RESULT data propagated to the L1 caller.
+                // Use l2_return_data from the parent L1→L2 call when available.
+                let resolution_terminal = if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
+                    CrossChainAction {
+                        action_type: CrossChainActionType::Result,
+                        rollup_id: our_rollup_id,
+                        destination: Address::ZERO,
+                        value: U256::ZERO,
+                        data: detected.l2_return_data.clone(),
+                        failed: detected.l2_delivery_failed,
+                        source_address: Address::ZERO,
+                        source_rollup: U256::ZERO,
+                        scope: vec![],
+                    }
+                } else {
+                    l2_result_void.clone()
+                };
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: empty_deltas.clone(),
+                    action_hash: child_result_hash,
+                    next_action: resolution_terminal,
+                });
+            }
+        }
+    }
+
+    // Reorder same-hash groups for Solidity swap-and-pop FIFO consumption.
+    reorder_for_swap_and_pop(&mut l2_entries);
+
+    ContinuationEntries {
+        l2_entries,
+        l1_entries,
+    }
+}
+
+/// Parameters for a cross-chain call detected by the L1 proxy.
+/// This is the "raw" form before continuation analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct L1DetectedCall {
+    /// Target address on L2 (proxy's originalAddress).
+    pub destination: Address,
+    /// Calldata sent to the destination (e.g., receiveTokens calldata).
+    pub data: Vec<u8>,
+    /// ETH value for the cross-chain call.
+    pub value: U256,
+    /// Address that initiated the call on L1 (e.g., bridge_l1 or executor).
+    pub source_address: Address,
+    /// Return data from simulating this L1->L2 call on L2.
+    /// When non-empty, the L2 RESULT action hash includes this data
+    /// (docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
+    #[serde(default)]
+    pub l2_return_data: Vec<u8>,
+    /// Whether the L2 call succeeded. Defaults to `true`.
+    #[serde(default = "default_call_success")]
+    pub call_success: bool,
+}
+
+/// Serde default for `call_success` — defaults to `true` (success).
+fn default_call_success() -> bool {
+    true
+}
+
+/// Analyze detected L1→L2 calls to discover continuation patterns and child L2→L1 calls.
+///
+/// For multi-call continuations, this detects the return bridge trip (CALL_C) analytically:
+/// - CALL_A: bridgeTokens L1→L2 (receiveTokens on bridge_l2)
+/// - CALL_B: continuation call (e.g., claimAndBridgeBack on executorL2)
+/// - CALL_C: bridgeTokens L2→L1 (discovered from CALL_A's receiveTokens params)
+///
+/// The return trip's receiveTokens calldata is constructed by swapping:
+/// - destinationAddress → CALL_B's source_address (the returnTo address)
+/// - sourceRollupId → our_rollup_id (L2 is now the source)
+///
+/// # Arguments
+/// * `calls` - L1→L2 calls detected by the L1 proxy (in execution order)
+/// * `our_rollup_id` - The L2 rollup ID
+/// * `bridge_l2_address` - Bridge contract address on L2
+/// * `bridge_l1_address` - Bridge contract address on L1
+pub fn analyze_continuation_calls(
+    calls: &[L1DetectedCall],
+    our_rollup_id: u64,
+    bridge_l2_address: Address,
+    _bridge_l1_address: Address,
+) -> Vec<DetectedCall> {
+    let our_rollup = U256::from(our_rollup_id);
+    let mainnet_rollup = U256::ZERO;
+
+    if calls.len() < 2 {
+        // Single call — no continuations possible, use legacy path
+        return vec![];
+    }
+
+    let mut result: Vec<DetectedCall> = Vec::new();
+
+    // Track the forward bridge call (receiveTokens) for analytical child detection
+    let mut forward_receive_tokens_data: Option<IBridge::receiveTokensCall> = None;
+
+    for (i, call) in calls.iter().enumerate() {
+        let is_continuation = i > 0;
+
+        // Try to decode receiveTokens from CALL_A to extract bridge params
+        if call.destination == bridge_l2_address {
+            // Try decoding receiveTokens — data may or may not include the 4-byte selector
+            let has_selector =
+                call.data.len() > 4 && call.data[..4] == IBridge::receiveTokensCall::SELECTOR;
+            let decode_data = if has_selector {
+                &call.data[4..]
+            } else {
+                &call.data
+            };
+            match IBridge::receiveTokensCall::abi_decode_raw(decode_data) {
+                Ok(decoded) => {
+                    tracing::info!(
+                        target: "based_rollup::table_builder",
+                        token = %decoded.token,
+                        amount = %decoded.amount,
+                        has_selector,
+                        data_len = call.data.len(),
+                        "decoded receiveTokens from forward trip"
+                    );
+                    forward_receive_tokens_data = Some(decoded);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "based_rollup::table_builder",
+                        %e,
+                        has_selector,
+                        data_len = call.data.len(),
+                        decode_data_len = decode_data.len(),
+                        first_bytes = %format!("0x{}", hex::encode(&decode_data[..40.min(decode_data.len())])),
+                        "failed to decode receiveTokens from forward trip"
+                    );
+                }
+            }
+        }
+
+        // Build the L1→L2 CALL action
+        let call_action = CrossChainAction {
+            action_type: CrossChainActionType::Call,
+            rollup_id: our_rollup,
+            destination: call.destination,
+            value: call.value,
+            data: call.data.clone(),
+            failed: false,
+            source_address: call.source_address,
+            source_rollup: mainnet_rollup,
+            scope: vec![],
+        };
+
+        result.push(DetectedCall {
+            direction: CallDirection::L1ToL2,
+            call_action,
+            parent_call_index: None,
+            is_continuation,
+            depth: 0,
+            delivery_return_data: vec![], // L1→L2 calls don't have L1 delivery data
+            l2_return_data: call.l2_return_data.clone(),
+            l2_delivery_failed: !call.call_success,
+        });
+
+        // For continuation calls (i > 0), check if they trigger a child L2→L1 call.
+        // This happens when the L2 execution calls bridgeTokens on bridge_l2 targeting
+        // rollupId=0 (MAINNET). We construct the child CALL_C analytically from
+        // the forward trip's receiveTokens params.
+        if is_continuation {
+            if let Some(ref fwd) = forward_receive_tokens_data {
+                // The return trip is:
+                // receiveTokens(token, originRollupId, returnTo, amount, name, symbol, decimals, L2_ROLLUP_ID)
+                // where returnTo = CALL_B's source_address (the L1 executor)
+                let return_receive_tokens = IBridge::receiveTokensCall {
+                    token: fwd.token,
+                    originRollupId: fwd.originRollupId,
+                    destinationAddress: call.source_address, // returnTo = who initiated CALL_B
+                    amount: fwd.amount,
+                    name: fwd.name.clone(),
+                    symbol: fwd.symbol.clone(),
+                    decimals: fwd.decimals,
+                    sourceRollupId: our_rollup, // L2 is now the source
+                };
+                let return_data = IBridge::receiveTokensCall::abi_encode(&return_receive_tokens);
+
+                // CALL_C destination: must match Bridge_L2._bridgeAddress().
+                // When canonicalBridgeAddress is set on L2 (required for multi-call continuations),
+                // _bridgeAddress() returns bridge_l1_address. On L1, the proxy for
+                // (bridge_l1_address, MAINNET) has originalAddress=bridge_l1_address,
+                // so executeOnBehalf calls bridge_l1.receiveTokens().
+                let child_destination = if !_bridge_l1_address.is_zero() {
+                    _bridge_l1_address
+                } else {
+                    bridge_l2_address
+                };
+                let child_action = CrossChainAction {
+                    action_type: CrossChainActionType::Call,
+                    rollup_id: mainnet_rollup, // targeting L1
+                    destination: child_destination,
+                    value: U256::ZERO,
+                    data: return_data,
+                    failed: false,
+                    source_address: bridge_l2_address,
+                    source_rollup: our_rollup,
+                    scope: vec![],
+                };
+
+                result.push(DetectedCall {
+                    direction: CallDirection::L2ToL1,
+                    call_action: child_action,
+                    parent_call_index: Some(i), // child of CALL_B
+                    is_continuation: false,
+                    depth: 1,
+                    delivery_return_data: vec![], // analytical child, no L1 simulation data
+                    l2_return_data: vec![],
+            l2_delivery_failed: false,
+                });
+            }
+        }
+    }
+
+    result
+}
+
+/// Parameters for an L2→L1 cross-chain call detected by the L2 proxy.
+/// This is the "raw" form before continuation analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct L2DetectedCall {
+    /// Target address on L1 (proxy's originalAddress).
+    pub destination: Address,
+    /// Calldata sent to the destination.
+    pub data: Vec<u8>,
+    /// ETH value for the cross-chain call.
+    pub value: U256,
+    /// Address that initiated the call on L2 (e.g., the executor contract).
+    pub source_address: Address,
+    /// Return data from the L1 delivery simulation for this call.
+    /// When non-empty, the L1 RESULT entry hash includes this data.
+    #[serde(default)]
+    pub delivery_return_data: Vec<u8>,
+    /// Whether the L1 delivery simulation reverted.
+    /// When true, the RESULT entry's `failed` field is set to true,
+    /// matching what `_processCallAtScope` computes on-chain.
+    #[serde(default)]
+    pub delivery_failed: bool,
+}
+
+/// Parameters for an L1→L2 return call discovered during L1 delivery simulation.
+/// These are return trips (e.g., Bridge_L1.bridgeTokens back to L2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct L2ReturnCall {
+    /// Target address on L2 (proxy's originalAddress on L1 → targets L2).
+    pub destination: Address,
+    /// Calldata (e.g., receiveTokens).
+    pub data: Vec<u8>,
+    /// ETH value sent with the call.
+    pub value: U256,
+    /// Address that initiated the call on L1.
+    pub source_address: Address,
+    /// Index of the L2→L1 call whose L1 execution produces this return call.
+    /// `None` means assign to the last L2→L1 call (backward-compatible default).
+    /// `Some(i)` explicitly links this return call to `l2_calls[i]`.
+    #[serde(default)]
+    pub parent_call_index: Option<usize>,
+    /// Return data from simulating this call on L2 (eth_call to destination with data).
+    /// Used for the L2 RESULT entry hash. Without this, result_void is used, which
+    /// mismatches when the target returns data (issue #245).
+    #[serde(default)]
+    pub l2_return_data: Vec<u8>,
+    /// Whether the L2 simulation of this call reverted.
+    #[serde(default)]
+    pub l2_delivery_failed: bool,
+}
+
+/// Output of `build_l2_to_l1_continuation_entries`: L2 table entries and L1 deferred entries.
+#[derive(Debug, Clone)]
+pub struct L2ToL1ContinuationEntries {
+    /// Entries loaded into L2 execution table via `loadExecutionTable`.
+    /// Each L2→L1 call gets a CALL+RESULT pair consumed by `executeCrossChainCall`.
+    pub l2_entries: Vec<CrossChainExecutionEntry>,
+    /// Entries posted to L1 via `postBatch` (3-entry continuation structure).
+    pub l1_entries: Vec<CrossChainExecutionEntry>,
+}
+
+/// Analyze L2→L1 calls and L1→L2 return calls to discover the continuation pattern
+/// for L2→L1 multi-call continuations (the mirror of `analyze_continuation_calls`).
+///
+/// For the reverse multi-call continuation pattern:
+/// - CALL_A: `bridgeTokens` — L2→L1, Bridge_L2 as source, targets Bridge_L1
+/// - CALL_B: `claimAndBridgeBack` — L2→L1, ReverseExecutorL2 as source, targets ReverseExecutorL1
+/// - CALL_C: `receiveTokens` back — L1→L2 return, Bridge_L1 as source, targets Bridge_L2
+///
+/// # Arguments
+/// * `l2_calls` - L2→L1 calls detected from the L2 tx trace (in execution order)
+/// * `return_calls` - L1→L2 return calls discovered from L1 delivery simulation
+/// * `our_rollup_id` - The L2 rollup ID (e.g., 1)
+/// * `bridge_l2_address` - Bridge contract address on L2 (for source_address in L1 entries)
+/// * `bridge_l1_address` - Bridge contract address on L1 (for return call destination)
+///
+/// # Returns
+/// Vec of `DetectedCall` suitable for `build_l2_to_l1_continuation_entries`.
+pub fn analyze_l2_to_l1_continuation_calls(
+    l2_calls: &[L2DetectedCall],
+    return_calls: &[L2ReturnCall],
+    our_rollup_id: u64,
+    _bridge_l2_address: Address,
+    _bridge_l1_address: Address,
+) -> Vec<DetectedCall> {
+    let our_rollup = U256::from(our_rollup_id);
+    let mainnet_rollup = U256::ZERO;
+
+    if l2_calls.is_empty() {
+        return vec![];
+    }
+
+    let mut result: Vec<DetectedCall> = Vec::new();
+
+    // Each L2→L1 call produces a DetectedCall with direction=L2ToL1.
+    for (i, call) in l2_calls.iter().enumerate() {
+        let is_continuation = i > 0;
+
+        // Build the L2→L1 CALL action:
+        // rollupId = 0 (L1, target), destination = L1 target,
+        // source_address = L2 initiator, source_rollup = our_rollup_id
+        let call_action = CrossChainAction {
+            action_type: CrossChainActionType::Call,
+            rollup_id: mainnet_rollup, // target = L1
+            destination: call.destination,
+            value: call.value,
+            data: call.data.clone(),
+            failed: false,
+            source_address: call.source_address,
+            source_rollup: our_rollup,
+            scope: vec![],
+        };
+
+        result.push(DetectedCall {
+            direction: CallDirection::L2ToL1,
+            call_action,
+            parent_call_index: None,
+            is_continuation,
+            depth: 0,
+            delivery_return_data: call.delivery_return_data.clone(),
+            l2_return_data: vec![],
+            l2_delivery_failed: call.delivery_failed,
+        });
+    }
+
+    // Return calls are L1→L2 direction (child calls spawned during execution on L1).
+    // Each return call is linked to the L2→L1 call whose L1 execution produced it.
+    // When `parent_call_index` is set, use it; otherwise default to last L2→L1 call.
+    let last_l2_to_l1_idx = l2_calls.len() - 1;
+
+    // First try explicitly provided return calls (from L1 delivery simulation).
+    // Return calls are L1→L2 direction: they execute on L2 (rollup_id = our_rollup),
+    // originating from L1 (source_rollup = mainnet/0). This mirrors how
+    // analyze_continuation_calls builds L2→L1 children for L1→L2 patterns.
+    if !return_calls.is_empty() {
+        for rc in return_calls {
+            // Use explicit parent_call_index if provided, otherwise default to last call.
+            let parent_idx = rc.parent_call_index.unwrap_or(last_l2_to_l1_idx);
+
+            let child_action = CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: our_rollup, // L2 — return call executes on L2
+                destination: rc.destination,
+                value: rc.value,
+                data: rc.data.clone(),
+                failed: false,
+                source_address: rc.source_address,
+                source_rollup: mainnet_rollup, // L1 — return call originates from L1
+                scope: vec![],
+            };
+
+            tracing::debug!(
+                target: "based_rollup::table_builder",
+                parent_idx,
+                destination = %rc.destination,
+                source = %rc.source_address,
+                explicit_parent = rc.parent_call_index.is_some(),
+                "return call linked to L2→L1 call"
+            );
+
+            result.push(DetectedCall {
+                direction: CallDirection::L2ToL1,
+                call_action: child_action,
+                parent_call_index: Some(parent_idx),
+                is_continuation: false,
+                depth: 1,
+                delivery_return_data: vec![], // child executes on L2, no L1 delivery data
+                l2_return_data: rc.l2_return_data.clone(),
+                l2_delivery_failed: rc.l2_delivery_failed,
+            });
+        }
+    } else if l2_calls.len() >= 2 {
+        // Analytical construction: bridge-specific optimization for when L1 simulation
+        // can't discover return calls (because claimAndBridgeBack needs tokens from the
+        // first delivery to run). Constructs the return call from the forward trip's
+        // receiveTokens calldata. This only handles the bridge return-trip pattern
+        // (single child on last call). For non-bridge patterns or multiple children,
+        // use simulation-based discovery via return_calls parameter.
+        //
+        // CALL_A (bridgeTokens → Bridge_L1): data = receiveTokens(token, originRollupId,
+        //   destAddress=ReverseExecutorL1, amount, name, symbol, decimals, sourceRollupId=L2)
+        // CALL_B (claimAndBridgeBack → ReverseExecutorL1): internally calls
+        //   Bridge_L1.bridgeTokens(token, amount, L2, returnTo) which produces:
+        //   receiveTokens(token, originRollupId=L1, dest=returnTo, amount, name, symbol, decimals, sourceRollupId=L1)
+        //
+        // The return call goes through proxy(Bridge_L2, L2) on L1, so:
+        //   destination = _bridge_l1_address (Bridge_L1, where receiveTokens executes)
+        //   source_address = _bridge_l2_address (proxy's originalAddress)
+        tracing::warn!(
+            target: "based_rollup::table_builder",
+            num_l2_calls = l2_calls.len(),
+            "using analytical return call construction (bridge-specific); \
+             for non-bridge patterns provide return_calls from L1 simulation"
+        );
+        let first_call = &l2_calls[0];
+        let last_call = &l2_calls[l2_calls.len() - 1];
+
+        // Try to decode receiveTokens from the first call's data (bridgeTokens → receiveTokens)
+        let has_selector = first_call.data.len() > 4
+            && first_call.data[..4] == IBridge::receiveTokensCall::SELECTOR;
+        let decode_data = if has_selector {
+            &first_call.data[4..]
+        } else {
+            &first_call.data
+        };
+
+        match IBridge::receiveTokensCall::abi_decode_raw(decode_data) {
+            Ok(fwd) => {
+                // Build the return receiveTokens:
+                //   destinationAddress = last_call.source_address (= ReverseExecutorL2, the returnTo)
+                //   sourceRollupId = L1 (the return originates from L1)
+                let return_receive_tokens = IBridge::receiveTokensCall {
+                    token: fwd.token,
+                    originRollupId: fwd.originRollupId,
+                    destinationAddress: last_call.source_address, // returnTo = who initiated CALL_B on L2
+                    amount: fwd.amount,
+                    name: fwd.name.clone(),
+                    symbol: fwd.symbol.clone(),
+                    decimals: fwd.decimals,
+                    sourceRollupId: U256::ZERO, // L1 is now the source (Bridge_L1 sends back)
+                };
+                let return_data = IBridge::receiveTokensCall::abi_encode(&return_receive_tokens);
+
+                // destination = Bridge_L1 (where receiveTokens actually executes on L1)
+                // This is the first call's destination (Bridge_L1).
+                // source_address = Bridge_L2 (the proxy's originalAddress on L1 through which
+                // the call is routed: proxy(Bridge_L2, L2) calls executeOnBehalf(Bridge_L1, receiveTokens))
+                let child_destination = if !_bridge_l1_address.is_zero() {
+                    _bridge_l1_address
+                } else {
+                    first_call.destination // Bridge_L1
+                };
+                let child_source = if !_bridge_l2_address.is_zero() {
+                    _bridge_l2_address
+                } else {
+                    first_call.source_address // Bridge_L2
+                };
+
+                tracing::info!(
+                    target: "based_rollup::table_builder",
+                    token = %fwd.token,
+                    amount = %fwd.amount,
+                    return_to = %last_call.source_address,
+                    child_dest = %child_destination,
+                    child_source = %child_source,
+                    "analytically constructed return call from forward trip receiveTokens"
+                );
+
+                let child_action = CrossChainAction {
+                    action_type: CrossChainActionType::Call,
+                    rollup_id: mainnet_rollup,
+                    destination: child_destination,
+                    value: U256::ZERO,
+                    data: return_data,
+                    failed: false,
+                    source_address: child_source,
+                    source_rollup: our_rollup,
+                    scope: vec![],
+                };
+
+                result.push(DetectedCall {
+                    direction: CallDirection::L2ToL1,
+                    call_action: child_action,
+                    parent_call_index: Some(last_l2_to_l1_idx),
+                    is_continuation: false,
+                    depth: 1,
+                    delivery_return_data: vec![], // analytical child, no L1 simulation data
+                    l2_return_data: vec![],
+            l2_delivery_failed: false,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "based_rollup::table_builder",
+                    %e,
+                    data_len = first_call.data.len(),
+                    "failed to decode receiveTokens from first L2→L1 call for analytical return call construction"
+                );
+            }
+        }
+    }
+
+    result
+}
+
+/// Find direct children of a call by its index in the `detected` array.
+///
+/// Returns `(original_index, &DetectedCall)` pairs for all calls whose
+/// `parent_call_index == Some(parent_idx)`.
+fn find_children<'a>(
+    detected: &'a [DetectedCall],
+    parent_idx: usize,
+) -> Vec<(usize, &'a DetectedCall)> {
+    detected
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.parent_call_index == Some(parent_idx))
+        .collect()
+}
+
+/// Push reentrant child entries for L1 deferred entries, recursively handling
+/// children that themselves have children (depth > 1).
+///
+/// Each child call is a reentrant `executeCrossChainCall` triggered when the L1 execution
+/// internally calls a proxy (e.g., Bridge_L1.bridgeTokens -> proxy(Bridge_L2, L2)).
+///
+/// The trigger hash is computed from the child's own routing:
+///   - `rollupId = our_rollup_id` (proxy's originalRollupId)
+///   - `destination = child.source_address` (proxy's originalAddress, e.g., Bridge_L2)
+///   - `sourceAddress = child.destination` (L1 caller to the proxy, e.g., Bridge_L1)
+///   - `sourceRollup = 0` (L1)
+///   - `data = child's calldata`
+///
+/// For leaf children (no grandchildren): simple trigger → RESULT(L1, void).
+/// For internal children (with grandchildren): trigger → execution with scope=[0],
+/// plus recursive reentrant entries for grandchildren, plus scope resolution.
+fn push_reentrant_child_entries(
+    children: &[(usize, &DetectedCall)],
+    detected: &[DetectedCall],
+    our_rollup_id: U256,
+    parent_idx: usize,
+    empty_deltas: &[CrossChainStateDelta],
+    l1_result_void: &CrossChainAction,
+    l1_entries: &mut Vec<CrossChainExecutionEntry>,
+) {
+    for (child_pos, &(child_orig_idx, child)) in children.iter().enumerate() {
+        // Derive addresses from the child's own routing info.
+        //
+        // For L2→L1 children (direction same as root calls):
+        //   destination = L1 target, source_address = L2 initiator
+        //   proxy = proxy(source_address, our_rollup_id) on L1
+        //   trigger: destination = source_address (proxy's originalAddress)
+        //            source_address = destination (L1 caller to proxy)
+        //
+        // For L1→L2 return call children (reverse direction):
+        //   destination = L2 target, source_address = L1 initiator
+        //   proxy = proxy(destination, our_rollup_id) on L1
+        //   trigger: destination = destination (proxy's originalAddress)
+        //            source_address = source_address (L1 caller to proxy)
+        let is_return_call = child.call_action.rollup_id == our_rollup_id;
+        let (trigger_dest, trigger_source) = if is_return_call {
+            // L1→L2 return call: proxy represents the L2 destination on L1.
+            // The L1 source_address is the L1 contract calling the proxy.
+            (
+                child.call_action.destination,
+                child.call_action.source_address,
+            )
+        } else {
+            // L2→L1 child: proxy represents the L2 source on L1.
+            // The L1 destination is the L1 contract that called the proxy.
+            (
+                child.call_action.source_address,
+                child.call_action.destination,
+            )
+        };
+
+        let child_trigger = CrossChainAction {
+            action_type: CrossChainActionType::Call,
+            rollup_id: our_rollup_id, // proxy's originalRollupId
+            destination: trigger_dest,
+            value: child.call_action.value,
+            data: child.call_action.data.clone(),
+            failed: false,
+            source_address: trigger_source,
+            source_rollup: U256::ZERO, // L1
+            scope: vec![],
+        };
+        let child_trigger_hash = compute_action_hash(&child_trigger);
+
+        // Check if this child has its own children (grandchildren of the parent).
+        let grandchildren = find_children(detected, child_orig_idx);
+
+        if grandchildren.is_empty() {
+            // Leaf child: trigger → RESULT with return data.
+            // Rollups.sol returns nextAction.data to the L1 caller (e.g., Logger).
+            // Issue #246: For L1→L2 return calls (is_return_call=true), the child
+            // executes on L2 so delivery_return_data is empty — use l2_return_data
+            // (Counter's L2 return). For L2→L1 forward calls, use delivery_return_data
+            // (the L1 target's return from simulation).
+            let child_return_data = if is_return_call {
+                &child.l2_return_data
+            } else {
+                &child.delivery_return_data
+            };
+            let child_failed = child.l2_delivery_failed;
+            let leaf_next = if child_return_data.is_empty() && !child_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: child_return_data.clone(),
+                    failed: child_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                "L1 Entry {}b[{}] (reentrant child, leaf): hash={} dest={} source={} data_len={} is_return={} return_data_len={}",
+                parent_idx, child_pos, child_trigger_hash, child_trigger.destination,
+                child_trigger.source_address, child_trigger.data.len(), is_return_call, child_return_data.len()
+            );
+
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.to_vec(),
+                action_hash: child_trigger_hash,
+                next_action: leaf_next,
+            });
+        } else {
+            // Internal child (has grandchildren): trigger → execution with scope=[0],
+            // plus recursive reentrant entries, plus scope resolution.
+            // This mirrors the "subsequent call WITH children" pattern for root calls.
+            let execution = CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: U256::ZERO, // L1, where the call executes
+                destination: child.call_action.destination, // L1 target
+                value: child.call_action.value,
+                data: child.call_action.data.clone(),
+                failed: false,
+                source_address: child.call_action.source_address, // L2 initiator
+                source_rollup: our_rollup_id,
+                scope: vec![U256::ZERO],
+            };
+
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                "L1 Entry {}b[{}] (reentrant child, internal→execution): hash={} exec_dest={} \
+                 grandchildren={} depth={}",
+                parent_idx, child_pos, child_trigger_hash, execution.destination,
+                grandchildren.len(), child.depth
+            );
+
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.to_vec(),
+                action_hash: child_trigger_hash,
+                next_action: execution,
+            });
+
+            // Recursive reentrant entries for grandchildren.
+            push_reentrant_child_entries(
+                &grandchildren,
+                detected,
+                our_rollup_id,
+                child_orig_idx,
+                empty_deltas,
+                l1_result_void,
+                l1_entries,
+            );
+
+            // Scope resolution for this child's execution.
+            // _processCallAtScope builds RESULT{data: returnData} after executeOnBehalf.
+            // Issue #246: For L1→L2 return calls, use l2_return_data (child executes
+            // on L2, delivery_return_data is empty). For L2→L1 calls, use delivery_return_data.
+            let child_scope_data = if is_return_call {
+                &child.l2_return_data
+            } else {
+                &child.delivery_return_data
+            };
+            let child_scope_failed = child.l2_delivery_failed;
+            let child_scope_result = if child_scope_data.is_empty() && !child_scope_failed {
+                result_void(U256::ZERO)
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: child_scope_data.clone(),
+                    failed: child_scope_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            let scope_result_hash = compute_action_hash(&child_scope_result);
+            // Issue #246: L1 scope resolution also needs return data.
+            // Rollups.sol:524 returns nextAction.data to the L1 caller.
+            let l1_scope_exit = if child_scope_data.is_empty() && !child_scope_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: child_scope_data.clone(),
+                    failed: child_scope_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.to_vec(),
+                action_hash: scope_result_hash,
+                next_action: l1_scope_exit,
+            });
+        }
+    }
+}
+
+/// Build L2 table entries and L1 deferred entries for an L2→L1 continuation pattern
+/// (reverse multi-call continuation). Handles N calls with children on any call.
+///
+/// # L2 Table Entries
+///
+/// For each L2→L1 call:
+/// - **Without children**: `hash(CALL) → RESULT(L1, void)` — simple terminal
+/// - **With 1 child**: `hash(CALL) → callReturn{scope=[0]}`, then
+///   `hash(RESULT{L2, void}) → RESULT(L1, void)` — scope resolution
+/// - **With N children**: `hash(CALL) → callReturn_0{scope=[0]}`, then
+///   for each additional child k: `hash(RESULT{L2, void}) → callReturn_k{scope=[k]}`,
+///   then `hash(RESULT{L2, void}) → RESULT(L1, void)` — final scope resolution
+///
+/// Child addresses are derived from each child's own routing:
+///   - `callReturn.destination = child.source_address` (L2 contract)
+///   - `callReturn.source_address = child.destination` (proxy's originalAddress)
+///
+/// Example (2-call flash loan):
+/// ```text
+/// Entry 0: hash(CALL_A bridgeTokens) → RESULT(L1, void)          — terminal (no children)
+/// Entry 1: hash(CALL_B claimAndBridgeBack) → callReturn{scope=[0]} — scope navigation
+/// Entry 2: hash(RESULT{L2, void}) → RESULT(L1, void)             — scope exit
+/// ```
+///
+/// # L1 Deferred Entries
+///
+/// For each L2→L1 call:
+/// - **First call (idx=0)**: nested DELIVERY with scope=[0], plus reentrant child entries
+///   (if any children during delivery execution), plus delivery RESULT resolution
+/// - **Subsequent call with children**: EXECUTION with scope=[0], plus reentrant child
+///   entries (one per child) and scope resolution
+/// - **Subsequent call without children**: simple trigger → RESULT
+///
+/// Reentrant child trigger hashes use the child's own routing:
+///   - `destination = child.source_address` (proxy's originalAddress)
+///   - `source_address = child.destination` (L1 caller to the proxy)
+///
+/// Example (2-call flash loan, 5 entries):
+/// ```text
+/// Entry 0:  hash(trigger_A)    → delivery_CALL(dest_A, scope=[0])
+/// Entry 0b: hash(RESULT(L1))   → RESULT(L1, void)  — delivery resolution
+/// Entry 1:  hash(trigger_B)    → execution_CALL(dest_B, scope=[0])
+/// Entry 1b: hash(child_trigger) → RESULT(L1, void)  — reentrant child
+/// Entry 2:  hash(RESULT(L1))   → RESULT(L1, void)  — scope resolution
+/// ```
+///
+/// # Arguments
+/// * `detected` - Output of `analyze_l2_to_l1_continuation_calls`
+/// * `our_rollup_id` - L2 rollup ID as U256
+/// * `builder_address` - Builder's L1 address (msg.sender for trigger txs)
+pub fn build_l2_to_l1_continuation_entries(
+    detected: &[DetectedCall],
+    our_rollup_id: U256,
+    builder_address: Address,
+) -> L2ToL1ContinuationEntries {
+    if detected.is_empty() {
+        return L2ToL1ContinuationEntries {
+            l2_entries: vec![],
+            l1_entries: vec![],
+        };
+    }
+
+    let mainnet_rollup_id = U256::ZERO;
+    let l1_result_void = result_void(mainnet_rollup_id);
+    let empty_deltas: Vec<CrossChainStateDelta> = vec![];
+
+    // Root calls: L2→L1 direct calls (parent_call_index=None).
+    // Track original indices from the `detected` array so that child lookups
+    // (via parent_call_index) use the correct index — not the filtered position.
+    // This is critical for depth > 1 where a child's parent_call_index points to
+    // another child (which is NOT a root call).
+    let l2_to_l1_calls: Vec<(usize, &DetectedCall)> = detected
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.parent_call_index.is_none())
+        .collect();
+
+    // ── L2 table entries ──
+    //
+    // Mirror of the L1→L2 flash loan's L1 entries (see build_continuation_entries).
+    // ANY call with children gets scope navigation (callReturn{scope=[0]}), not just
+    // the last call. Calls without children get simple CALL → RESULT(L1, void).
+    //
+    // For a call with children, _processCallAtScope on L2 executes the return call
+    // (e.g., receiveTokens) via proxy, which delivers assets back within the same tx.
+    // After each scoped call, a scope resolution entry closes the scope.
+    //
+    // For depth > 1, children that themselves have children also get scope navigation
+    // entries. Each reentrant executeCrossChainCall starts its own scope tree, so
+    // scope is ALWAYS [0] regardless of nesting depth.
+    let mut l2_entries = Vec::new();
+    let l2_result_void = result_void(our_rollup_id);
+
+    // Recursive helper: generate L2 entries for a call and all its descendants.
+    fn generate_l2_entries_recursive(
+        call_orig_idx: usize,
+        call: &DetectedCall,
+        detected: &[DetectedCall],
+        our_rollup_id: U256,
+        l2_result_void: &CrossChainAction,
+        l1_result_void: &CrossChainAction,
+        empty_deltas: &[CrossChainStateDelta],
+        l2_entries: &mut Vec<CrossChainExecutionEntry>,
+    ) {
+        let call_hash = compute_action_hash(&call.call_action);
+        let this_call_children = find_children(detected, call_orig_idx);
+
+        tracing::info!(
+            target: "based_rollup::table_builder",
+            l2_entry_idx = l2_entries.len(),
+            call_orig_idx,
+            call_hash = %call_hash,
+            destination = %call.call_action.destination,
+            source = %call.call_action.source_address,
+            children_count = this_call_children.len(),
+            depth = call.depth,
+            "L2->L1 continuation: L2 CALL entry"
+        );
+
+        if !this_call_children.is_empty() {
+            // Call with children: CALL → callReturn{scope=[0]} for the first child.
+            // _processCallAtScope on L2 will execute the return call (e.g., receiveTokens)
+            // via proxy, delivering assets back within the same tx.
+            //
+            // For the callReturn construction, we derive addresses from the child's own
+            // routing info. The proxy routing on L2 for the return trip is:
+            //   proxy(child.destination, MAINNET).executeOnBehalf(child.source, retData)
+            // So:
+            //   callReturn.destination = child.source_address (L2 contract, e.g., Bridge_L2)
+            //   callReturn.source_address = child.destination (proxy's originalAddress, e.g., Bridge_L1)
+            //   callReturn.source_rollup = MAINNET
+            let first_child = this_call_children[0].1;
+
+            // callReturn targets L2 (where the return call executes).
+            // _processCallAtScope on L2 does:
+            //   proxy(source_address, source_rollup).executeOnBehalf(destination, data)
+            //
+            // For L2→L1 children (e.g., bridgeTokens return):
+            //   destination = child.source_address (L2 contract, e.g., Bridge_L2)
+            //   source_address = child.destination (proxy's originalAddress on L1)
+            //
+            // For L1→L2 return call children (e.g., pong(round, maxRounds)):
+            //   destination = child.destination (L2 contract, e.g., PingPongL2)
+            //   source_address = child.source_address (proxy's originalAddress on L1)
+            let is_return_call = first_child.call_action.rollup_id == our_rollup_id;
+            let (cr_dest, cr_source) = if is_return_call {
+                (
+                    first_child.call_action.destination,
+                    first_child.call_action.source_address,
+                )
+            } else {
+                (
+                    first_child.call_action.source_address,
+                    first_child.call_action.destination,
+                )
+            };
+            let call_return = CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: our_rollup_id,
+                destination: cr_dest,
+                value: U256::ZERO,
+                data: first_child.call_action.data.clone(),
+                failed: false,
+                source_address: cr_source,
+                source_rollup: U256::ZERO, // MAINNET
+                scope: vec![U256::ZERO],
+            };
+
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                dest = %call_return.destination,
+                source = %call_return.source_address,
+                data_len = call_return.data.len(),
+                child_count = this_call_children.len(),
+                "L2->L1 continuation: L2 CALL → callReturn with scope navigation"
+            );
+
+            l2_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.to_vec(),
+                action_hash: call_hash,
+                next_action: call_return,
+            });
+
+            // Additional children (beyond the first) get their own scope entries.
+            // Each child gets scope=[child_index] so _processCallAtScope processes them
+            // sequentially within the same scope navigation.
+            for (child_pos, &(_child_orig_idx, child)) in
+                this_call_children.iter().enumerate().skip(1)
+            {
+                let child_is_return = child.call_action.rollup_id == our_rollup_id;
+                let (ccr_dest, ccr_source) = if child_is_return {
+                    (
+                        child.call_action.destination,
+                        child.call_action.source_address,
+                    )
+                } else {
+                    (
+                        child.call_action.source_address,
+                        child.call_action.destination,
+                    )
+                };
+                let child_call_return = CrossChainAction {
+                    action_type: CrossChainActionType::Call,
+                    rollup_id: our_rollup_id,
+                    destination: ccr_dest,
+                    value: U256::ZERO,
+                    data: child.call_action.data.clone(),
+                    failed: false,
+                    source_address: ccr_source,
+                    source_rollup: U256::ZERO, // MAINNET
+                    scope: vec![U256::from(child_pos)],
+                };
+
+                tracing::info!(
+                    target: "based_rollup::table_builder",
+                    l2_entry_idx = l2_entries.len(),
+                    child_pos,
+                    dest = %child_call_return.destination,
+                    source = %child_call_return.source_address,
+                    "L2->L1 continuation: L2 additional child callReturn scope=[{}]",
+                    child_pos
+                );
+
+                // The action hash for additional scoped children uses the PREVIOUS child's
+                // L2 return data (the scope that just resolved). For void functions, this
+                // is result_void. For functions returning data, the RESULT includes that data.
+                let prev_child = if child_pos > 1 {
+                    this_call_children[child_pos - 1].1
+                } else {
+                    first_child
+                };
+                let prev_l2_result = if prev_child.l2_return_data.is_empty() && !prev_child.l2_delivery_failed {
+                    l2_result_void.clone()
+                } else {
+                    CrossChainAction {
+                        action_type: CrossChainActionType::Result,
+                        rollup_id: our_rollup_id,
+                        destination: Address::ZERO,
+                        value: U256::ZERO,
+                        data: prev_child.l2_return_data.clone(),
+                        failed: prev_child.l2_delivery_failed,
+                        source_address: Address::ZERO,
+                        source_rollup: U256::ZERO,
+                        scope: vec![],
+                    }
+                };
+                let l2_result_hash = compute_action_hash(&prev_l2_result);
+                l2_entries.push(CrossChainExecutionEntry {
+                    state_deltas: empty_deltas.to_vec(),
+                    action_hash: l2_result_hash,
+                    next_action: child_call_return,
+                });
+            }
+
+            // Scope resolution: after the last child callReturn executes inside its scope,
+            // _processCallAtScope builds RESULT{rollupId=callReturn.rollupId=our_rollup_id,
+            // data=returnData}. The returnData is the raw bytes from executeOnBehalf,
+            // which is what the child's target returns. If the child returns data (e.g.,
+            // Counter.increment() → uint256), we must include it in the RESULT hash.
+            // Without this, result_void is used and the hash mismatches (issue #245).
+            // Use the LAST child's l2_return_data (scope resolution happens after
+            // the last child executes).
+            let last_child = this_call_children.last().map(|(_, c)| *c).unwrap_or(first_child);
+            let first_child_l2_data = &last_child.l2_return_data;
+            let last_child_l2_failed = last_child.l2_delivery_failed;
+            let l2_scope_result = if first_child_l2_data.is_empty() && !last_child_l2_failed {
+                l2_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: our_rollup_id,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: first_child_l2_data.clone(),
+                    failed: last_child_l2_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            let l2_result_hash = compute_action_hash(&l2_scope_result);
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                l2_entry_idx = l2_entries.len(),
+                result_hash = %l2_result_hash,
+                child_count = this_call_children.len(),
+                "L2->L1 continuation: L2 scope resolution entry"
+            );
+            // Issue #246: nextAction.data must carry the L1 delivery return data
+            // so _resolveScopes returns it to the L2 caller. The action_hash
+            // (computed from l2_return_data) is unchanged — _consumeExecution
+            // only matches on hash, returns nextAction as-is.
+            let scope_exit_action = if call.delivery_return_data.is_empty() && !call.l2_delivery_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: call.delivery_return_data.clone(),
+                    failed: call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            l2_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.to_vec(),
+                action_hash: l2_result_hash,
+                next_action: scope_exit_action,
+            });
+
+            // For depth > 1: children that themselves have grandchildren need their own
+            // L2 entries (scope navigation consumed by reentrant executeCrossChainCall).
+            // Each reentrant call starts a fresh scope tree from [], so scope=[0] is correct.
+            for &(child_orig_idx, child) in &this_call_children {
+                let grandchildren = find_children(detected, child_orig_idx);
+                if !grandchildren.is_empty() {
+                    generate_l2_entries_recursive(
+                        child_orig_idx,
+                        child,
+                        detected,
+                        our_rollup_id,
+                        l2_result_void,
+                        l1_result_void,
+                        empty_deltas,
+                        l2_entries,
+                    );
+                }
+            }
+        } else {
+            // Simple call (no children): CALL → RESULT terminal.
+            // Issue #254 item 8: use delivery_return_data when the L1 delivery
+            // returns data, so _resolveScopes returns it to the L2 caller.
+            let simple_next = if call.delivery_return_data.is_empty() && !call.l2_delivery_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: call.delivery_return_data.clone(),
+                    failed: call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            l2_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.to_vec(),
+                action_hash: call_hash,
+                next_action: simple_next,
+            });
+        }
+    }
+
+    for &(orig_idx, call) in &l2_to_l1_calls {
+        generate_l2_entries_recursive(
+            orig_idx,
+            call,
+            detected,
+            our_rollup_id,
+            &l2_result_void,
+            &l1_result_void,
+            &empty_deltas,
+            &mut l2_entries,
+        );
+    }
+
+    // ── L1 deferred entries ──
+    //
+    // Reference: ExecuteReverseFlashLoan.s.sol:PostReverseFlashLoanEntries
+    //
+    // L1 entries use TRIGGER perspective for the actionHash (what Rollups.executeCrossChainCall
+    // computes from the proxy call). The trigger actions have:
+    //   rollupId = proxyInfo.originalRollupId = our_rollup_id
+    //   destination = proxyInfo.originalAddress (L2 source address)
+    //   source = builder_address (msg.sender to the proxy)
+    //   source_rollup = 0 (L1)
+    //
+    // The nextAction fields use the EXECUTION perspective (what _processCallAtScope needs):
+    //   rollupId = 0 (L1, where the call executes)
+    //   destination = L1 target (where executeOnBehalf calls)
+    //   source = L2 source (the proxy's originalAddress)
+    //   source_rollup = our_rollup_id
+    //
+    // For each L2→L1 call:
+    //   - The FIRST call (index 0) gets nested DELIVERY (scope=[0]) so that
+    //     _processCallAtScope actually executes the delivery (e.g., receiveTokens
+    //     on Bridge_L1, releasing tokens). Without nested delivery, Rollups returns
+    //     RESULT without executing anything.
+    //   - Subsequent calls with children get EXECUTION (scope=[0]) so that
+    //     _processCallAtScope executes the call (e.g., claimAndBridgeBack on L1)
+    //     which may trigger reentrant child calls.
+    //   - Calls without children get simple trigger → RESULT entries.
+    //   - Each call with children also generates reentrant entries for each child
+    //     and a scope resolution entry.
+    //   - For depth > 1, push_reentrant_child_entries recurses into children that
+    //     have their own children, generating execution + scope resolution entries.
+    let mut l1_entries = Vec::new();
+
+    for (root_pos, &(orig_idx, l2_call)) in l2_to_l1_calls.iter().enumerate() {
+        // Find children belonging to THIS call using original detected index.
+        let this_call_children = find_children(detected, orig_idx);
+
+        // Build the trigger action (trigger perspective: builder calls proxy on L1).
+        let trigger = CrossChainAction {
+            action_type: CrossChainActionType::Call,
+            rollup_id: our_rollup_id,
+            destination: l2_call.call_action.source_address, // proxy's originalAddress
+            value: l2_call.call_action.value,
+            data: l2_call.call_action.data.clone(),
+            failed: false,
+            source_address: builder_address,
+            source_rollup: U256::ZERO,
+            scope: vec![],
+        };
+        let trigger_hash = compute_action_hash(&trigger);
+
+        if root_pos == 0 {
+            // FIRST call: nested DELIVERY with scope=[0].
+            // _resolveScopes enters newScope → _processCallAtScope →
+            // executeOnBehalf(destination, data) which ACTUALLY EXECUTES the delivery.
+            let delivery = CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: U256::ZERO,
+                destination: l2_call.call_action.destination, // L1 target (e.g., Bridge_L1)
+                value: l2_call.call_action.value,
+                data: l2_call.call_action.data.clone(),
+                failed: false,
+                source_address: l2_call.call_action.source_address, // L2 source (e.g., Bridge_L2)
+                source_rollup: our_rollup_id,
+                scope: vec![U256::ZERO],
+            };
+
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                "L1 Entry {} (trigger→delivery): hash={} delivery_dest={} data_len={}",
+                root_pos, trigger_hash, delivery.destination, trigger.data.len()
+            );
+
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: trigger_hash,
+                next_action: delivery,
+            });
+
+            // If the first call's delivery execution triggers reentrant child calls
+            // (e.g., delivery of receiveTokens triggers a bridgeTokens back), add
+            // reentrant entries for each child. These are consumed by reentrant
+            // executeCrossChainCall within the delivery's scope.
+            // For depth > 1, this recurses into children with grandchildren.
+            push_reentrant_child_entries(
+                &this_call_children,
+                detected,
+                our_rollup_id,
+                orig_idx,
+                &empty_deltas,
+                &l1_result_void,
+                &mut l1_entries,
+            );
+
+            // Delivery RESULT resolution entry.
+            // _processCallAtScope builds RESULT{data: returnData} from executeOnBehalf's
+            // raw return. The return data depends on what the delivery function returns:
+            //   - void functions: returnData = "" (0 bytes) → result_void
+            //   - functions returning data (e.g., Logger.execute → bytes): returnData
+            //     is ABI-encoded, even when inner calls return empty via result_void
+            //     entries (e.g., abi.encode(bytes("")) = 64 bytes)
+            // The simulation must include inner call entries so it produces the same
+            // return data as the real execution (issue #245).
+            let delivery_result = if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
+                result_void(U256::ZERO)
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: l2_call.delivery_return_data.clone(),
+                    failed: l2_call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            let delivery_result_hash = compute_action_hash(&delivery_result);
+            // Issue #246: L1 delivery RESULT also needs return data.
+            // Rollups.sol returns nextAction.data to the L1 caller.
+            let l1_delivery_exit = if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: l2_call.delivery_return_data.clone(),
+                    failed: l2_call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: delivery_result_hash,
+                next_action: l1_delivery_exit,
+            });
+        } else if !this_call_children.is_empty() {
+            // Subsequent call WITH children: EXECUTION with scope=[0].
+            // _processCallAtScope creates the proxy and calls executeOnBehalf,
+            // which may trigger reentrant child calls.
+            let execution = CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: U256::ZERO, // L1, where the call executes
+                destination: l2_call.call_action.destination, // L1 target
+                value: l2_call.call_action.value,
+                data: l2_call.call_action.data.clone(),
+                failed: false,
+                source_address: l2_call.call_action.source_address, // L2 initiator
+                source_rollup: our_rollup_id,
+                scope: vec![U256::ZERO],
+            };
+
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                "L1 Entry {} (trigger→execution): hash={} exec_dest={} exec_source={} data_len={}",
+                root_pos, trigger_hash, execution.destination, execution.source_address,
+                execution.data.len()
+            );
+
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: trigger_hash,
+                next_action: execution,
+            });
+
+            // Reentrant entries for EACH child of this call.
+            // For depth > 1, this recurses into children with grandchildren.
+            push_reentrant_child_entries(
+                &this_call_children,
+                detected,
+                our_rollup_id,
+                orig_idx,
+                &empty_deltas,
+                &l1_result_void,
+                &mut l1_entries,
+            );
+
+            // Scope resolution entry for this call (same pattern as delivery RESULT).
+            let scope_result = if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
+                result_void(U256::ZERO)
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: l2_call.delivery_return_data.clone(),
+                    failed: l2_call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            let scope_result_hash = compute_action_hash(&scope_result);
+
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                "L1 Entry {} (scope resolution): hash={} child_count={} return_data_len={}",
+                root_pos, scope_result_hash, this_call_children.len(),
+                l2_call.delivery_return_data.len()
+            );
+
+            // Issue #246: carry delivery return data for L1 scope exit.
+            let l1_scope_exit_subseq = if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: l2_call.delivery_return_data.clone(),
+                    failed: l2_call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: scope_result_hash,
+                next_action: l1_scope_exit_subseq,
+            });
+        } else {
+            // Subsequent call WITHOUT children: nested DELIVERY with scope=[0].
+            // Without scope navigation, Rollups returns RESULT without executing
+            // the call on L1 — the same pattern as root_pos==0.
+            let delivery = CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: U256::ZERO,
+                destination: l2_call.call_action.destination, // L1 target
+                value: l2_call.call_action.value,
+                data: l2_call.call_action.data.clone(),
+                failed: false,
+                source_address: l2_call.call_action.source_address, // L2 source
+                source_rollup: our_rollup_id,
+                scope: vec![U256::ZERO],
+            };
+
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                "L1 Entry {} (trigger→delivery, no children): hash={} delivery_dest={} data_len={}",
+                root_pos, trigger_hash, delivery.destination,
+                l2_call.call_action.data.len()
+            );
+
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: trigger_hash,
+                next_action: delivery,
+            });
+
+            // Delivery RESULT resolution (scope exit).
+            // _processCallAtScope builds RESULT{data: returnData} after executeOnBehalf.
+            // Use actual delivery_return_data when non-empty (#246).
+            let delivery_result = if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
+                result_void(U256::ZERO)
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: l2_call.delivery_return_data.clone(),
+                    failed: l2_call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            let delivery_result_hash = compute_action_hash(&delivery_result);
+            // Issue #246: carry delivery return data for L1 caller.
+            let l1_subseq_exit = if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
+                l1_result_void.clone()
+            } else {
+                CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: l2_call.delivery_return_data.clone(),
+                    failed: l2_call.l2_delivery_failed,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                }
+            };
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: empty_deltas.clone(),
+                action_hash: delivery_result_hash,
+                next_action: l1_subseq_exit,
+            });
+        }
+    }
+
+    // Reorder same-hash groups for Solidity swap-and-pop FIFO consumption.
+    reorder_for_swap_and_pop(&mut l2_entries);
+    reorder_for_swap_and_pop(&mut l1_entries);
+
+    L2ToL1ContinuationEntries {
+        l2_entries,
+        l1_entries,
+    }
+}
+
+#[cfg(test)]
+#[path = "table_builder_tests.rs"]
+mod tests;

@@ -1,0 +1,171 @@
+# deployments/kurtosis-1337/docker-compose.yml — Based Rollup with Kurtosis L1 (real PoS finality)
+#
+# Prerequisites:
+#   1. Run ./start.sh to start Kurtosis L1 and generate .env.kurtosis
+#   2. Build images: docker build -f deployments/shared/Dockerfile --target runtime -t based-rollup:local ../..
+#
+# Usage (from repo root):
+#   docker compose -f deployments/kurtosis-1337/docker-compose.yml --env-file deployments/kurtosis-1337/.env.kurtosis up -d
+
+name: based-rollup-kurtosis
+
+x-l1-access: &l1-access
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  deploy:
+    <<: *l1-access
+    image: based-rollup:deploy
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/deploy.sh ${KURTOSIS_L1_RPC_URL}
+    volumes:
+      - ../../contracts:/app/contracts
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+      GENESIS_JSON: /etc/based-rollup/genesis.json
+      BOOTSTRAP_ACCOUNTS: "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc:10"
+
+  builder:
+    <<: *l1-access
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: builder
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+      - builder-data:/data
+    environment:
+      L1_RPC_URL: "${KURTOSIS_L1_RPC_URL}"
+      BUILDER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    ports:
+      - "10545:8545"
+      - "10548:8547"
+      - "10556:9556"
+      - "10560:9100"
+      - "127.0.0.1:10550:8546"
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+
+  fullnode1:
+    <<: *l1-access
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: fullnode
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+      - fullnode1-data:/data
+    environment:
+      L1_RPC_URL: "${KURTOSIS_L1_RPC_URL}"
+    ports:
+      - "10546:8545"
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  fullnode2:
+    <<: *l1-access
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: fullnode
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+      - fullnode2-data:/data
+    environment:
+      L1_RPC_URL: "${KURTOSIS_L1_RPC_URL}"
+    ports:
+      - "10547:8545"
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  tx-sender:
+    image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
+    restart: unless-stopped
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/send-test-txs.sh http://builder:8545
+    volumes:
+      - ../shared/scripts:/app/scripts
+    depends_on:
+      builder:
+        condition: service_healthy
+
+  complex-tx-sender:
+    image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
+    restart: unless-stopped
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/send-complex-txs.sh http://builder:8545
+    volumes:
+      - ../shared/scripts:/app/scripts
+    depends_on:
+      builder:
+        condition: service_healthy
+    profiles:
+      - complex
+
+  crosschain-tx-sender:
+    <<: *l1-access
+    image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
+    restart: unless-stopped
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/send-crosschain-txs.sh http://builder:8545 ${KURTOSIS_L1_RPC_URL}
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - ../../contracts:/app/contracts
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+    depends_on:
+      builder:
+        condition: service_healthy
+    profiles:
+      - sync
+
+  sync-ui:
+    image: node:20-slim
+    restart: unless-stopped
+    working_dir: /ui
+    command: ["sh", "-c", "npm install --prefer-offline && npx vite --host 0.0.0.0 --port 8080"]
+    volumes:
+      - ../../ui:/ui
+      - shared:/shared:ro
+    ports:
+      - "9080:8080"
+    depends_on:
+      builder:
+        condition: service_healthy
+    profiles:
+      - sync
+
+volumes:
+  shared:
+  builder-data:
+  fullnode1-data:
+  fullnode2-data:

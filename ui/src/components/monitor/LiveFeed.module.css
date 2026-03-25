@@ -1,0 +1,437 @@
+/* ── LiveFeed — Minimal cross-chain monitoring feed ── */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+/* ── Status bar ── */
+
+.statusBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.statusLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.liveDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
+  animation: livePulse 1.5s ease-in-out infinite;
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
+  50% { opacity: 0.6; box-shadow: 0 0 12px rgba(52, 211, 153, 0.3); }
+}
+
+.liveLabel {
+  color: var(--green);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.connectingLabel {
+  color: var(--yellow);
+  font-size: 10px;
+}
+
+.errorLabel {
+  color: var(--red);
+  font-size: 10px;
+}
+
+.statusRight {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* ── Filters ── */
+
+.filters {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.filterBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid transparent;
+  padding: 5px 10px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+
+.filterBtn:hover {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
+.filterBtnActive {
+  color: var(--text-bright);
+  background: var(--bg-raised);
+  border-color: var(--border-bright);
+}
+
+.filterCount {
+  font-size: 9px;
+  color: var(--text-dim);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  padding: 0 5px;
+  border-radius: 3px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.filterBtnActive .filterCount {
+  color: var(--accent-light);
+  background: var(--accent-dim);
+  border-color: rgba(99, 102, 241, 0.18);
+}
+
+/* ── Empty state ── */
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+/* ── Feed ── */
+
+.feed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ── Block card ── */
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  transition: border-color var(--duration) var(--ease);
+}
+
+.card:hover {
+  border-color: var(--border-bright);
+}
+
+/* Slide-in animation for new cards */
+.cardNew {
+  animation: slideIn 0.35s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 300px;
+  }
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ── Block link (internal navigation) ── */
+
+.blockLink {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-light);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color var(--duration) var(--ease);
+}
+
+.blockLink:hover {
+  color: var(--text-bright);
+  text-decoration: underline;
+}
+
+.l2Badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--yellow);
+  background: var(--yellow-dim);
+  border: 1px solid var(--yellow-border);
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+}
+
+.dirBadge {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--accent-light);
+  background: var(--accent-dim);
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+}
+
+.countBadge {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  padding: 2px 7px;
+  border-radius: 3px;
+}
+
+.timestamp {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* ── Tx rows ── */
+
+.txList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+}
+
+.txRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text);
+  padding: 4px 8px;
+  background: var(--bg-inset);
+  border-radius: var(--radius-xs);
+}
+
+.typeBadge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.typeBadgeL1 {
+  color: var(--cyan);
+  background: var(--cyan-dim);
+  border: 1px solid var(--cyan-border);
+}
+
+.typeBadgeL2 {
+  color: var(--yellow);
+  background: var(--yellow-dim);
+  border: 1px solid var(--yellow-border);
+}
+
+.txAddr {
+  color: var(--text);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.addrLink {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--accent-light);
+  text-decoration: none;
+  transition: color var(--duration) var(--ease);
+}
+
+.addrLink:hover {
+  color: var(--text-bright);
+  text-decoration: underline;
+}
+
+.arrow {
+  color: var(--text-dim);
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.source {
+  color: var(--text-dim);
+  font-size: 9px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* ── Card footer ── */
+
+.cardFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.footerBtn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color var(--duration) var(--ease);
+}
+
+.footerBtn:hover {
+  color: var(--accent-light);
+}
+
+.txHash {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* ── Spinner ── */
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-bright);
+  border-top-color: var(--accent-light);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Loading skeleton ── */
+
+.skeleton {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skelLine {
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--bg-inset) 25%, var(--border) 50%, var(--bg-inset) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Load more ── */
+
+.loadMoreRow {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+}
+
+.loadMoreBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 6px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+
+.loadMoreBtn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-bright);
+}
+
+.loadMoreBtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.endLabel {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}

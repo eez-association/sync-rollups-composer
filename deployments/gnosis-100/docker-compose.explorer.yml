@@ -1,0 +1,25 @@
+# deployments/gnosis-100/docker-compose.explorer.yml — Gnosis explorer overrides
+#
+# Adds Gnosis-specific config on top of the shared explorer definitions.
+# Use together with the shared explorer overlay:
+#
+#   docker compose -f deployments/gnosis-100/docker-compose.yml \
+#                  -f deployments/shared/docker-compose.explorer.yml \
+#                  -f deployments/gnosis-100/docker-compose.explorer.yml \
+#                  --env-file deployments/gnosis-100/.env up -d
+
+services:
+  l2-db:
+    volumes:
+      - gnosis-l2-db-data:/var/lib/postgresql/data
+
+  l2-explorer:
+    ports:
+      - "4003:4000"   # L2 Explorer API (backend)
+
+  l2-frontend:
+    ports:
+      - "4001:3000"   # L2 Explorer Frontend
+
+volumes:
+  gnosis-l2-db-data:

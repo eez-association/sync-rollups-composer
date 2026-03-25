@@ -1,0 +1,65 @@
+# deployments/testnet-eez/docker-compose.explorer.yml — Testnet-eez explorer overrides
+#
+# Adds testnet-eez-specific config on top of the shared explorer definitions.
+# Use together with the shared explorer overlay:
+#
+#   docker compose -f deployments/testnet-eez/docker-compose.yml \
+#                  -f deployments/shared/docker-compose.explorer.yml \
+#                  -f deployments/testnet-eez/docker-compose.explorer.yml up -d
+
+services:
+  l2-db:
+    volumes:
+      - l2-db-data:/var/lib/postgresql/data
+
+  l2-explorer:
+    volumes:
+      - ../../deployments/shared/genesis.json:/genesis/genesis.json:ro
+    environment:
+      SECRET_KEY_BASE: "79NtB48ear7+wMSf0IQuWDAAazhpb31qyc7GiyspBP2vh7t5zlCsF5QDv76chXeN" # LOCAL DEV ONLY
+      BLOCKSCOUT_HOST: ${BLOCKSCOUT_L2_HOST:-l2.eez.dev}
+      CHAIN_SPEC_PATH: "/genesis/genesis.json"
+    ports:
+      - "4003:4000"   # L2 Explorer API (backend)
+
+  l2-frontend:
+    ports:
+      - "4001:3000"   # L2 Explorer Frontend
+    environment:
+      NEXT_PUBLIC_API_HOST: ${BLOCKSCOUT_L2_HOST:-l2.eez.dev}
+      NEXT_PUBLIC_API_PORT: "443"
+      NEXT_PUBLIC_API_PROTOCOL: https
+      NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL: wss
+      NEXT_PUBLIC_APP_HOST: ${BLOCKSCOUT_L2_HOST:-l2.eez.dev}
+      NEXT_PUBLIC_APP_PORT: "443"
+      NEXT_PUBLIC_APP_PROTOCOL: https
+
+  # Contract verification — runs after explorers are up, verifies all contracts
+  verify-contracts:
+    image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/verify-contracts.sh
+    volumes:
+      - ../../contracts:/app/contracts
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+      L1_RPC_URL: http://l1:8545
+      L1_EXPLORER: http://l1-explorer:4000
+      L2_EXPLORER: http://l2-explorer:4000
+    depends_on:
+      l1-explorer:
+        condition: service_started
+      l2-explorer:
+        condition: service_started
+      builder:
+        condition: service_healthy
+
+volumes:
+  l2-db-data:

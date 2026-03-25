@@ -1,0 +1,307 @@
+/* ── Faucet Strip — compact inline utility bar ── */
+
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  position: relative;
+  overflow: hidden;
+  animation: fadeSlideUp 0.3s ease-out both;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.4s;
+}
+
+.strip:hover {
+  border-color: var(--border-bright);
+  border-left-color: var(--accent-light);
+}
+
+/* Busy pulsing state */
+.busy {
+  animation: fadeSlideUp 0.3s ease-out both, pulseGlow 2s ease-in-out infinite;
+}
+
+/* Success flash — green tint that fades */
+.success {
+  background: linear-gradient(90deg, var(--green-dim) 0%, var(--bg-card) 40%);
+  border-left-color: var(--green);
+}
+
+/* Error state — subtle red tint on left */
+.error {
+  border-left-color: var(--red);
+}
+
+/* ── Icon ── */
+
+.icon {
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.8;
+  display: flex;
+  align-items: center;
+}
+
+/* ── Label ── */
+
+.label {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+  flex-shrink: 0;
+}
+
+/* ── Separator dot ── */
+
+.dot {
+  color: var(--text-dim);
+  opacity: 0.4;
+  font-size: 10px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+/* ── Description text ── */
+
+.desc {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+/* ── Chain toggle (tiny pills) ── */
+
+.chainToggle {
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  flex-shrink: 0;
+}
+
+.chainBtn {
+  font-family: var(--sans);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  padding: 3px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+
+.chainBtn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.chainActive {
+  color: var(--text-bright);
+  background: var(--bg-card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.chainBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ── Request button (compact with glow) ── */
+
+.requestBtn {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--on-color, #fff);
+  background: var(--accent);
+  border: none;
+  padding: 5px 14px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  line-height: 1;
+  height: 28px;
+}
+
+.requestBtn:hover:not(:disabled) {
+  background: var(--accent-light);
+  box-shadow: 0 0 12px var(--accent-shadow), 0 2px 6px var(--accent-shadow);
+}
+
+.requestBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.requestBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Spinner (inline, tiny) ── */
+
+.spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--spinner-track, rgba(255,255,255,0.3));
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+/* ── Faucet balance (right edge, dim) ── */
+
+.balance {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+.balanceAmount {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* ── Inline status text ── */
+
+.statusText {
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.statusPending {
+  color: var(--accent-light);
+}
+
+.statusOk {
+  color: var(--green);
+}
+
+/* ── Inline error ── */
+
+.errorText {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--red);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.dismissX {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--red);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0.6;
+  transition: opacity 0.12s;
+  flex-shrink: 0;
+}
+
+.dismissX:hover {
+  opacity: 1;
+}
+
+/* ── Cooldown text ── */
+
+.cooldown {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--yellow);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* ── TX hash (appears inline) ── */
+
+.txHash {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  opacity: 0.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
+  flex-shrink: 1;
+}
+
+/* ── Confirmed check icon ── */
+
+.checkIcon {
+  color: var(--green);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 768px) {
+  .strip {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 48px;
+    padding: 8px 12px;
+    gap: 6px;
+  }
+
+  .desc {
+    order: 10;
+    flex-basis: 100%;
+    margin-top: -2px;
+  }
+
+  .balance {
+    order: 11;
+    flex-basis: 100%;
+    margin-left: 0;
+    margin-top: 2px;
+  }
+
+  .errorText {
+    max-width: 100%;
+    flex-basis: 100%;
+    order: 12;
+  }
+}

@@ -1,0 +1,41 @@
+# Kurtosis ethereum-package configuration for based-rollup L1 devnet.
+# Spins up a minimal PoS Ethereum network with reth + Lighthouse,
+# producing real finality (head/safe/finalized gap) with 12s slots.
+#
+# Pre-funds the same Anvil dev accounts used by docker-compose.yml so that
+# deploy.sh, tx-sender, complex-tx-sender, and crosschain-tx-sender all work
+# without modification.
+
+participants:
+  # Two Lighthouse nodes with 256 validators each (512 total).
+  # Large validator set ensures committees have enough members for 2/3 supermajority.
+  - el_type: reth
+    el_image: ghcr.io/paradigmxyz/reth:latest
+    cl_type: lighthouse
+    cl_image: sigp/lighthouse:latest
+    cl_extra_params:
+      - --subscribe-all-subnets
+    count: 2
+
+network_params:
+  # Match the 12-second block time used by the existing reth --dev setup
+  seconds_per_slot: 12
+  # Use the same chain ID as reth --dev (1337) so scripts and Blockscout config work unchanged
+  network_id: "1337"
+  # 256 validators per node (512 total) — enough for 16 validators per committee
+  # (512 validators / 32 slots per epoch = 16 per slot, across 4 committees)
+  num_validator_keys_per_node: 256
+  # Deneb enabled from genesis, later forks disabled
+  deneb_fork_epoch: 0
+  electra_fork_epoch: 100000000
+  fulu_fork_epoch: 100000000
+  # Pre-fund Anvil dev accounts with 10000 ETH each (JSON string format required).
+  # These match the well-known accounts used throughout the based-rollup stack:
+  #   Account #0 (deployer/builder): 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+  #   Account #1 (tx-sender):        0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+  #   Account #2:                     0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+  #   Account #3:                     0x90F79bf6EB2c4f870365E785982E1f101E93b906
+  #   Account #4 (crosschain-sender): 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65
+  #   Account #5 (complex-tx-sender): 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
+  #   Extra (funded by deploy.sh):    0xF35960302a07022aBa880DFFaEC2Fdd64d5BF1c1
+  prefunded_accounts: '{"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266":{"balance":"10000ETH"},"0x70997970C51812dc3A010C7d01b50e0d17dc79C8":{"balance":"10000ETH"},"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC":{"balance":"10000ETH"},"0x90F79bf6EB2c4f870365E785982E1f101E93b906":{"balance":"10000ETH"},"0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65":{"balance":"10000ETH"},"0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc":{"balance":"10000ETH"},"0xF35960302a07022aBa880DFFaEC2Fdd64d5BF1c1":{"balance":"10000ETH"}}'

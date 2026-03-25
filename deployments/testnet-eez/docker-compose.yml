@@ -1,0 +1,355 @@
+# deployments/testnet-eez/docker-compose.yml — Based Rollup Testnet (eez.dev, chain ID 1337)
+#
+# Includes a local L1 (reth --dev) and all supporting services.
+# L2 explorer services require both shared and testnet-specific overlays:
+#   docker compose -f deployments/testnet-eez/docker-compose.yml \
+#                  -f deployments/shared/docker-compose.explorer.yml \
+#                  -f deployments/testnet-eez/docker-compose.explorer.yml up -d
+#
+# Dev iteration (after cargo build --release):
+#   docker compose -f deployments/testnet-eez/docker-compose.yml \
+#                  -f deployments/testnet-eez/docker-compose.dev.yml up -d
+
+services:
+  # L1 — local Ethereum node (reth --dev mode)
+  l1:
+    image: ghcr.io/paradigmxyz/reth:latest
+    command:
+      - node
+      - --dev
+      - --dev.block-time=12s
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --http.api=debug,trace,txpool,eth,net,web3
+      - --http.corsdomain=*
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.port=8546
+      - --ws.api=debug,trace,txpool,eth,net,web3
+      - --datadir=/data
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    volumes:
+      - l1-data:/data
+    ports:
+      - "9555:8545"   # L1 JSON-RPC (host 9555 -> container 8545)
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8545'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Deploy Rollups + tmpECDSAVerifier contracts to L1 and write config
+  # NOTE: Uses the same well-known anvil private key as the builder service
+  # for local dev convenience. Production deployments should use separate keys
+  # for contract deployment and block building.
+  deploy:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile
+      target: deploy
+    image: based-rollup:deploy
+    # Root required to write to the shared volume
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash deploy-devnet.sh http://l1:8545
+    volumes:
+      - ../../contracts:/app/contracts
+      - ../shared/scripts:/app/scripts
+      - ./deploy.sh:/app/deploy-devnet.sh:ro
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+      GENESIS_JSON: /etc/based-rollup/genesis.json
+      # Bootstrap test accounts with 100 ETH each at block 1.
+      # #2=crosschain-test, #3=bridge-test, #5=double-deposit-user1, #6=double-deposit-user2
+      BOOTSTRAP_ACCOUNTS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC:100,0x90F79bf6EB2c4f870365E785982E1f101E93b906:100,0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc:100,0x976EA74026E726554dB657fA54763abd0C3a0aa9:100"
+    depends_on:
+      l1:
+        condition: service_healthy
+
+  # L2 deployment — runs after builder is healthy.
+  # Sets canonicalBridgeAddress + deploys flash loan contracts on L2.
+  deploy-l2:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile
+      target: deploy
+    image: based-rollup:deploy
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/deploy_l2.sh
+    volumes:
+      - ../../contracts:/app/contracts
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  # L2 — based-rollup builder node
+  builder:
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: builder
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile
+      target: runtime
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+      - builder-data:/data
+    ports:
+      - "9545:8545"   # L2 JSON-RPC
+      - "9548:8547"   # L2 RPC Proxy (intercepts sendRawTransaction)
+      - "9556:9556"   # L1 RPC Proxy (MetaMask points here for cross-chain)
+      - "9560:9100"   # Health endpoint (dashboard monitoring)
+      - "127.0.0.1:9550:8546"   # L2 WebSocket (localhost only)
+    environment:
+      # Well-known anvil default key — LOCAL DEVELOPMENT ONLY
+      BUILDER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+
+  # L2 — fullnode 1
+  fullnode1:
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: fullnode
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+      - fullnode1-data:/data
+    ports:
+      - "9546:8545"   # L2 JSON-RPC
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  # L2 — fullnode 2
+  fullnode2:
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: fullnode
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+      - fullnode2-data:/data
+    ports:
+      - "9547:8545"   # L2 JSON-RPC
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  # Transaction sender — sends test transactions to the builder
+  tx-sender:
+    image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
+    restart: unless-stopped
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/send-test-txs.sh http://builder:8545
+    volumes:
+      - ../shared/scripts:/app/scripts
+    depends_on:
+      builder:
+        condition: service_healthy
+
+  # Deploy L2-to-L1 reverse flash loan contracts — runs after deploy-l2 completes.
+  # Uses dev key #5 (same as deploy-l2), so must not overlap with it.
+  # If FLASH_TOKEN_ADDRESS is zero (flash loan infra not deployed), exits cleanly.
+  deploy-reverse-flash-loan:
+    image: based-rollup:deploy
+    user: root
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        source /shared/rollup.env
+        bash scripts/deploy-reverse-flash-loan.sh \
+          --l1-rpc http://l1:8545 \
+          --l2-rpc http://builder:8545 \
+          --pk "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba" \
+          --rollups "$$ROLLUPS_ADDRESS" \
+          --manager-l2 "$$CROSS_CHAIN_MANAGER_ADDRESS" \
+          --bridge-l1 "$$BRIDGE_L1_ADDRESS" \
+          --bridge-l2 "$$BRIDGE_L2_ADDRESS" \
+          --token "$$FLASH_TOKEN_ADDRESS" \
+          --wrapped-token "$$WRAPPED_TOKEN_L2" \
+          --l2-rollup-id 1 \
+          --contracts-dir /app/contracts/sync-rollups
+    volumes:
+      - ../../contracts:/app/contracts
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+    depends_on:
+      deploy-l2:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  # Complex transaction sender — ERC20, contract deployments, edge cases
+  complex-tx-sender:
+    image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
+    restart: unless-stopped
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/send-complex-txs.sh http://builder:8545
+    volumes:
+      - ../shared/scripts:/app/scripts
+    depends_on:
+      deploy-reverse-flash-loan:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  # Cross-chain demo — deploys Counter on L2, sends increment() txs,
+  # verifies state roots propagate to L1 via execution entries (postBatch)
+  crosschain-tx-sender:
+    image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
+    restart: unless-stopped
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/send-crosschain-txs.sh http://builder:8545 http://l1:8545
+    volumes:
+      - ../shared/scripts:/app/scripts
+      - ../../contracts:/app/contracts
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+    depends_on:
+      builder:
+        condition: service_healthy
+
+  # Sync composability UI dashboard — Vite React app on port 8080
+  sync-ui:
+    image: node:20-slim
+    restart: unless-stopped
+    working_dir: /ui
+    command: ["sh", "-c", "npm install --prefer-offline && npx vite --host 0.0.0.0 --port 8080"]
+    volumes:
+      - ../../ui:/ui
+      - shared:/shared:ro
+    ports:
+      - "8080:8080"    # Sync composability dashboard
+    depends_on:
+      builder:
+        condition: service_healthy
+
+  # ── L1 Explorer (Blockscout) — devnet-only since only devnet has a local L1 ──
+
+  l1-db:
+    image: postgres:16.6-alpine
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=300"]
+    environment:
+      POSTGRES_DB: l1_blockscout
+      POSTGRES_USER: blockscout
+      POSTGRES_PASSWORD: blockscout
+    volumes:
+      - l1-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blockscout -d l1_blockscout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  l1-explorer:
+    image: blockscout/blockscout:7.0.2.commit.900ef697
+    restart: unless-stopped
+    command: sh -c "bin/blockscout eval \"Elixir.Explorer.ReleaseTasks.create_and_migrate()\" && bin/blockscout start"
+    environment:
+      DATABASE_URL: postgresql://blockscout:blockscout@l1-db:5432/l1_blockscout
+      ETHEREUM_JSONRPC_VARIANT: geth
+      ETHEREUM_JSONRPC_HTTP_URL: http://l1:8545
+      ETHEREUM_JSONRPC_TRACE_URL: http://l1:8545
+      ETHEREUM_JSONRPC_WS_URL: ws://l1:8546
+      ECTO_USE_SSL: "false"
+      SECRET_KEY_BASE: "56NtB48ear7+wMSf0IQuWDAAazhpb31qyc7GiyspBP2vh7t5zlCsF5QDv76chXeN" # LOCAL DEV ONLY — generate a unique value for production: `openssl rand -base64 48`
+      NETWORK: "Based Rollup L1"
+      SUBNETWORK: "Anvil"
+      COIN: "ETH"
+      COIN_NAME: "ETH"
+      PORT: "4000"
+      DISABLE_EXCHANGE_RATES: "true"
+      INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER: "true"
+      INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER: "false"
+      INDEXER_DISABLE_BLOCK_REWARD_FETCHER: "true"
+      CHAIN_ID: "1337"
+      BLOCKSCOUT_HOST: ${BLOCKSCOUT_L1_HOST:-l1.eez.dev}
+      API_V2_ENABLED: "true"
+      MIX_ENV: "prod"
+      FETCH_REWARDS_WAY: "trace_block"
+      POOL_SIZE: "50"
+      FIRST_BLOCK: "0"
+      LAST_BLOCK: ""
+    ports:
+      - "4002:4000"   # L1 Explorer API (backend)
+    depends_on:
+      l1-db:
+        condition: service_healthy
+
+  l1-frontend:
+    image: ghcr.io/blockscout/frontend:latest
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_HOST: ${BLOCKSCOUT_L1_HOST:-l1.eez.dev}
+      NEXT_PUBLIC_API_PORT: "443"
+      NEXT_PUBLIC_API_PROTOCOL: https
+      NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL: wss
+      NEXT_PUBLIC_STATS_API_HOST: ""
+      NEXT_PUBLIC_NETWORK_NAME: "Based Rollup L1"
+      NEXT_PUBLIC_NETWORK_SHORT_NAME: "L1"
+      NEXT_PUBLIC_NETWORK_ID: "1337"
+      NEXT_PUBLIC_NETWORK_CURRENCY_NAME: "ETH"
+      NEXT_PUBLIC_NETWORK_CURRENCY_SYMBOL: "ETH"
+      NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS: "18"
+      NEXT_PUBLIC_IS_TESTNET: "true"
+      NEXT_PUBLIC_APP_HOST: ${BLOCKSCOUT_L1_HOST:-l1.eez.dev}
+      NEXT_PUBLIC_APP_PORT: "443"
+      NEXT_PUBLIC_APP_PROTOCOL: https
+      NEXT_PUBLIC_HOMEPAGE_CHARTS: "['daily_txs']"
+      NEXT_PUBLIC_VISUALIZE_API_HOST: ""
+    ports:
+      - "4000:3000"   # L1 Explorer Frontend
+    depends_on:
+      - l1-explorer
+
+volumes:
+  shared:           # Holds rollup.env config shared between deploy service and rollup nodes
+  builder-data:     # Persistent reth database for the builder node
+  fullnode1-data:   # Persistent reth database for fullnode 1
+  fullnode2-data:   # Persistent reth database for fullnode 2
+  l1-data:          # Persistent reth database for the L1 dev node
+  l1-db-data:       # PostgreSQL data for L1 Blockscout

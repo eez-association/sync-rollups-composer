@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Internal crates
+based-rollup = { path = "crates/based-rollup" }
+
+# Reth (pinned to specific commit)
+reth = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-node-builder = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-node-api = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-primitives = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-payload-builder = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-consensus = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-revm = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-stages-types = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth.git", rev = "39b9c8ae4b8fe86ae8a74ee545055d0cae071837" }
+
+# Alloy EVM
+alloy-evm = "0.29"
+alloy-eips = "1.7"
+
+# Alloy
+alloy-primitives = "1.5"
+alloy-consensus = "1.7"
+alloy-sol-types = "1.5"
+alloy-provider = { version = "1.7", features = ["reqwest", "ws"] }
+alloy-rpc-types = { version = "1.7", features = ["eth"] }
+alloy-rpc-types-engine = "1.7"
+alloy-transport-http = { version = "1.7", features = ["reqwest-rustls-tls"] }
+alloy-network = "1.7"
+alloy-signer = "1.7"
+alloy-signer-local = "1.7"
+alloy-contract = "1.7"
+alloy-genesis = "1.7"
+alloy-trie = "0.9"
+alloy-rlp = "0.3"
+
+# JSON-RPC
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
+
+# HTTP (for RPC proxy)
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+
+# Revm
+revm = { version = "36", default-features = false }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Logging
+tracing = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Error handling
+eyre = "0.6"
+thiserror = "2"

@@ -1,0 +1,32 @@
+.link {
+  text-decoration: none;
+  color: inherit;
+  transition: color var(--duration) var(--ease),
+              opacity var(--duration) var(--ease);
+  border-radius: var(--radius-xs);
+}
+
+.link:hover {
+  color: var(--accent-light);
+}
+
+.link:active {
+  opacity: 0.8;
+}
+
+.copiedCheck {
+  color: var(--green);
+  margin-left: var(--sp-1);
+  font-size: 0.9em;
+  animation: pop 0.3s ease-out;
+}
+
+.copyable {
+  cursor: pointer;
+  transition: color var(--duration) var(--ease);
+  border-radius: var(--radius-xs);
+}
+
+.copyable:hover {
+  color: var(--accent-light);
+}

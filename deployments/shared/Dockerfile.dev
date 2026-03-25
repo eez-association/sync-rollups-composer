@@ -1,0 +1,21 @@
+# Minimal runtime image for dev iteration.
+# Matches host glibc (Ubuntu 24.04) so locally compiled binaries run unmodified.
+# Build once, then iterate with: cargo build --release && docker compose restart ...
+FROM ubuntu:24.04 AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -r -m -s /bin/false rollup && mkdir -p /data && chown rollup:rollup /data
+USER rollup
+
+ENTRYPOINT ["based-rollup"]
+
+# Deploy variant: adds forge/cast for contract deployment
+FROM runtime AS deploy
+
+USER root
+COPY --from=ghcr.io/foundry-rs/foundry:v1.6.0-rc1 /usr/local/bin/forge /usr/local/bin/forge
+COPY --from=ghcr.io/foundry-rs/foundry:v1.6.0-rc1 /usr/local/bin/cast /usr/local/bin/cast

@@ -1,0 +1,37 @@
+.panel {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+.countBadge {
+  font-size: 0.55rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  color: var(--text-dim);
+}
+.panelBody {
+  padding: 5px;
+  flex: 1;
+  overflow: auto;
+  min-height: 40px;
+}
+.empty {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.55rem;
+  padding: 8px;
+  opacity: 0.4;
+}

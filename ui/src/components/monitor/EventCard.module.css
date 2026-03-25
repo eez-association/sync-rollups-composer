@@ -1,0 +1,94 @@
+.card {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-size: 0.63rem;
+  line-height: 1.45;
+  border: 1px solid transparent;
+  background: var(--bg-card);
+}
+.cardSelected {
+  border-color: var(--accent);
+  background: var(--bg-inset);
+}
+.stepNum {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.5rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.stepNumActive {
+  background: var(--accent);
+  color: #fff;
+}
+.stepNumInactive {
+  background: var(--bg-inset);
+  color: var(--text-dim);
+}
+.chainBadge {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.5rem;
+  font-weight: 700;
+  margin-top: 2px;
+}
+.body {
+  flex: 1;
+  min-width: 0;
+}
+.eventName {
+  font-weight: 700;
+}
+.detail {
+  color: var(--text-dim);
+  font-size: 0.55rem;
+}
+.decoded {
+  margin-top: 3px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 0.5rem;
+}
+.decodedHeader {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+.decodedGrid {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 0px 6px;
+  font-size: 0.48rem;
+}
+.tableChanges {
+  margin-top: 2px;
+  font-size: 0.52rem;
+}
+.correlation {
+  font-size: 0.52rem;
+  color: var(--yellow);
+  margin-top: 2px;
+}
+.expandBtn {
+  font-size: 0.5rem;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-family: var(--mono);
+  margin-top: 3px;
+}

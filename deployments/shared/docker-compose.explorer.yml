@@ -1,0 +1,86 @@
+# deployments/shared/docker-compose.explorer.yml — L2 Blockscout explorer overlay
+#
+# Shared across all deployments. Always pair with a per-deployment explorer overlay
+# that defines host ports (ports were removed from here to allow multi-devnet operation):
+#   docker compose -f docker-compose.yml \
+#                  -f ../shared/docker-compose.explorer.yml \
+#                  -f docker-compose.explorer.yml up -d
+#
+# Override SUBNETWORK, SECRET_KEY_BASE, and BLOCKSCOUT_HOST per deployment via env vars.
+
+services:
+  l2-db:
+    image: postgres:16.6-alpine
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=300"]
+    environment:
+      POSTGRES_DB: l2_blockscout
+      POSTGRES_USER: blockscout
+      POSTGRES_PASSWORD: blockscout
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blockscout -d l2_blockscout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  l2-explorer:
+    image: blockscout/blockscout:7.0.2.commit.900ef697
+    restart: unless-stopped
+    command: >-
+      sh -c "bin/blockscout eval \"Elixir.Explorer.ReleaseTasks.create_and_migrate()\"
+      && bin/blockscout start"
+    environment:
+      DATABASE_URL: postgresql://blockscout:blockscout@l2-db:5432/l2_blockscout
+      ETHEREUM_JSONRPC_VARIANT: geth
+      ETHEREUM_JSONRPC_HTTP_URL: http://builder:8545
+      ETHEREUM_JSONRPC_WS_URL: ws://builder:8546
+      ETHEREUM_JSONRPC_TRACE_URL: http://builder:8545
+      ECTO_USE_SSL: "false"
+      SECRET_KEY_BASE: "${BLOCKSCOUT_SECRET_KEY:-CHANGE_ME_generate_with_openssl_rand_base64_48}"
+      NETWORK: "Based Rollup"
+      SUBNETWORK: "L2"
+      COIN: "ETH"
+      COIN_NAME: "ETH"
+      PORT: "4000"
+      DISABLE_EXCHANGE_RATES: "true"
+      INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER: "true"
+      INDEXER_DISABLE_INTERNAL_TRANSACTIONS_FETCHER: "false"
+      INDEXER_DISABLE_BLOCK_REWARD_FETCHER: "true"
+      CHAIN_ID: "42069"
+      BLOCKSCOUT_HOST: "${BLOCKSCOUT_L2_HOST:-localhost}"
+      API_V2_ENABLED: "true"
+      MIX_ENV: "prod"
+      FETCH_REWARDS_WAY: "trace_block"
+      POOL_SIZE: "50"
+      FIRST_BLOCK: "0"
+    # Ports are defined in each deployment's docker-compose.explorer.yml.
+    depends_on:
+      l2-db:
+        condition: service_healthy
+      builder:
+        condition: service_healthy
+
+  l2-frontend:
+    image: ghcr.io/blockscout/frontend:latest
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_HOST: "${BLOCKSCOUT_L2_HOST:-localhost}"
+      NEXT_PUBLIC_API_PORT: "443"
+      NEXT_PUBLIC_API_PROTOCOL: https
+      NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL: wss
+      NEXT_PUBLIC_STATS_API_HOST: ""
+      NEXT_PUBLIC_NETWORK_NAME: "Based Rollup L2"
+      NEXT_PUBLIC_NETWORK_SHORT_NAME: "L2"
+      NEXT_PUBLIC_NETWORK_ID: "42069"
+      NEXT_PUBLIC_NETWORK_CURRENCY_NAME: "ETH"
+      NEXT_PUBLIC_NETWORK_CURRENCY_SYMBOL: "ETH"
+      NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS: "18"
+      NEXT_PUBLIC_IS_TESTNET: "true"
+      NEXT_PUBLIC_APP_HOST: "${BLOCKSCOUT_L2_HOST:-localhost}"
+      NEXT_PUBLIC_APP_PORT: "443"
+      NEXT_PUBLIC_APP_PROTOCOL: https
+      NEXT_PUBLIC_HOMEPAGE_CHARTS: "['daily_txs']"
+      NEXT_PUBLIC_VISUALIZE_API_HOST: ""
+    # Ports are defined in each deployment's docker-compose.explorer.yml.
+    depends_on:
+      - l2-explorer

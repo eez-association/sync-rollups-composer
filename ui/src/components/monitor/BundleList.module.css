@@ -1,0 +1,71 @@
+.root {
+  padding: 6px;
+}
+.empty {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.55rem;
+  padding: 16px;
+  opacity: 0.4;
+}
+.card {
+  display: flex;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: var(--bg-card);
+  margin-bottom: 5px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-size: 0.6rem;
+  line-height: 1.4;
+}
+.cardSelected {
+  border-color: var(--accent);
+  background: var(--bg-inset);
+}
+.cardHover {
+  border-color: var(--border);
+}
+.cardBody {
+  flex: 1;
+  min-width: 0;
+}
+.cardTitle {
+  font-weight: 700;
+  font-size: 0.58rem;
+}
+.cardMeta {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 0.48rem;
+  color: var(--text-dim);
+}
+.hashList {
+  margin-top: 3px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.hashBadge {
+  font-size: 0.45rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  color: var(--cyan);
+  font-family: var(--mono);
+}
+.txList {
+  margin-top: 3px;
+  font-size: 0.45rem;
+  color: var(--text-dim);
+}
+.statusDot {
+  flex-shrink: 0;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
