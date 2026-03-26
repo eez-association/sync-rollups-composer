@@ -69,9 +69,11 @@ jobs:
           path: target/release/based-rollup
           retention-days: 1
 
-  # Docker Build & Push (runtime + deploy images to GHCR)
+  # Docker Build & Push — uses pre-built binary from build-and-lint (~30s vs ~15m).
+  # Fork PRs cannot push to GHCR — images are loaded locally instead.
   docker-build:
     name: Docker Build & Push
+    needs: build-and-lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,10 +83,15 @@ jobs:
       deploy-image: ghcr.io/${{ github.repository }}:${{ github.sha }}-deploy
     steps:
       - uses: actions/checkout@v4
+      - name: Download release binary
+        uses: actions/download-artifact@v4
         with:
-          submodules: recursive
+          name: based-rollup-binary
+          path: target/release/
+      - run: chmod +x target/release/based-rollup
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -94,9 +101,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deployments/shared/Dockerfile
+          file: deployments/shared/Dockerfile.ci
           target: runtime
-          push: true
+          build-contexts: binary=target/release
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          load: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
             ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:latest', github.repository) || '' }}
@@ -106,9 +115,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deployments/shared/Dockerfile
+          file: deployments/shared/Dockerfile.ci
           target: deploy
-          push: true
+          build-contexts: binary=target/release
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          load: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}-deploy
             ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:deploy-latest', github.repository) || '' }}
@@ -240,9 +251,6 @@ jobs:
         env:
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
           DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
-
-      - name: Wait for blocks to stabilize
-        run: sleep 30
 
       - name: Run bridge E2E test
         run: bash scripts/e2e/bridge-health-check.sh

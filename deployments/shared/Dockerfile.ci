@@ -1,0 +1,32 @@
+# Dockerfile.ci — Lightweight image using a pre-built binary from CI.
+# Skips Rust compilation entirely (~15 min savings vs Dockerfile).
+#
+# The GHA runner (ubuntu-24.04) and this base image share glibc 2.39,
+# so the host-compiled binary runs without modification.
+#
+# Usage (from repo root):
+#   docker buildx build -f deployments/shared/Dockerfile.ci \
+#     --build-context binary=target/release --target runtime .
+
+# ── Runtime image: minimal, no build tools ──
+FROM ubuntu:24.04 AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=binary based-rollup /usr/local/bin/based-rollup
+COPY deployments/shared/genesis.json /etc/based-rollup/genesis.json
+
+RUN useradd -r -m -s /bin/false rollup && mkdir -p /data && chown rollup:rollup /data
+USER rollup
+
+ENTRYPOINT ["based-rollup"]
+
+# ── Deploy image: runtime + forge/cast for contract deployment ──
+FROM runtime AS deploy
+
+USER root
+COPY --from=ghcr.io/foundry-rs/foundry:v1.6.0-rc1 /usr/local/bin/forge /usr/local/bin/forge
+COPY --from=ghcr.io/foundry-rs/foundry:v1.6.0-rc1 /usr/local/bin/cast /usr/local/bin/cast

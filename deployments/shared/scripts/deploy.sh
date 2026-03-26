@@ -389,8 +389,11 @@ cast send --rpc-url "$L1_RPC" --private-key "$FUNDER_KEY" --nonce "$FUNDER_FAUCE
     "$FAUCET_ADDRESS" --value 1000ether --gas-limit 21000 > "$TX_DIR/faucet_fund" 2>&1 &
 
 echo "All phase 2a transactions submitted. Waiting for confirmations..."
-wait
-echo "All phase 2a transactions confirmed."
+if ! wait; then
+    echo "One or more phase 2a transactions may have failed; continuing to receipt verification..."
+else
+    echo "All phase 2a transactions confirmed."
+fi
 
 # --- Phase 2a verification: check all receipts succeeded ---
 echo ""
@@ -458,7 +461,7 @@ if [ "${DEPLOY_FLASH_LOAN:-false}" = "true" ]; then
     EXECUTOR_DEPLOY_OUTPUT=$(cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" \
         --nonce $((DN+11)) --gas-limit 8000000 \
         --create "${EXECUTOR_BYTECODE}${EXECUTOR_CONSTRUCTOR#0x}" 2>&1)
-    EXECUTOR_STATUS=$( (echo "$EXECUTOR_DEPLOY_OUTPUT" | grep -E "^status" || true) | awk '{print $NF}')
+    EXECUTOR_STATUS=$( (echo "$EXECUTOR_DEPLOY_OUTPUT" | grep -E "^status" || true) | awk '{print $2}')
     if [ "$EXECUTOR_STATUS" != "1" ]; then
         echo "WARNING: FlashLoanBridgeExecutor deployment failed"
         echo "$EXECUTOR_DEPLOY_OUTPUT"
