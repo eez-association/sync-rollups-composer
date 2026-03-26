@@ -1108,11 +1108,17 @@ fn test_all_entries_have_empty_state_deltas() {
             "L2 state deltas should be empty"
         );
     }
+    // L1 trigger entries have placeholder state deltas (with ether_delta
+    // from the call value, roots filled later by the driver).
+    // For value=0 calls, ether_delta should be 0.
     for entry in &result.l1_entries {
-        assert!(
-            entry.state_deltas.is_empty(),
-            "L1 state deltas should be empty"
-        );
+        if !entry.state_deltas.is_empty() {
+            assert_eq!(
+                entry.state_deltas[0].ether_delta,
+                alloy_primitives::I256::ZERO,
+                "L1 ether_delta should be 0 for value=0 call"
+            );
+        }
     }
 }
 

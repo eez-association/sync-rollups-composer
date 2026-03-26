@@ -381,6 +381,23 @@ pub fn build_continuation_entries(
     for &(call_idx, detected) in &l1_to_l2_calls {
         let call_action_hash = compute_action_hash(&detected.call_action);
 
+        // Build state delta placeholder with correct ether_delta from the call's value.
+        // The driver will replace currentState/newState with actual intermediate roots,
+        // but PRESERVES the ether_delta. This ensures the simulation and real postBatch
+        // both have correct ether accounting (required by Rollups.sol EtherDeltaMismatch check).
+        let call_value = detected.call_action.value;
+        let ether_delta = if call_value.is_zero() {
+            alloy_primitives::I256::ZERO
+        } else {
+            alloy_primitives::I256::try_from(call_value).unwrap_or(alloy_primitives::I256::ZERO)
+        };
+        let l1_entry_deltas = vec![CrossChainStateDelta {
+            rollup_id: our_rollup_id,
+            current_state: alloy_primitives::B256::ZERO, // placeholder — driver fills
+            new_state: alloy_primitives::B256::ZERO,     // placeholder — driver fills
+            ether_delta,
+        }];
+
         // Find L2→L1 children of this call
         let children: Vec<(usize, &DetectedCall)> = calls
             .iter()
@@ -413,7 +430,7 @@ pub fn build_continuation_entries(
                 l2_result_void.clone()
             };
             l1_entries.push(CrossChainExecutionEntry {
-                state_deltas: empty_deltas.clone(),
+                state_deltas: l1_entry_deltas.clone(),
                 action_hash: call_action_hash,
                 next_action: l1_terminal,
             });
@@ -425,7 +442,7 @@ pub fn build_continuation_entries(
             scoped_child_action.scope = vec![U256::ZERO];
 
             l1_entries.push(CrossChainExecutionEntry {
-                state_deltas: empty_deltas.clone(),
+                state_deltas: l1_entry_deltas.clone(),
                 action_hash: call_action_hash,
                 next_action: scoped_child_action,
             });

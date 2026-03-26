@@ -1683,23 +1683,20 @@ where
                                 } else {
                                     (speculative_root, speculative_root)
                                 };
-                                // Compute ether_delta from the delivery CALL's value.
-                                // The trigger entry's nextAction is the delivery CALL
-                                // which carries the ETH value for deposits.
-                                let ether_delta = if i == first_trigger_idx
-                                    && !entry.next_action.value.is_zero()
-                                {
-                                    alloy_primitives::I256::try_from(entry.next_action.value)
-                                        .unwrap_or(alloy_primitives::I256::ZERO)
-                                } else {
-                                    alloy_primitives::I256::ZERO
-                                };
+                                // Preserve ether_delta from entry construction
+                                // (set by build_continuation_entries from the call's value).
+                                // Only replace currentState/newState with actual roots.
+                                let existing_ether_delta = entry
+                                    .state_deltas
+                                    .first()
+                                    .map(|d| d.ether_delta)
+                                    .unwrap_or(alloy_primitives::I256::ZERO);
                                 entry.state_deltas =
                                     vec![crate::cross_chain::CrossChainStateDelta {
                                         rollup_id: rollup_id_u256,
                                         current_state: curr,
                                         new_state: next,
-                                        ether_delta,
+                                        ether_delta: existing_ether_delta,
                                     }];
                             }
                             info!(
