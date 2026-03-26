@@ -172,8 +172,6 @@ fn main() -> Result<()> {
                 .unwrap_or(alloy_primitives::Address::ZERO);
             let builder_private_key = rollup_config.builder_private_key.clone();
             let rollup_id = rollup_config.rollup_id;
-            let bridge_l2_address = rollup_config.bridge_l2_address;
-            let bridge_l1_address = rollup_config.bridge_l1_address;
             let cross_chain_manager_address = rollup_config.cross_chain_manager_address;
             tokio::spawn(async move {
                 if let Err(e) = based_rollup::composer_rpc::l1_to_l2::run_l1_rpc_proxy(
@@ -184,8 +182,6 @@ fn main() -> Result<()> {
                     builder_address,
                     builder_private_key,
                     rollup_id,
-                    bridge_l2_address,
-                    bridge_l1_address,
                     cross_chain_manager_address,
                 )
                 .await

@@ -149,7 +149,7 @@ pub struct RollupConfig {
     pub bridge_l2_address: Address,
 
     /// Address of the Bridge contract on L1.
-    /// Used for flash loan continuation entry detection and canonical bridge resolution.
+    /// Used for canonical bridge resolution (setCanonicalBridgeAddress protocol tx).
     #[arg(
         long,
         env = "BRIDGE_L1_ADDRESS",

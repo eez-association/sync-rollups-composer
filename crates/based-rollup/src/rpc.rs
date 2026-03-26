@@ -801,12 +801,7 @@ where
             .collect();
 
         // Analyze calls to discover continuation patterns and child L2→L1 calls
-        let detected_calls = analyze_continuation_calls(
-            &l1_calls,
-            self.config.rollup_id,
-            self.config.bridge_l2_address,
-            self.config.bridge_l1_address,
-        );
+        let detected_calls = analyze_continuation_calls(&l1_calls, self.config.rollup_id);
 
         if detected_calls.is_empty() {
             return Err(ErrorObjectOwned::owned(
@@ -966,13 +961,8 @@ where
             .collect();
 
         // Analyze calls to discover the continuation structure.
-        let detected = analyze_l2_to_l1_continuation_calls(
-            &l2_calls,
-            &return_calls,
-            self.config.rollup_id,
-            self.config.bridge_l2_address,
-            self.config.bridge_l1_address,
-        );
+        let detected =
+            analyze_l2_to_l1_continuation_calls(&l2_calls, &return_calls, self.config.rollup_id);
 
         if detected.is_empty() {
             return Err(ErrorObjectOwned::owned(

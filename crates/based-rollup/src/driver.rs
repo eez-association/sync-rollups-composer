@@ -130,7 +130,7 @@ pub struct Driver<P, Pool> {
     /// Queue for L2→L1 withdrawals. The RPC pushes here; the driver drains
     /// into builder_execution_entries alongside deposits (unified intermediate roots).
     queued_withdrawals: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedWithdrawal>>>,
-    /// Pre-built L1 entries for continuation patterns (flash loans).
+    /// Pre-built L1 entries for multi-call continuation patterns.
     /// When non-empty, these are used AS-IS in `flush_to_l1` instead of
     /// converting CALL+RESULT pairs. Appended after deposit entries.
     pending_continuation_l1_entries: Vec<CrossChainExecutionEntry>,
@@ -1217,9 +1217,9 @@ where
                     "merging RPC cross-chain entries (sorted by gas price)"
                 );
 
-                // One flash loan per cycle: if a call has non-empty l1_entries
-                // (continuation/flash loan), only process the FIRST such call.
-                // Re-queue the rest to prevent multiple flash loans' continuation
+                // One continuation per cycle: if a call has non-empty l1_entries
+                // (multi-call continuation), only process the FIRST such call.
+                // Re-queue the rest to prevent multiple continuations'
                 // entries from being mixed in pending_continuation_l1_entries.
                 let mut had_continuation = false;
                 let mut rpc_entries: Vec<CrossChainExecutionEntry> = Vec::new();
@@ -1239,14 +1239,14 @@ where
                         // Simple deposit: CALL trigger + RESULT table entry
                         rpc_entries.push(call.result_entry.clone());
                     } else {
-                        // Flash loan: continuation entries provide their own RESULT entries.
+                        // Multi-call continuation: continuation entries provide their own RESULT entries.
                         // Skip result_entry to avoid conflicting actionHash.
                         rpc_entries.extend(call.extra_l2_entries.iter().cloned());
                     }
                     if !call.raw_l1_tx.is_empty() {
                         queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
                     }
-                    // Pre-built L1 entries (flash loans): stash separately.
+                    // Pre-built L1 entries (multi-call continuations): stash separately.
                     // flush_to_l1 will use these AS-IS instead of converting pairs.
                     if is_continuation {
                         self.pending_continuation_l1_entries
@@ -1648,7 +1648,7 @@ where
                                 0,
                             );
                         }
-                        // Attach state deltas to continuation L1 entries (flash loans).
+                        // Attach state deltas to continuation L1 entries (multi-call patterns).
                         // Continuation entries represent a multi-call pattern where
                         // the L2 state change happens in one atomic step. Use the
                         // clean/speculative pattern directly:
@@ -1889,7 +1889,7 @@ where
         let has_continuation_entries = !self.pending_continuation_l1_entries.is_empty();
         let batch_size = if has_pending_entries {
             if has_continuation_entries {
-                // Continuation entries (flash loans): include ALL pending blocks.
+                // Continuation entries (multi-call patterns): include ALL pending blocks.
                 // The entry block is the last one (just built). Earlier blocks are
                 // non-entry blocks that accumulated during the hold or between cycles.
                 //
@@ -2065,7 +2065,7 @@ where
         // to avoid Rollups.sol entering newScope() for simple calls.
         // Fullnodes reconstruct L2 pairs using CALL actions from ExecutionConsumed events.
         //
-        // Continuation L1 entries (flash loans) are pre-built by the table builder
+        // Continuation L1 entries (multi-call patterns) are pre-built by the table builder
         // and used AS-IS — they may contain scoped child calls that require
         // scope navigation on L1.
         //
@@ -2074,7 +2074,7 @@ where
         // Both deposit and withdrawal entries can coexist in the same batch;
         // deposit entries (non-nested) come first, then continuation entries,
         // then withdrawal entries (nested).
-        // When continuation L1 entries exist (flash loans), they replace the
+        // When continuation L1 entries exist (multi-call patterns), they replace the
         // pair-converted entries for the continuation call group. Simple deposits
         // that aren't part of a continuation still use pair conversion.
         let mut l1_entries = if continuation_l1_entries.is_empty() {
@@ -4042,7 +4042,7 @@ where
 
         // setCanonicalBridgeAddress: if bridge_l1_address is configured and this is
         // block 2, set the canonical bridge address on the L2 bridge contract.
-        // This is a one-time protocol tx required for flash loan continuation entries.
+        // This is a one-time protocol tx required for multi-call continuation entries.
         // Block 2 because the bridge is deployed in block 1 (nonce=2, initialized nonce=3).
         if l2_block_number == 2
             && !self.config.bridge_l1_address.is_zero()

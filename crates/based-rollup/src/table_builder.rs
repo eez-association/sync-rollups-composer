@@ -5,15 +5,15 @@
 //! handles multi-call patterns where CALL_A triggers CALL_B (continuation) which may
 //! itself trigger CALL_C (child call in the opposite direction).
 //!
-//! The entry structure matches `IntegrationTestFlashLoan.t.sol` exactly.
+//! The entry structure matches `IntegrationTestFlashLoan.t.sol`.
 
 use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_sol_types::{SolCall, SolType};
+use alloy_sol_types::SolType;
 use serde::{Deserialize, Serialize};
 
 use crate::cross_chain::{
     CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    IBridge, ICrossChainManagerL2,
+    ICrossChainManagerL2,
 };
 
 /// Direction of a cross-chain call.
@@ -101,7 +101,7 @@ pub fn compute_action_hash(action: &CrossChainAction) -> B256 {
 /// `[E1, E2]` → consume E1, swap with last(E2) → `[E2]` → consume E2. FIFO.
 ///
 /// For groups of size 1 or 2 this is a no-op (reversing 0 or 1 elements is
-/// identity), so existing 2-entry flash loan output is unchanged.
+/// identity), so existing 2-entry continuation output is unchanged.
 fn reorder_for_swap_and_pop(entries: &mut Vec<CrossChainExecutionEntry>) {
     use std::collections::HashMap;
 
@@ -207,9 +207,9 @@ fn result_void(rollup_id: U256) -> CrossChainAction {
 /// a multi-call continuation:
 ///
 /// ```text
-/// CALL_A (L1→L2): bridgeTokens — Bridge_L1 → Bridge_L2.receiveTokens
-/// CALL_B (L1→L2): claimAndBridgeBack — continuation of A
-///   └─ CALL_C (L2→L1): bridgeTokens — child of B, executed at scope=[0]
+/// CALL_A (L1→L2): first cross-chain call
+/// CALL_B (L1→L2): continuation of A
+///   └─ CALL_C (L2→L1): child of B, executed at scope=[0]
 /// ```
 ///
 /// # L2 Entries (consumed during executeIncomingCrossChainCall on L2)
@@ -394,7 +394,7 @@ pub fn build_continuation_entries(
             // Simple: CALL → RESULT(L2) terminal.
             // The next_action RESULT data is what Rollups.sol returns to the L1 caller.
             // Use l2_return_data when the L2 call returns data (future non-void L1→L2
-            // calls). Current continuation uses (flash loan) are void so result_void
+            // calls). Current continuation uses are void so result_void
             // is correct.
             let l1_terminal = if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed
             {
@@ -519,162 +519,57 @@ fn default_call_success() -> bool {
     true
 }
 
-/// Analyze detected L1→L2 calls to discover continuation patterns and child L2→L1 calls.
+/// Map detected L1→L2 calls into `DetectedCall` entries for continuation entry building.
 ///
-/// For multi-call continuations, this detects the return bridge trip (CALL_C) analytically:
-/// - CALL_A: bridgeTokens L1→L2 (receiveTokens on bridge_l2)
-/// - CALL_B: continuation call (e.g., claimAndBridgeBack on executorL2)
-/// - CALL_C: bridgeTokens L2→L1 (discovered from CALL_A's receiveTokens params)
+/// This is a pure mapper: each `L1DetectedCall` becomes a `DetectedCall` with direction
+/// L1→L2 and no children. Child discovery (L2→L1 return calls) comes from the simulation's
+/// iterative `debug_traceCallMany` loop -- not from analytical ABI decoding.
 ///
-/// The return trip's receiveTokens calldata is constructed by swapping:
-/// - destinationAddress → CALL_B's source_address (the returnTo address)
-/// - sourceRollupId → our_rollup_id (L2 is now the source)
+/// Returns an empty vec for single calls (use the legacy path in cross_chain.rs).
 ///
 /// # Arguments
 /// * `calls` - L1→L2 calls detected by the L1 proxy (in execution order)
 /// * `our_rollup_id` - The L2 rollup ID
-/// * `bridge_l2_address` - Bridge contract address on L2
-/// * `bridge_l1_address` - Bridge contract address on L1
 pub fn analyze_continuation_calls(
     calls: &[L1DetectedCall],
     our_rollup_id: u64,
-    bridge_l2_address: Address,
-    _bridge_l1_address: Address,
 ) -> Vec<DetectedCall> {
     let our_rollup = U256::from(our_rollup_id);
     let mainnet_rollup = U256::ZERO;
 
     if calls.len() < 2 {
-        // Single call — no continuations possible, use legacy path
+        // Single call -- no continuations possible, use legacy path
         return vec![];
     }
 
-    let mut result: Vec<DetectedCall> = Vec::new();
-
-    // Track the forward bridge call (receiveTokens) for analytical child detection
-    let mut forward_receive_tokens_data: Option<IBridge::receiveTokensCall> = None;
-
-    for (i, call) in calls.iter().enumerate() {
-        let is_continuation = i > 0;
-
-        // Try to decode receiveTokens from CALL_A to extract bridge params
-        if call.destination == bridge_l2_address {
-            // Try decoding receiveTokens — data may or may not include the 4-byte selector
-            let has_selector =
-                call.data.len() > 4 && call.data[..4] == IBridge::receiveTokensCall::SELECTOR;
-            let decode_data = if has_selector {
-                &call.data[4..]
-            } else {
-                &call.data
+    calls
+        .iter()
+        .enumerate()
+        .map(|(i, call)| {
+            let call_action = CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: our_rollup,
+                destination: call.destination,
+                value: call.value,
+                data: call.data.clone(),
+                failed: false,
+                source_address: call.source_address,
+                source_rollup: mainnet_rollup,
+                scope: vec![],
             };
-            match IBridge::receiveTokensCall::abi_decode_raw(decode_data) {
-                Ok(decoded) => {
-                    tracing::info!(
-                        target: "based_rollup::table_builder",
-                        token = %decoded.token,
-                        amount = %decoded.amount,
-                        has_selector,
-                        data_len = call.data.len(),
-                        "decoded receiveTokens from forward trip"
-                    );
-                    forward_receive_tokens_data = Some(decoded);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "based_rollup::table_builder",
-                        %e,
-                        has_selector,
-                        data_len = call.data.len(),
-                        decode_data_len = decode_data.len(),
-                        first_bytes = %format!("0x{}", hex::encode(&decode_data[..40.min(decode_data.len())])),
-                        "failed to decode receiveTokens from forward trip"
-                    );
-                }
+
+            DetectedCall {
+                direction: CallDirection::L1ToL2,
+                call_action,
+                parent_call_index: None,
+                is_continuation: i > 0,
+                depth: 0,
+                delivery_return_data: vec![],
+                l2_return_data: call.l2_return_data.clone(),
+                l2_delivery_failed: !call.call_success,
             }
-        }
-
-        // Build the L1→L2 CALL action
-        let call_action = CrossChainAction {
-            action_type: CrossChainActionType::Call,
-            rollup_id: our_rollup,
-            destination: call.destination,
-            value: call.value,
-            data: call.data.clone(),
-            failed: false,
-            source_address: call.source_address,
-            source_rollup: mainnet_rollup,
-            scope: vec![],
-        };
-
-        result.push(DetectedCall {
-            direction: CallDirection::L1ToL2,
-            call_action,
-            parent_call_index: None,
-            is_continuation,
-            depth: 0,
-            delivery_return_data: vec![], // L1→L2 calls don't have L1 delivery data
-            l2_return_data: call.l2_return_data.clone(),
-            l2_delivery_failed: !call.call_success,
-        });
-
-        // For continuation calls (i > 0), check if they trigger a child L2→L1 call.
-        // This happens when the L2 execution calls bridgeTokens on bridge_l2 targeting
-        // rollupId=0 (MAINNET). We construct the child CALL_C analytically from
-        // the forward trip's receiveTokens params.
-        if is_continuation {
-            if let Some(ref fwd) = forward_receive_tokens_data {
-                // The return trip is:
-                // receiveTokens(token, originRollupId, returnTo, amount, name, symbol, decimals, L2_ROLLUP_ID)
-                // where returnTo = CALL_B's source_address (the L1 executor)
-                let return_receive_tokens = IBridge::receiveTokensCall {
-                    token: fwd.token,
-                    originRollupId: fwd.originRollupId,
-                    destinationAddress: call.source_address, // returnTo = who initiated CALL_B
-                    amount: fwd.amount,
-                    name: fwd.name.clone(),
-                    symbol: fwd.symbol.clone(),
-                    decimals: fwd.decimals,
-                    sourceRollupId: our_rollup, // L2 is now the source
-                };
-                let return_data = IBridge::receiveTokensCall::abi_encode(&return_receive_tokens);
-
-                // CALL_C destination: must match Bridge_L2._bridgeAddress().
-                // When canonicalBridgeAddress is set on L2 (required for multi-call continuations),
-                // _bridgeAddress() returns bridge_l1_address. On L1, the proxy for
-                // (bridge_l1_address, MAINNET) has originalAddress=bridge_l1_address,
-                // so executeOnBehalf calls bridge_l1.receiveTokens().
-                let child_destination = if !_bridge_l1_address.is_zero() {
-                    _bridge_l1_address
-                } else {
-                    bridge_l2_address
-                };
-                let child_action = CrossChainAction {
-                    action_type: CrossChainActionType::Call,
-                    rollup_id: mainnet_rollup, // targeting L1
-                    destination: child_destination,
-                    value: U256::ZERO,
-                    data: return_data,
-                    failed: false,
-                    source_address: bridge_l2_address,
-                    source_rollup: our_rollup,
-                    scope: vec![],
-                };
-
-                result.push(DetectedCall {
-                    direction: CallDirection::L2ToL1,
-                    call_action: child_action,
-                    parent_call_index: Some(i), // child of CALL_B
-                    is_continuation: false,
-                    depth: 1,
-                    delivery_return_data: vec![], // analytical child, no L1 simulation data
-                    l2_return_data: vec![],
-                    l2_delivery_failed: false,
-                });
-            }
-        }
-    }
-
-    result
+        })
+        .collect()
 }
 
 /// Parameters for an L2→L1 cross-chain call detected by the L2 proxy.
@@ -740,17 +635,15 @@ pub struct L2ToL1ContinuationEntries {
 /// Analyze L2→L1 calls and L1→L2 return calls to discover the continuation pattern
 /// for L2→L1 multi-call continuations (the mirror of `analyze_continuation_calls`).
 ///
-/// For the reverse multi-call continuation pattern:
-/// - CALL_A: `bridgeTokens` — L2→L1, Bridge_L2 as source, targets Bridge_L1
-/// - CALL_B: `claimAndBridgeBack` — L2→L1, ReverseExecutorL2 as source, targets ReverseExecutorL1
-/// - CALL_C: `receiveTokens` back — L1→L2 return, Bridge_L1 as source, targets Bridge_L2
+/// Each L2→L1 call becomes a root `DetectedCall`. Return calls (from L1 delivery
+/// simulation) become children linked via `parent_call_index`. If no return calls
+/// are provided and there are 2+ L2 calls, a warning is logged -- the entries will
+/// be built without children (the simulation is the only source of child discovery).
 ///
 /// # Arguments
 /// * `l2_calls` - L2→L1 calls detected from the L2 tx trace (in execution order)
 /// * `return_calls` - L1→L2 return calls discovered from L1 delivery simulation
 /// * `our_rollup_id` - The L2 rollup ID (e.g., 1)
-/// * `bridge_l2_address` - Bridge contract address on L2 (for source_address in L1 entries)
-/// * `bridge_l1_address` - Bridge contract address on L1 (for return call destination)
 ///
 /// # Returns
 /// Vec of `DetectedCall` suitable for `build_l2_to_l1_continuation_entries`.
@@ -758,8 +651,6 @@ pub fn analyze_l2_to_l1_continuation_calls(
     l2_calls: &[L2DetectedCall],
     return_calls: &[L2ReturnCall],
     our_rollup_id: u64,
-    _bridge_l2_address: Address,
-    _bridge_l1_address: Address,
 ) -> Vec<DetectedCall> {
     let our_rollup = U256::from(our_rollup_id);
     let mainnet_rollup = U256::ZERO;
@@ -848,114 +739,16 @@ pub fn analyze_l2_to_l1_continuation_calls(
             });
         }
     } else if l2_calls.len() >= 2 {
-        // Analytical construction: bridge-specific optimization for when L1 simulation
-        // can't discover return calls (because claimAndBridgeBack needs tokens from the
-        // first delivery to run). Constructs the return call from the forward trip's
-        // receiveTokens calldata. This only handles the bridge return-trip pattern
-        // (single child on last call). For non-bridge patterns or multiple children,
-        // use simulation-based discovery via return_calls parameter.
-        //
-        // CALL_A (bridgeTokens → Bridge_L1): data = receiveTokens(token, originRollupId,
-        //   destAddress=ReverseExecutorL1, amount, name, symbol, decimals, sourceRollupId=L2)
-        // CALL_B (claimAndBridgeBack → ReverseExecutorL1): internally calls
-        //   Bridge_L1.bridgeTokens(token, amount, L2, returnTo) which produces:
-        //   receiveTokens(token, originRollupId=L1, dest=returnTo, amount, name, symbol, decimals, sourceRollupId=L1)
-        //
-        // The return call goes through proxy(Bridge_L2, L2) on L1, so:
-        //   destination = _bridge_l1_address (Bridge_L1, where receiveTokens executes)
-        //   source_address = _bridge_l2_address (proxy's originalAddress)
+        // Multi-call L2→L1 with no return calls from simulation. The entries will be
+        // built without children. If the pattern requires return calls (e.g., token
+        // bridging with scope navigation), the tx will fail on-chain -- the simulation
+        // is the only source of child discovery.
         tracing::warn!(
             target: "based_rollup::table_builder",
             num_l2_calls = l2_calls.len(),
-            "using analytical return call construction (bridge-specific); \
-             for non-bridge patterns provide return_calls from L1 simulation"
+            "multi-call L2→L1 pattern with no return calls from simulation; \
+             entries will be built without children"
         );
-        let first_call = &l2_calls[0];
-        let last_call = &l2_calls[l2_calls.len() - 1];
-
-        // Try to decode receiveTokens from the first call's data (bridgeTokens → receiveTokens)
-        let has_selector = first_call.data.len() > 4
-            && first_call.data[..4] == IBridge::receiveTokensCall::SELECTOR;
-        let decode_data = if has_selector {
-            &first_call.data[4..]
-        } else {
-            &first_call.data
-        };
-
-        match IBridge::receiveTokensCall::abi_decode_raw(decode_data) {
-            Ok(fwd) => {
-                // Build the return receiveTokens:
-                //   destinationAddress = last_call.source_address (= ReverseExecutorL2, the returnTo)
-                //   sourceRollupId = L1 (the return originates from L1)
-                let return_receive_tokens = IBridge::receiveTokensCall {
-                    token: fwd.token,
-                    originRollupId: fwd.originRollupId,
-                    destinationAddress: last_call.source_address, // returnTo = who initiated CALL_B on L2
-                    amount: fwd.amount,
-                    name: fwd.name.clone(),
-                    symbol: fwd.symbol.clone(),
-                    decimals: fwd.decimals,
-                    sourceRollupId: U256::ZERO, // L1 is now the source (Bridge_L1 sends back)
-                };
-                let return_data = IBridge::receiveTokensCall::abi_encode(&return_receive_tokens);
-
-                // destination = Bridge_L1 (where receiveTokens actually executes on L1)
-                // This is the first call's destination (Bridge_L1).
-                // source_address = Bridge_L2 (the proxy's originalAddress on L1 through which
-                // the call is routed: proxy(Bridge_L2, L2) calls executeOnBehalf(Bridge_L1, receiveTokens))
-                let child_destination = if !_bridge_l1_address.is_zero() {
-                    _bridge_l1_address
-                } else {
-                    first_call.destination // Bridge_L1
-                };
-                let child_source = if !_bridge_l2_address.is_zero() {
-                    _bridge_l2_address
-                } else {
-                    first_call.source_address // Bridge_L2
-                };
-
-                tracing::info!(
-                    target: "based_rollup::table_builder",
-                    token = %fwd.token,
-                    amount = %fwd.amount,
-                    return_to = %last_call.source_address,
-                    child_dest = %child_destination,
-                    child_source = %child_source,
-                    "analytically constructed return call from forward trip receiveTokens"
-                );
-
-                let child_action = CrossChainAction {
-                    action_type: CrossChainActionType::Call,
-                    rollup_id: mainnet_rollup,
-                    destination: child_destination,
-                    value: U256::ZERO,
-                    data: return_data,
-                    failed: false,
-                    source_address: child_source,
-                    source_rollup: our_rollup,
-                    scope: vec![],
-                };
-
-                result.push(DetectedCall {
-                    direction: CallDirection::L2ToL1,
-                    call_action: child_action,
-                    parent_call_index: Some(last_l2_to_l1_idx),
-                    is_continuation: false,
-                    depth: 1,
-                    delivery_return_data: vec![], // analytical child, no L1 simulation data
-                    l2_return_data: vec![],
-                    l2_delivery_failed: false,
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "based_rollup::table_builder",
-                    %e,
-                    data_len = first_call.data.len(),
-                    "failed to decode receiveTokens from first L2→L1 call for analytical return call construction"
-                );
-            }
-        }
     }
 
     result
@@ -1195,11 +988,11 @@ fn push_reentrant_child_entries(
 ///   - `callReturn.destination = child.source_address` (L2 contract)
 ///   - `callReturn.source_address = child.destination` (proxy's originalAddress)
 ///
-/// Example (2-call flash loan):
+/// Example (2-call multi-call continuation):
 /// ```text
-/// Entry 0: hash(CALL_A bridgeTokens) → RESULT(L1, void)          — terminal (no children)
-/// Entry 1: hash(CALL_B claimAndBridgeBack) → callReturn{scope=[0]} — scope navigation
-/// Entry 2: hash(RESULT{L2, void}) → RESULT(L1, void)             — scope exit
+/// Entry 0: hash(CALL_A) → RESULT(L1, void)          — terminal (no children)
+/// Entry 1: hash(CALL_B) → callReturn{scope=[0]}     — scope navigation
+/// Entry 2: hash(RESULT{L2, void}) → RESULT(L1, void) — scope exit
 /// ```
 ///
 /// # L1 Deferred Entries
@@ -1215,7 +1008,7 @@ fn push_reentrant_child_entries(
 ///   - `destination = child.source_address` (proxy's originalAddress)
 ///   - `source_address = child.destination` (L1 caller to the proxy)
 ///
-/// Example (2-call flash loan, 5 entries):
+/// Example (2-call multi-call continuation, 5 entries):
 /// ```text
 /// Entry 0:  hash(trigger_A)    → delivery_CALL(dest_A, scope=[0])
 /// Entry 0b: hash(RESULT(L1))   → RESULT(L1, void)  — delivery resolution
@@ -1257,7 +1050,7 @@ pub fn build_l2_to_l1_continuation_entries(
 
     // ── L2 table entries ──
     //
-    // Mirror of the L1→L2 flash loan's L1 entries (see build_continuation_entries).
+    // Mirror of the L1→L2 continuation's L1 entries (see build_continuation_entries).
     // ANY call with children gets scope navigation (callReturn{scope=[0]}), not just
     // the last call. Calls without children get simple CALL → RESULT(L1, void).
     //
@@ -1557,7 +1350,7 @@ pub fn build_l2_to_l1_continuation_entries(
 
     // ── L1 deferred entries ──
     //
-    // Reference: ExecuteReverseFlashLoan.s.sol:PostReverseFlashLoanEntries
+    // Reference: ExecuteReverseFlashLoan.s.sol:PostReverseFlashLoanEntries (L2→L1 pattern)
     //
     // L1 entries use TRIGGER perspective for the actionHash (what Rollups.executeCrossChainCall
     // computes from the proxy call). The trigger actions have:

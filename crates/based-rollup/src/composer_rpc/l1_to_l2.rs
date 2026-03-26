@@ -119,8 +119,6 @@ pub async fn run_l1_rpc_proxy(
     builder_address: Address,
     builder_private_key: Option<String>,
     rollup_id: u64,
-    bridge_l2_address: Address,
-    bridge_l1_address: Address,
     cross_chain_manager_address: Address,
 ) -> eyre::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], l1_proxy_port));
@@ -173,8 +171,6 @@ pub async fn run_l1_rpc_proxy(
                     builder_address,
                     builder_private_key,
                     rollup_id,
-                    bridge_l2_address,
-                    bridge_l1_address,
                     cross_chain_manager_address,
                     peer,
                 )
@@ -209,8 +205,6 @@ async fn handle_request(
     builder_address: Address,
     builder_private_key: Option<String>,
     rollup_id: u64,
-    bridge_l2_address: Address,
-    bridge_l1_address: Address,
     cross_chain_manager_address: Address,
     _peer: SocketAddr,
 ) -> Result<Response<Full<HyperBytes>>, hyper::Error> {
@@ -271,8 +265,6 @@ async fn handle_request(
                         builder_address,
                         builder_private_key.clone(),
                         rollup_id,
-                        bridge_l2_address,
-                        bridge_l1_address,
                         cross_chain_manager_address,
                     )
                     .await
@@ -375,7 +367,7 @@ async fn handle_request(
 /// call tree with the generic `trace::walk_trace_tree`. No special-case
 /// detection for direct proxy calls or bridge contracts — the generic walker
 /// detects all patterns (direct proxy, bridgeEther, bridgeTokens, wrapper
-/// contracts, flash loans) via the `executeCrossChainCall` child pattern.
+/// contracts, multi-call continuations) via the `executeCrossChainCall` child pattern.
 #[allow(clippy::too_many_arguments)]
 async fn handle_cross_chain_tx(
     client: &reqwest::Client,
@@ -386,8 +378,6 @@ async fn handle_cross_chain_tx(
     _builder_address: Address,
     builder_private_key: Option<String>,
     rollup_id: u64,
-    bridge_l2_address: Address,
-    bridge_l1_address: Address,
     cross_chain_manager_address: Address,
 ) -> eyre::Result<Option<String>> {
     // Decode the raw transaction to extract fields needed by the trace path.
@@ -409,8 +399,6 @@ async fn handle_cross_chain_tx(
         rollups_address,
         builder_private_key,
         rollup_id,
-        bridge_l2_address,
-        bridge_l1_address,
         cross_chain_manager_address,
     )
     .await
@@ -480,7 +468,7 @@ async fn queue_single_cross_chain_call(
 }
 
 /// Queue multiple detected calls as a single continuation execution table.
-/// Used for flash loans and other multi-call patterns where entries must be
+/// Used for multi-call continuation patterns where entries must be
 /// built atomically (with L2→L1 child call detection).
 async fn queue_multi_call_execution_table(
     client: &reqwest::Client,
@@ -1444,7 +1432,7 @@ impl super::trace::ProxyLookup for L1ProxyLookup<'_> {
 /// This replaces the old L1-specific `walk_trace_tree` that had separate
 /// paths for proxy detection and bridge detection. The generic walker uses
 /// only the `executeCrossChainCall` child pattern — works for all contract
-/// types (direct proxy, bridgeEther, bridgeTokens, wrappers, flash loans).
+/// types (direct proxy, bridgeEther, bridgeTokens, wrappers, multi-call continuations).
 async fn walk_l1_trace_generic(
     client: &reqwest::Client,
     l1_rpc_url: &str,
@@ -1506,8 +1494,6 @@ async fn trace_and_detect_internal_calls(
     rollups_address: Address,
     builder_private_key: Option<String>,
     rollup_id: u64,
-    bridge_l2_address: Address,
-    bridge_l1_address: Address,
     cross_chain_manager_address: Address,
 ) -> eyre::Result<Option<String>> {
     // Build the debug_traceCall request from decoded tx fields
@@ -1534,7 +1520,7 @@ async fn trace_and_detect_internal_calls(
     // First trace: normal (no state overrides).
     // If this finds only 1 cross-chain call but the tx reverts internally,
     // we retry with state overrides (mock Rollups) to discover hidden calls
-    // that would execute after entries are posted (flash loan pattern).
+    // that would execute after entries are posted (multi-call continuation pattern).
     let trace_result = {
         let trace_req = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1655,7 +1641,7 @@ async fn trace_and_detect_internal_calls(
         }
     }
 
-    // If initial trace found calls but tx reverts (flash loan pattern), iterate
+    // If initial trace found calls but tx reverts (multi-call continuation pattern), iterate
     // with debug_traceCallMany. Load entries via postBatch in tx1, run user tx as
     // tx2 to see ALL calls that would succeed once entries are on-chain.
     if top_level_error && !detected_calls.is_empty() {
@@ -1694,12 +1680,8 @@ async fn trace_and_detect_internal_calls(
                         })
                         .collect();
 
-                    let analyzed = crate::table_builder::analyze_continuation_calls(
-                        &l1_detected,
-                        rollup_id,
-                        bridge_l2_address,
-                        bridge_l1_address,
-                    );
+                    let analyzed =
+                        crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
 
                     // Log the call tree for debugging
                     tracing::info!(
@@ -2244,7 +2226,7 @@ async fn trace_and_detect_internal_calls(
     }
 
     // Multi-call detection: if 2+ calls found, use buildExecutionTable for
-    // continuation entry generation (flash loans). Single calls use legacy path.
+    // continuation entry generation (multi-call patterns). Single calls use legacy path.
     if detected_calls.len() >= 2 {
         tracing::info!(
             target: "based_rollup::l1_proxy",

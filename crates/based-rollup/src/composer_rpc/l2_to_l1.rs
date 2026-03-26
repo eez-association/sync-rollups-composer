@@ -9,7 +9,7 @@
 //! `trace::walk_trace_tree`. Detection uses the protocol-level
 //! `executeCrossChainCall` child pattern — no contract-specific selectors.
 //! Works for bridgeEther, bridgeTokens, direct proxy calls, wrapper contracts,
-//! flash loans, and any future cross-chain pattern. The proxy queues execution
+//! multi-call continuations, and any future cross-chain pattern. The proxy queues execution
 //! entries BEFORE forwarding the user's tx (hold-then-forward pattern).
 //!
 //! Intercepts `eth_estimateGas` targeting CrossChainProxy addresses to return
@@ -52,8 +52,8 @@ use super::common::{
 /// SYNCHRONOUSLY before forwarding the user's tx (hold-then-forward pattern).
 /// Detection uses protocol-level `executeCrossChainCall` child pattern from
 /// `trace::walk_trace_tree` — no contract-specific selectors. Works for
-/// bridgeEther, bridgeTokens, direct proxy calls, wrapper contracts, flash
-/// loans, and any future cross-chain pattern.
+/// bridgeEther, bridgeTokens, direct proxy calls, wrapper contracts, multi-call
+/// continuations, and any future cross-chain pattern.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_rpc_proxy(
     proxy_port: u16,
@@ -254,7 +254,7 @@ async fn handle_request(
                     // Single generic path: trace and detect ALL cross-chain calls
                     // via protocol-level detection (executeCrossChainCall child pattern).
                     // No contract-specific selectors. Works for bridgeEther, bridgeTokens,
-                    // direct proxy calls, wrapper contracts, flash loans — everything.
+                    // direct proxy calls, wrapper contracts, multi-call continuations — everything.
                     if !cross_chain_manager_address.is_zero() {
                         let detected = trace_and_detect_l2_internal_calls(
                             &client,
@@ -2632,12 +2632,8 @@ async fn simulate_l1_combined_delivery(
                 }
 
                 if l1_detected.len() >= 2 {
-                    let analyzed = crate::table_builder::analyze_continuation_calls(
-                        &l1_detected,
-                        rollup_id,
-                        Address::ZERO,
-                        Address::ZERO,
-                    );
+                    let analyzed =
+                        crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
                     if !analyzed.is_empty() {
                         let cont = crate::table_builder::build_continuation_entries(
                             &analyzed,
@@ -3565,7 +3561,7 @@ async fn walk_l2_trace_generic(
 /// Trace a transaction on L2 using `debug_traceCall` with `callTracer` and detect
 /// ALL cross-chain calls via protocol-level detection (executeCrossChainCall child
 /// pattern). No contract-specific selectors — works for bridgeEther, bridgeTokens,
-/// direct proxy calls, wrapper contracts, flash loans, and any future pattern.
+/// direct proxy calls, wrapper contracts, multi-call continuations, and any future pattern.
 ///
 /// Returns `true` if cross-chain calls were found and queued.
 #[allow(clippy::too_many_arguments)]
@@ -4007,7 +4003,7 @@ async fn trace_and_detect_l2_internal_calls(
         // Phase B: Simulate those return calls on L2 to discover further L2→L1 calls.
         // Repeat until no new calls are found or MAX_RECURSIVE_DEPTH is reached.
         //
-        // Depth-1 behavior (existing flash loans) is preserved: the loop runs one
+        // Depth-1 behavior (existing multi-call continuations) is preserved: the loop runs one
         // Phase A iteration, Phase B returns empty (stub), and the loop exits.
         const MAX_RECURSIVE_DEPTH: usize = 5;
 

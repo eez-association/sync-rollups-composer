@@ -92,31 +92,10 @@ sol! {
 }
 
 sol! {
-    /// Bridge contract ABI bindings.
+    /// Bridge contract ABI bindings (protocol transactions only).
     interface IBridge {
         function initialize(address _manager, uint256 _rollupId, address _admin) external;
         function setCanonicalBridgeAddress(address bridgeAddress) external;
-
-        /// Bridge.bridgeEther — bridge ETH to destination rollup.
-        /// Used in table_builder.rs and composer_rpc for ABI encode/decode.
-        function bridgeEther(uint256 _rollupId, address destinationAddress) external payable;
-
-        /// Bridge.bridgeTokens — bridge ERC20 tokens to destination rollup.
-        /// Used in table_builder.rs and composer_rpc for ABI encode/decode.
-        function bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress) external;
-
-        /// Bridge.receiveTokens — called cross-chain to mint/release tokens.
-        /// Used for ABI decode/encode in continuation entry construction.
-        function receiveTokens(
-            address token,
-            uint256 originRollupId,
-            address destinationAddress,
-            uint256 amount,
-            string memory name,
-            string memory symbol,
-            uint8 decimals,
-            uint256 sourceRollupId
-        ) external;
     }
 }
 
@@ -929,7 +908,7 @@ pub fn convert_l1_entries_to_l2_pairs(
     // Track which occurrence of each hash has been consumed so far.
     let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
 
-    // Detect if this batch has continuation entries (flash loans).
+    // Detect if this batch has continuation entries (multi-call patterns).
     // Continuation entries have nextAction.action_type == CALL.
     let has_continuations = l1_entries
         .iter()
@@ -984,9 +963,9 @@ pub fn convert_l1_entries_to_l2_pairs(
     result
 }
 
-/// Reconstruct L2 continuation entries for flash loan patterns.
+/// Reconstruct L2 continuation entries for multi-call patterns.
 ///
-/// During flash loans, an L1 entry may have `nextAction.action_type == CALL` (continuation)
+/// During multi-call continuations, an L1 entry may have `nextAction.action_type == CALL`
 /// instead of the usual `RESULT` (simple deposit). This signals a reentrant cross-chain
 /// call pattern where CALL_A triggers on L2, then a child CALL_C fires back to L1 (or
 /// another rollup), and the result resolves back on L2.
@@ -1466,7 +1445,7 @@ const SET_CONTEXT_GAS_LIMIT: u64 = 250_000;
 const LOAD_TABLE_GAS_LIMIT: u64 = 3_000_000;
 /// Cross-chain calls can trigger complex execution: WrappedToken deployment
 /// via CREATE2 (~700K), proxy creation, nested callbacks, etc. 2M provides
-/// headroom beyond the ~956K observed for flash loan receiveTokens while
+/// headroom beyond the ~956K observed for receiveTokens while
 /// keeping 3+ protocol txs within the ~30M block gas limit.
 const EXECUTE_INCOMING_GAS_LIMIT: u64 = 2_000_000;
 
@@ -1687,7 +1666,7 @@ pub fn build_initialize_bridge_tx(
 /// Build a signed transaction that calls `Bridge.setCanonicalBridgeAddress(address)`.
 ///
 /// Used as a protocol transaction in block 2 to set the canonical bridge address
-/// on the L2 bridge contract. Required for flash loan continuation entries where
+/// on the L2 bridge contract. Required for multi-call continuation entries where
 /// Bridge_L2._bridgeAddress() must return the L1 bridge address.
 pub fn build_set_canonical_bridge_tx(
     bridge_l2_address: Address,

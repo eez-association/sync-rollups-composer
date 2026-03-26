@@ -390,7 +390,7 @@ impl DerivationPipeline {
             let deferred_entries = if !call_actions.is_empty() {
                 let mut pairs =
                     cross_chain::convert_l1_entries_to_l2_pairs(&deferred_entries, &call_actions);
-                // Append continuation entries for flash loan patterns (§4e).
+                // Append continuation entries for multi-call patterns (§4e).
                 // Continuation L1 entries have nextAction.type == CALL instead of RESULT,
                 // signaling a reentrant cross-chain call. The additional L2 entries are
                 // needed for the CCM execution table to resolve the full call chain.
@@ -412,7 +412,7 @@ impl DerivationPipeline {
                         target: "based_rollup::derivation",
                         count = continuation.len(),
                         %l1_block,
-                        "appending flash loan continuation entries"
+                        "appending multi-call continuation entries"
                     );
                     pairs.extend(continuation);
                 }
