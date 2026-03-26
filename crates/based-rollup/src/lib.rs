@@ -4,6 +4,7 @@
 //! L1 derivation, block building, and proposer logic for a based rollup architecture.
 
 pub mod builder_sync;
+pub mod composer_rpc;
 pub mod config;
 pub mod consensus;
 pub mod cross_chain;
@@ -12,7 +13,6 @@ pub mod driver;
 pub mod evm_config;
 pub mod execution_planner;
 pub mod health;
-pub mod composer_rpc;
 pub mod payload_builder;
 pub mod proposer;
 pub mod rpc;

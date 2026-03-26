@@ -123,10 +123,7 @@ fn parse_trace_node(node: &Value) -> Option<TraceNode> {
         .and_then(|s| s.parse::<Address>().ok())
         .unwrap_or(Address::ZERO);
 
-    let input_hex = node
-        .get("input")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0x");
+    let input_hex = node.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
     let input_clean = input_hex.strip_prefix("0x").unwrap_or(input_hex);
     let input = hex::decode(input_clean).unwrap_or_default();
 
@@ -173,10 +170,7 @@ fn has_execute_cross_chain_call_child(node: &Value, manager_addresses: &[Address
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<Address>().ok());
 
-        let child_input_hex = child
-            .get("input")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0x");
+        let child_input_hex = child.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
         let child_input_clean = child_input_hex
             .strip_prefix("0x")
             .unwrap_or(child_input_hex);
@@ -376,13 +370,7 @@ async fn walk_trace_tree_inner(
     // executeCrossChainCall on a known manager.
     if has_execute_cross_chain_call_child(node, manager_addresses) {
         // This node IS a proxy. Resolve its identity.
-        let info = resolve_proxy_info(
-            parsed.to,
-            lookup,
-            proxy_cache,
-            ephemeral_proxies,
-        )
-        .await;
+        let info = resolve_proxy_info(parsed.to, lookup, proxy_cache, ephemeral_proxies).await;
 
         if let Some(proxy_info) = info {
             tracing::info!(
@@ -529,13 +517,7 @@ mod tests {
     }
 
     /// Build a minimal trace node JSON.
-    fn trace_node(
-        to: &str,
-        from: &str,
-        input: &str,
-        value: &str,
-        calls: Vec<Value>,
-    ) -> Value {
+    fn trace_node(to: &str, from: &str, input: &str, value: &str, calls: Vec<Value>) -> Value {
         json!({
             "to": to,
             "from": from,
@@ -556,7 +538,10 @@ mod tests {
         // executeCrossChainCall(address,bytes) = keccak256("executeCrossChainCall(address,bytes)")
         let expected_exec =
             &alloy_primitives::keccak256(b"executeCrossChainCall(address,bytes)")[..4];
-        assert_eq!(exec_sel, expected_exec, "executeCrossChainCall selector mismatch");
+        assert_eq!(
+            exec_sel, expected_exec,
+            "executeCrossChainCall selector mismatch"
+        );
 
         let expected_create =
             &alloy_primitives::keccak256(b"createCrossChainProxy(address,uint256)")[..4];
@@ -652,10 +637,7 @@ mod tests {
         );
 
         // Manager calls the proxy (forward delivery) — should be skipped.
-        let exec_input = encode_input(
-            &execute_cross_chain_call_selector(),
-            &[0u8; 64],
-        );
+        let exec_input = encode_input(&execute_cross_chain_call_selector(), &[0u8; 64]);
         let child = trace_node(
             &format!("{manager}"),
             &format!("{proxy_addr}"),
@@ -738,10 +720,7 @@ mod tests {
         });
 
         // Proxy call node (bridge -> proxy -> manager.executeCrossChainCall)
-        let exec_input = encode_input(
-            &execute_cross_chain_call_selector(),
-            &[0u8; 64],
-        );
+        let exec_input = encode_input(&execute_cross_chain_call_selector(), &[0u8; 64]);
         let exec_child = trace_node(
             &format!("{manager}"),
             &format!("{proxy_addr}"),
@@ -781,11 +760,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            ephemeral.len(),
-            1,
-            "should detect one ephemeral proxy"
-        );
+        assert_eq!(ephemeral.len(), 1, "should detect one ephemeral proxy");
         assert!(ephemeral.contains_key(&proxy_addr));
         assert_eq!(ephemeral[&proxy_addr].original_address, original);
         assert_eq!(ephemeral[&proxy_addr].original_rollup_id, 1);
@@ -836,10 +811,7 @@ mod tests {
             },
         );
 
-        let exec_input = encode_input(
-            &execute_cross_chain_call_selector(),
-            &[0u8; 64],
-        );
+        let exec_input = encode_input(&execute_cross_chain_call_selector(), &[0u8; 64]);
 
         let child_a = trace_node(
             &format!("{manager}"),
@@ -927,10 +899,7 @@ mod tests {
         );
 
         // Build a reverted trace node (has "error" field)
-        let exec_input = encode_input(
-            &execute_cross_chain_call_selector(),
-            &[0u8; 64],
-        );
+        let exec_input = encode_input(&execute_cross_chain_call_selector(), &[0u8; 64]);
         let child = json!({
             "to": format!("{manager}"),
             "from": format!("{proxy_addr}"),
@@ -1002,10 +971,7 @@ mod tests {
         );
 
         // Nested: caller -> wrapper -> proxy -> manager
-        let exec_input = encode_input(
-            &execute_cross_chain_call_selector(),
-            &[0u8; 64],
-        );
+        let exec_input = encode_input(&execute_cross_chain_call_selector(), &[0u8; 64]);
         let manager_child = trace_node(
             &format!("{manager}"),
             &format!("{proxy_addr}"),
@@ -1099,10 +1065,7 @@ mod tests {
             count: AtomicUsize::new(0),
         };
 
-        let exec_input = encode_input(
-            &execute_cross_chain_call_selector(),
-            &[0u8; 64],
-        );
+        let exec_input = encode_input(&execute_cross_chain_call_selector(), &[0u8; 64]);
 
         // Two separate proxy calls to the same proxy
         let child1 = trace_node(
@@ -1237,10 +1200,7 @@ mod tests {
             },
         );
 
-        let exec_input = encode_input(
-            &execute_cross_chain_call_selector(),
-            &[0u8; 64],
-        );
+        let exec_input = encode_input(&execute_cross_chain_call_selector(), &[0u8; 64]);
         let child = trace_node(
             &format!("{manager}"),
             &format!("{proxy_addr}"),
@@ -1272,9 +1232,6 @@ mod tests {
         .await;
 
         assert_eq!(detected.len(), 1);
-        assert_eq!(
-            detected[0].value,
-            U256::from(1_000_000_000_000_000_000u64)
-        );
+        assert_eq!(detected[0].value, U256::from(1_000_000_000_000_000_000u64));
     }
 }

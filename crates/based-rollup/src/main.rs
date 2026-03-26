@@ -35,7 +35,7 @@ fn print_genesis_state_root() -> Result<()> {
 
     // Convert alloc entries to (Address, TrieAccount) for state root computation.
     // GenesisAccount implements Into<TrieAccount> via alloy-genesis.
-    let state_root = alloy_trie::root::state_root_unhashed(genesis.alloc.into_iter());
+    let state_root = alloy_trie::root::state_root_unhashed(genesis.alloc);
     println!("{state_root}");
     Ok(())
 }

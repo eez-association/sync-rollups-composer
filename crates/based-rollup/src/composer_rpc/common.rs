@@ -407,8 +407,7 @@ pub async fn find_failed_proxy_calls_in_l2_trace(
                                             unwrapped_len = data_end - data_start,
                                             "stripped executeOnBehalf wrapper from L2 proxy call data"
                                         );
-                                        input_bytes =
-                                            input_bytes[data_start..data_end].to_vec();
+                                        input_bytes = input_bytes[data_start..data_end].to_vec();
                                     }
                                 }
                             }
@@ -417,11 +416,7 @@ pub async fn find_failed_proxy_calls_in_l2_trace(
                                 .get("value")
                                 .and_then(|v| v.as_str())
                                 .and_then(|s| {
-                                    U256::from_str_radix(
-                                        s.strip_prefix("0x").unwrap_or(s),
-                                        16,
-                                    )
-                                    .ok()
+                                    U256::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
                                 })
                                 .unwrap_or(U256::ZERO);
 

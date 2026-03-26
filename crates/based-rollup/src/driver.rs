@@ -2274,18 +2274,13 @@ where
                                 // Count how many entries we need per hash
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
                                     std::collections::HashMap::new();
-                                for e in
-                                    l1_entries.iter().filter(|e| e.action_hash != B256::ZERO)
-                                {
+                                for e in l1_entries.iter().filter(|e| e.action_hash != B256::ZERO) {
                                     *entry_counts.entry(e.action_hash).or_default() += 1;
                                 }
                                 // Check that consumed count >= entry count for each hash
-                                let all_consumed =
-                                    entry_counts.iter().all(|(hash, &needed)| {
-                                        consumed_hashes
-                                            .get(hash)
-                                            .is_some_and(|v| v.len() >= needed)
-                                    });
+                                let all_consumed = entry_counts.iter().all(|(hash, &needed)| {
+                                    consumed_hashes.get(hash).is_some_and(|v| v.len() >= needed)
+                                });
 
                                 let consumed_total: usize =
                                     consumed_hashes.values().map(|v| v.len()).sum();
@@ -3109,6 +3104,7 @@ where
     ///   notification interleaves, overwrites nonces → tx rejected, permanently lost
     /// - NEW: defer re-injection by one full step() iteration (~12s). By then,
     ///   reth's Reorg notification has updated pool nonces. No race possible.
+    ///
     /// Inject held L2 transactions into the pool.
     ///
     /// These are user txs that were held by the L2 proxy (hold-then-forward pattern)

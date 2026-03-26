@@ -2753,14 +2753,14 @@ fn test_build_withdrawal_entries_still_void() {
     let amount = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
 
     let entries = build_l2_to_l1_call_entries(
-        user,    // destination
-        vec![],  // data: no calldata for ETH withdrawal
-        amount,  // value
-        user,    // source_address
+        user,   // destination
+        vec![], // data: no calldata for ETH withdrawal
+        amount, // value
+        user,   // source_address
         rollup_id,
         builder,
-        vec![],  // delivery_return_data: EOA recipient
-        false,   // delivery_failed
+        vec![], // delivery_return_data: EOA recipient
+        false,  // delivery_failed
     );
 
     // L2 RESULT entries should have empty data (EOA target, no return data).
@@ -2817,15 +2817,13 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
 
     // The CALL entry hash should be the same (same CALL action regardless of return data).
     assert_eq!(
-        entries_void.l2_table_entries[0].action_hash,
-        entries_data.l2_table_entries[0].action_hash,
+        entries_void.l2_table_entries[0].action_hash, entries_data.l2_table_entries[0].action_hash,
         "CALL hash must not change with different return data"
     );
 
     // The RESULT entry hash MUST differ when return data differs.
     assert_ne!(
-        entries_void.l2_table_entries[1].action_hash,
-        entries_data.l2_table_entries[1].action_hash,
+        entries_void.l2_table_entries[1].action_hash, entries_data.l2_table_entries[1].action_hash,
         "RESULT hash must change when return data differs"
     );
 }

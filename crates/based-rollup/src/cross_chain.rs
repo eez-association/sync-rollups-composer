@@ -138,7 +138,9 @@ pub type ConsumedMap = std::collections::HashMap<B256, Vec<CrossChainAction>>;
 pub fn has_duplicate_calls(calls: &[(Address, &[u8], U256, Address)]) -> bool {
     let mut seen = std::collections::HashMap::new();
     for (dest, data, value, source) in calls {
-        let count = seen.entry((*dest, *data, *value, *source)).or_insert(0usize);
+        let count = seen
+            .entry((*dest, *data, *value, *source))
+            .or_insert(0usize);
         *count += 1;
         if *count > 1 {
             return true;
@@ -271,9 +273,10 @@ pub fn filter_new_by_count<T>(
     let mut used = vec![false; existing.len()];
     let mut result = Vec::new();
     for item in new_items {
-        let matched = existing.iter().enumerate().position(|(i, ex)| {
-            !used[i] && eq(&item, ex)
-        });
+        let matched = existing
+            .iter()
+            .enumerate()
+            .position(|(i, ex)| !used[i] && eq(&item, ex));
         if let Some(idx) = matched {
             used[idx] = true;
         } else {
@@ -605,6 +608,7 @@ impl CrossChainExecutionEntry {
 ///
 /// For **L1 submission**, use [`convert_pairs_to_l1_entries`] to transform
 /// pairs into the non-nested format (actionHash=CALL, nextAction=RESULT).
+#[allow(clippy::too_many_arguments)]
 pub fn build_cross_chain_call_entries(
     rollup_id: U256,
     destination: Address,
@@ -1097,7 +1101,8 @@ pub fn reconstruct_continuation_l2_entries(
             l1_entry_map
                 .get(&call_c_unscoped_hash)
                 .and_then(|entries| {
-                    let matching: Vec<_> = entries.iter()
+                    let matching: Vec<_> = entries
+                        .iter()
                         .filter(|e| e.next_action.action_type == CrossChainActionType::Result)
                         .collect();
                     matching.get(*idx).map(|e| {
@@ -1133,7 +1138,8 @@ pub fn reconstruct_continuation_l2_entries(
             l1_entry_map
                 .get(&scope_result_hash)
                 .and_then(|entries| {
-                    let matching: Vec<_> = entries.iter()
+                    let matching: Vec<_> = entries
+                        .iter()
                         .filter(|e| e.next_action.action_type == CrossChainActionType::Result)
                         .collect();
                     matching.get(*idx).map(|e| {
@@ -1141,7 +1147,7 @@ pub fn reconstruct_continuation_l2_entries(
                         (e.next_action.data.clone(), e.next_action.failed)
                     })
                 })
-            .unwrap_or_else(|| (vec![], false))
+                .unwrap_or_else(|| (vec![], false))
         };
 
         // Entry 1: hash(RESULT(our_rollup, inner_data)) → CALL_B
@@ -1460,6 +1466,7 @@ const LOAD_TABLE_GAS_LIMIT: u64 = 3_000_000;
 const EXECUTE_INCOMING_GAS_LIMIT: u64 = 2_000_000;
 
 /// Build and sign a legacy transaction helper.
+#[allow(clippy::too_many_arguments)]
 fn build_signed_legacy_tx(
     to: Option<Address>,
     data: Vec<u8>,
@@ -1501,12 +1508,11 @@ pub fn build_set_context_tx(
     chain_id: u64,
     gas_price: u128,
 ) -> eyre::Result<TransactionSigned> {
-    let calldata = crate::payload_builder::encode_set_context_calldata(
-        &crate::payload_builder::L1BlockInfo {
+    let calldata =
+        crate::payload_builder::encode_set_context_calldata(&crate::payload_builder::L1BlockInfo {
             l1_block_number,
             l1_block_hash,
-        },
-    );
+        });
     build_signed_legacy_tx(
         Some(l2_context_address),
         calldata.to_vec(),
@@ -2003,15 +2009,13 @@ pub fn is_bridge_withdrawal(tx: &TransactionSigned, bridge_l2_address: Address) 
     // bridgeEther(uint256 _rollupId, address destinationAddress)
     // rollupId is at bytes [4..36], must be 0 for L1 withdrawal
     if selector == BRIDGE_ETHER_SELECTOR {
-        return tx.input().len() >= 68
-            && U256::from_be_slice(&tx.input()[4..36]).is_zero();
+        return tx.input().len() >= 68 && U256::from_be_slice(&tx.input()[4..36]).is_zero();
     }
 
     // bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress)
     // rollupId is at bytes [68..100], must be 0 for L1 withdrawal
     if selector == BRIDGE_TOKENS_SELECTOR {
-        return tx.input().len() >= 132
-            && U256::from_be_slice(&tx.input()[68..100]).is_zero();
+        return tx.input().len() >= 132 && U256::from_be_slice(&tx.input()[68..100]).is_zero();
     }
 
     false
