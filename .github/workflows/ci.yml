@@ -270,6 +270,12 @@ jobs:
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
           DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
+      - name: Stop crosschain-tx-sender (avoids dev#4 nonce collision with TEST 15/17)
+        run: docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml stop crosschain-tx-sender
+        env:
+          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
+          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
+
       - name: Run bridge E2E test
         run: bash scripts/e2e/bridge-health-check.sh
         env:
