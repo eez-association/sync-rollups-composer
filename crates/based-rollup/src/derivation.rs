@@ -316,10 +316,8 @@ impl DerivationPipeline {
             // Each actionHash maps to how many times it was consumed on L1.
             // Duplicate-call patterns (e.g., CallTwice) produce multiple
             // ExecutionConsumed events with the same actionHash.
-            let mut remaining: std::collections::HashMap<B256, usize> = consumed_map
-                .iter()
-                .map(|(k, v)| (*k, v.len()))
-                .collect();
+            let mut remaining: std::collections::HashMap<B256, usize> =
+                consumed_map.iter().map(|(k, v)| (*k, v.len())).collect();
 
             for entry in &entries {
                 if entry.action_hash == B256::ZERO {
@@ -362,8 +360,11 @@ impl DerivationPipeline {
             // need the full entry pairs for effective_state_root computation via
             // chained state deltas (§4e). The CALL actions come from
             // ExecutionConsumed events emitted when entries are consumed on L1.
-            let call_actions: Vec<cross_chain::CrossChainAction> =
-                consumed_map.values().flat_map(|v| v.iter()).cloned().collect();
+            let call_actions: Vec<cross_chain::CrossChainAction> = consumed_map
+                .values()
+                .flat_map(|v| v.iter())
+                .cloned()
+                .collect();
             let deferred_entries = if !call_actions.is_empty() {
                 let mut pairs =
                     cross_chain::convert_l1_entries_to_l2_pairs(&deferred_entries, &call_actions);
@@ -558,10 +559,7 @@ impl DerivationPipeline {
                         // This is independent of the classification loop's `remaining`
                         // because we're re-walking the original entry list.
                         let mut remaining_for_filter: std::collections::HashMap<B256, usize> =
-                            consumed_map
-                                .iter()
-                                .map(|(k, v)| (*k, v.len()))
-                                .collect();
+                            consumed_map.iter().map(|(k, v)| (*k, v.len())).collect();
 
                         let mut idx = 0;
                         while idx < deferred.len() {

@@ -17,7 +17,9 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # ── Fast lint (no compilation) ─────────────────────────────────
+  # ── Phase 1: parallel, no dependencies ──────────────────────────
+
+  # Fast lint (no compilation, ~12s)
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -28,23 +30,29 @@ jobs:
           components: rustfmt
       - run: cargo +nightly fmt --all --check
 
-  # ── Build once, reuse across test jobs ─────────────────────────
-  build:
-    name: Build
+  # Build + Clippy + Unit Tests in ONE job (clippy = full build + lint)
+  build-and-lint:
+    name: Build, Lint & Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Build workspace
-        run: cargo build --workspace --all-targets
-      - name: Save build artifacts
+      - name: Clippy (includes full build)
+        run: cargo clippy --workspace --all-targets --all-features --release -- -D warnings
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Unit tests
+        run: cargo nextest run --workspace --lib
+      - name: Build release binary
+        run: cargo build --release
+      - name: Save build cache
         uses: actions/cache/save@v4
         with:
           path: |
@@ -52,121 +60,14 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
           key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: based-rollup-binary
+          path: target/release/based-rollup
+          retention-days: 1
 
-  clippy:
-    name: Clippy
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - run: cargo clippy --workspace --all-features -- -D warnings
-
-  # ── Unit tests (no external deps) ─────────────────────────────
-  unit-tests:
-    name: Unit Tests
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --lib
-
-  # ── Integration tests (need anvil + contract artifacts) ────────
-  integration-tests:
-    name: Integration Tests (EVM Executor)
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-      - name: Compile contracts
-        run: |
-          cd contracts && forge build
-          cd sync-rollups && forge build
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --test evm_executor
-
-  # ── E2E tests (need anvil + contract artifacts) ────────────────
-  e2e-tests:
-    name: E2E Tests
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-      - name: Compile contracts
-        run: |
-          cd contracts && forge build
-          cd sync-rollups && forge build
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --test e2e_anvil
-
-  # ── Docker build (validates Dockerfile, GHA cache) ─────────────
+  # Docker image build with GHA cache (~6m)
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
@@ -185,12 +86,80 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Docker E2E (full stack: L1 + builder + fullnodes) ──────────
-  # Runs on push to main or manual trigger. Tests bridge deposits,
-  # cross-chain calls, and state root convergence across nodes.
+  # ── Phase 2: needs build-and-lint ───────────────────────────────
+
+  # Integration tests (need anvil + contract artifacts)
+  integration-tests:
+    name: Integration Tests (EVM Executor)
+    needs: build-and-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Restore build artifacts
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Compile contracts
+        run: |
+          rm -rf contracts/sync-rollups/lib/openzeppelin-contracts/fv/harnesses
+          cd contracts/sync-rollups && forge build --skip "fv/*"
+          cd ../.. && cd contracts && forge build --skip "fv/*"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run integration tests
+        run: cargo nextest run --workspace --test evm_executor
+
+  # E2E tests (need anvil + contract artifacts)
+  e2e-tests:
+    name: E2E Tests
+    needs: build-and-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Restore build artifacts
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Compile contracts
+        run: |
+          rm -rf contracts/sync-rollups/lib/openzeppelin-contracts/fv/harnesses
+          cd contracts/sync-rollups && forge build --skip "fv/*"
+          cd ../.. && cd contracts && forge build --skip "fv/*"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run E2E tests
+        run: cargo nextest run --workspace --test e2e_anvil
+
+  # Docker E2E (full stack: L1 + builder + fullnodes)
   docker-e2e:
     name: Docker E2E
-    needs: build
+    needs: build-and-lint
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'push' ||
@@ -202,27 +171,19 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
+      - name: Download release binary
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+          name: based-rollup-binary
+          path: target/release/
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
+      - run: chmod +x target/release/based-rollup
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Build release binary
-        run: cargo build --release
+      - name: Remove OZ formal verification harnesses
+        run: rm -rf contracts/sync-rollups/lib/openzeppelin-contracts/fv/harnesses
 
       - name: Start Docker stack
         run: |

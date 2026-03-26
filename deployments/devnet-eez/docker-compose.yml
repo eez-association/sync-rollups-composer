@@ -68,11 +68,10 @@ services:
     command:
       - |
         cd /app
-        bash deploy-devnet.sh http://l1:8545
+        bash scripts/deploy.sh http://l1:8545
     volumes:
       - ../../contracts:/app/contracts
       - ../shared/scripts:/app/scripts
-      - ../testnet-eez/deploy.sh:/app/deploy-devnet.sh:ro
       - shared:/shared
     environment:
       SHARED_DIR: /shared

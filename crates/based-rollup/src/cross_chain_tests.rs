@@ -2059,8 +2059,11 @@ fn test_decode_post_batch_calldata_roundtrip() {
     };
     let block_data =
         encode_block_calldata(&[1, 2], &[Bytes::from(vec![0xc0]), Bytes::from(vec![0xc1])]);
-    let calldata =
-        encode_post_batch_calldata(&[entry.clone()], block_data.clone(), Bytes::default());
+    let calldata = encode_post_batch_calldata(
+        std::slice::from_ref(&entry),
+        block_data.clone(),
+        Bytes::default(),
+    );
     let (decoded_entries, decoded_call_data) = decode_post_batch_calldata(&calldata).unwrap();
     assert_eq!(decoded_entries.len(), 1);
     assert_eq!(decoded_entries[0], entry);
@@ -2812,15 +2815,13 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
 
     // The CALL entry hash should be the same (same CALL action regardless of return data).
     assert_eq!(
-        entries_void.l2_table_entries[0].action_hash,
-        entries_data.l2_table_entries[0].action_hash,
+        entries_void.l2_table_entries[0].action_hash, entries_data.l2_table_entries[0].action_hash,
         "CALL hash must not change with different return data"
     );
 
     // The RESULT entry hash MUST differ when return data differs.
     assert_ne!(
-        entries_void.l2_table_entries[1].action_hash,
-        entries_data.l2_table_entries[1].action_hash,
+        entries_void.l2_table_entries[1].action_hash, entries_data.l2_table_entries[1].action_hash,
         "RESULT hash must change when return data differs"
     );
 }

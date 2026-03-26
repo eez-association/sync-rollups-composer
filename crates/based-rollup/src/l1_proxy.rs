@@ -479,6 +479,7 @@ async fn handle_cross_chain_tx(
 ///
 /// `raw_l1_tx` should be the raw signed L1 tx for the FIRST entry from a given
 /// user tx, and an empty string for subsequent entries from the same tx.
+#[allow(clippy::too_many_arguments)]
 async fn queue_single_cross_chain_call(
     client: &reqwest::Client,
     l2_rpc_url: &str,
@@ -555,7 +556,8 @@ async fn queue_multi_call_execution_table(
             });
             // Include L2 simulation results when available.
             if !c.return_data.is_empty() || !c.call_success {
-                call_json["l2ReturnData"] = serde_json::json!(format!("0x{}", hex::encode(&c.return_data)));
+                call_json["l2ReturnData"] =
+                    serde_json::json!(format!("0x{}", hex::encode(&c.return_data)));
                 call_json["callSuccess"] = serde_json::json!(c.call_success);
             }
             call_json
@@ -716,10 +718,7 @@ async fn queue_independent_calls_l1_to_l2(
             continue;
         }
 
-        let call_id = body
-            .get("result")
-            .and_then(|r| r.as_str())
-            .unwrap_or("0x");
+        let call_id = body.get("result").and_then(|r| r.as_str()).unwrap_or("0x");
 
         tracing::info!(
             target: "based_rollup::composer_rpc::l1_to_l2",
@@ -732,8 +731,7 @@ async fn queue_independent_calls_l1_to_l2(
     }
 
     // Return the tx hash computed from the raw L1 tx (same as queue_single_cross_chain_call).
-    let tx_hash = compute_tx_hash_from_raw(raw_tx)
-        .unwrap_or_else(|_| "0x".to_string());
+    let tx_hash = compute_tx_hash_from_raw(raw_tx).unwrap_or_else(|_| "0x".to_string());
 
     Ok(Some(tx_hash))
 }
@@ -791,7 +789,8 @@ async fn simulate_l1_to_l2_call_on_l2(
         let compute_data = crate::cross_chain::IRollups::computeCrossChainProxyAddressCall {
             originalAddress: source_address,
             originalRollupId: alloy_primitives::U256::ZERO,
-        }.abi_encode();
+        }
+        .abi_encode();
         let compute_hex = format!("0x{}", hex::encode(&compute_data));
         let req = serde_json::json!({
             "jsonrpc": "2.0",
@@ -911,7 +910,10 @@ async fn simulate_l1_to_l2_call_on_l2(
     };
 
     // Save L2 simulation trace for debugging
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let _ = std::fs::write(
         format!("/tmp/trace_l2sim_{ts}.json"),
         serde_json::to_string_pretty(&body).unwrap_or_default(),
@@ -953,8 +955,7 @@ async fn simulate_l1_to_l2_call_on_l2(
             )
             .await;
 
-            let reverted_proxies: Vec<_> =
-                discovered.into_iter().filter(|d| d.reverted).collect();
+            let reverted_proxies: Vec<_> = discovered.into_iter().filter(|d| d.reverted).collect();
 
             if !reverted_proxies.is_empty() {
                 tracing::info!(
@@ -1019,8 +1020,7 @@ async fn simulate_l1_to_l2_call_on_l2(
                             crate::cross_chain::encode_load_execution_table_calldata(
                                 &all_placeholder_entries,
                             );
-                        let load_data =
-                            format!("0x{}", hex::encode(load_calldata.as_ref()));
+                        let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
                         let ccm_hex = format!("{cross_chain_manager_address}");
 
                         let retry_req = serde_json::json!({
@@ -1066,10 +1066,8 @@ async fn simulate_l1_to_l2_call_on_l2(
                                                 .get("output")
                                                 .and_then(|v| v.as_str())
                                                 .and_then(|s| {
-                                                    hex::decode(
-                                                        s.strip_prefix("0x").unwrap_or(s),
-                                                    )
-                                                    .ok()
+                                                    hex::decode(s.strip_prefix("0x").unwrap_or(s))
+                                                        .ok()
                                                 })
                                                 .unwrap_or_default();
                                             return (revert_data, false);
@@ -1080,9 +1078,7 @@ async fn simulate_l1_to_l2_call_on_l2(
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("0x");
                                         let retry_data = hex::decode(
-                                            retry_output
-                                                .strip_prefix("0x")
-                                                .unwrap_or(retry_output),
+                                            retry_output.strip_prefix("0x").unwrap_or(retry_output),
                                         )
                                         .unwrap_or_default();
                                         tracing::info!(
@@ -1119,10 +1115,7 @@ async fn simulate_l1_to_l2_call_on_l2(
     }
 
     // Extract return data from output.
-    let output = trace
-        .get("output")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0x");
+    let output = trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
     let return_data = hex::decode(output.strip_prefix("0x").unwrap_or(output)).unwrap_or_default();
 
     tracing::info!(
@@ -1185,7 +1178,13 @@ async fn simulate_chained_delivery_l1_to_l2(
                     source = %source_address,
                     "chained L2 proxy address lookup failed — falling back to per-call simulation"
                 );
-                return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+                return fallback_per_call_simulation(
+                    client,
+                    l2_rpc_url,
+                    cross_chain_manager_address,
+                    calls,
+                )
+                .await;
             }
         };
         let body: Value = match resp.json().await {
@@ -1196,7 +1195,13 @@ async fn simulate_chained_delivery_l1_to_l2(
                     %e,
                     "chained L2 proxy address response parse failed — falling back"
                 );
-                return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+                return fallback_per_call_simulation(
+                    client,
+                    l2_rpc_url,
+                    cross_chain_manager_address,
+                    calls,
+                )
+                .await;
             }
         };
         if body.get("error").is_some() {
@@ -1205,7 +1210,13 @@ async fn simulate_chained_delivery_l1_to_l2(
                 source = %source_address,
                 "computeCrossChainProxyAddress failed on L2 CCM — falling back"
             );
-            return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+            return fallback_per_call_simulation(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                calls,
+            )
+            .await;
         }
         match body.get("result").and_then(|v| v.as_str()) {
             Some(s) => {
@@ -1218,11 +1229,23 @@ async fn simulate_chained_delivery_l1_to_l2(
                         source = %source_address,
                         "chained L2 proxy address return too short — falling back"
                     );
-                    return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+                    return fallback_per_call_simulation(
+                        client,
+                        l2_rpc_url,
+                        cross_chain_manager_address,
+                        calls,
+                    )
+                    .await;
                 }
             }
             None => {
-                return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+                return fallback_per_call_simulation(
+                    client,
+                    l2_rpc_url,
+                    cross_chain_manager_address,
+                    calls,
+                )
+                .await;
             }
         }
     };
@@ -1267,7 +1290,13 @@ async fn simulate_chained_delivery_l1_to_l2(
                 %e,
                 "chained L2 simulation (debug_traceCallMany) request failed — falling back"
             );
-            return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+            return fallback_per_call_simulation(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                calls,
+            )
+            .await;
         }
     };
     let body: Value = match resp.json().await {
@@ -1278,7 +1307,13 @@ async fn simulate_chained_delivery_l1_to_l2(
                 %e,
                 "chained L2 simulation response parse failed — falling back"
             );
-            return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+            return fallback_per_call_simulation(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                calls,
+            )
+            .await;
         }
     };
 
@@ -1319,7 +1354,13 @@ async fn simulate_chained_delivery_l1_to_l2(
                 actual = actual_len,
                 "chained L2 simulation returned unexpected trace count — falling back"
             );
-            return fallback_per_call_simulation(client, l2_rpc_url, cross_chain_manager_address, calls).await;
+            return fallback_per_call_simulation(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                calls,
+            )
+            .await;
         }
     };
 
@@ -1327,10 +1368,7 @@ async fn simulate_chained_delivery_l1_to_l2(
     let mut results = Vec::with_capacity(calls.len());
     for (i, trace) in traces.iter().enumerate() {
         let has_error = trace.get("error").is_some() || trace.get("revertReason").is_some();
-        let output_hex = trace
-            .get("output")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0x");
+        let output_hex = trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
         let hex_clean = output_hex.strip_prefix("0x").unwrap_or(output_hex);
         let output_bytes = hex::decode(hex_clean).unwrap_or_default();
 
@@ -1450,7 +1488,10 @@ async fn trace_and_detect_internal_calls(
 
         // Save request to file for debugging (#256)
         let req_json = serde_json::to_string_pretty(&trace_req).unwrap_or_default();
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
         let _ = std::fs::write(format!("/tmp/trace_req_initial_{ts}.json"), &req_json);
 
         let resp = client
@@ -1854,8 +1895,14 @@ async fn trace_and_detect_internal_calls(
 
                     // Save iterative request to file (#256 debug)
                     let req_json = serde_json::to_string_pretty(&trace_req).unwrap_or_default();
-                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-                    let _ = std::fs::write(format!("/tmp/trace_req_iter{iteration}_{ts}.json"), &req_json);
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let _ = std::fs::write(
+                        format!("/tmp/trace_req_iter{iteration}_{ts}.json"),
+                        &req_json,
+                    );
 
                     let resp = match client.post(l1_rpc_url).json(&trace_req).send().await {
                         Ok(r) => match r.json::<Value>().await {
@@ -1873,7 +1920,10 @@ async fn trace_and_detect_internal_calls(
 
                     // Save iterative response to file (#256 debug)
                     let resp_json = serde_json::to_string_pretty(&resp).unwrap_or_default();
-                    let _ = std::fs::write(format!("/tmp/trace_resp_iter{iteration}_{ts}.json"), &resp_json);
+                    let _ = std::fs::write(
+                        format!("/tmp/trace_resp_iter{iteration}_{ts}.json"),
+                        &resp_json,
+                    );
                     tracing::info!(
                         target: "based_rollup::l1_proxy::debug256",
                         file = %format!("/tmp/trace_resp_iter{iteration}_{ts}.json"),
@@ -1938,7 +1988,10 @@ async fn trace_and_detect_internal_calls(
                     // debug256: dump full user_trace JSON
                     {
                         let trace_str: String = serde_json::to_string(user_trace)
-                            .unwrap_or_default().chars().take(3000).collect();
+                            .unwrap_or_default()
+                            .chars()
+                            .take(3000)
+                            .collect();
                         tracing::info!(
                             target: "based_rollup::l1_proxy::debug256",
                             iteration,
@@ -2086,16 +2139,12 @@ async fn trace_and_detect_internal_calls(
                     // increment() twice). The CALL action hash includes value and
                     // sourceAddress, so two calls to the same proxy with different
                     // ETH values or from different sources are distinct.
-                    let new_calls = filter_new_by_count(
-                        new_detected,
-                        &all_calls,
-                        |a, b| {
-                            a.destination == b.destination
-                                && a.calldata == b.calldata
-                                && a.value == b.value
-                                && a.source_address == b.source_address
-                        },
-                    );
+                    let new_calls = filter_new_by_count(new_detected, &all_calls, |a, b| {
+                        a.destination == b.destination
+                            && a.calldata == b.calldata
+                            && a.value == b.value
+                            && a.source_address == b.source_address
+                    });
 
                     tracing::info!(
                         target: "based_rollup::l1_proxy::debug256",
@@ -2192,7 +2241,14 @@ async fn trace_and_detect_internal_calls(
     let has_duplicates = crate::cross_chain::has_duplicate_calls(
         &detected_calls
             .iter()
-            .map(|c| (c.destination, c.calldata.as_slice(), c.value, c.source_address))
+            .map(|c| {
+                (
+                    c.destination,
+                    c.calldata.as_slice(),
+                    c.value,
+                    c.source_address,
+                )
+            })
             .collect::<Vec<_>>(),
     );
 
@@ -2309,7 +2365,11 @@ async fn walk_trace_tree(
     {
         let d256_to = node.get("to").and_then(|v| v.as_str()).unwrap_or("none");
         let d256_from = node.get("from").and_then(|v| v.as_str()).unwrap_or("none");
-        let d256_calls_count = node.get("calls").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        let d256_calls_count = node
+            .get("calls")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
         let d256_error = node.get("error").and_then(|v| v.as_str()).unwrap_or("none");
         tracing::info!(
             target: "based_rollup::l1_proxy::debug256",
@@ -2342,7 +2402,7 @@ async fn walk_trace_tree(
 
             // Check proxy cache first, then query on miss
             let proxy_info = match proxy_cache.get(&to_addr) {
-                Some(cached) => cached.clone(),
+                Some(cached) => *cached,
                 None => {
                     let result =
                         detect_cross_chain_proxy(client, l1_rpc_url, to_addr, rollups_address)

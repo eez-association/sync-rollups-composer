@@ -920,23 +920,22 @@ where
 
         // Use L2 return data from the L1 proxy's simulation when available.
         // Fall back to local EVM simulation (legacy path).
-        let (call_success, return_data) = if !first_call.l2_return_data.is_empty()
-            || !first_call.call_success
-        {
-            (first_call.call_success, first_call.l2_return_data.to_vec())
-        } else {
-            crate::execution_planner::simulate_call(
-                &self.provider,
-                &self.evm_config,
-                first_call.destination,
-                first_call.data.to_vec(),
-            )
-            .unwrap_or_else(|_| {
-                // Simulation may fail (e.g., proxy doesn't exist yet).
-                // For multi-call continuations, receiveTokens returns void anyway.
-                (true, vec![])
-            })
-        };
+        let (call_success, return_data) =
+            if !first_call.l2_return_data.is_empty() || !first_call.call_success {
+                (first_call.call_success, first_call.l2_return_data.to_vec())
+            } else {
+                crate::execution_planner::simulate_call(
+                    &self.provider,
+                    &self.evm_config,
+                    first_call.destination,
+                    first_call.data.to_vec(),
+                )
+                .unwrap_or_else(|_| {
+                    // Simulation may fail (e.g., proxy doesn't exist yet).
+                    // For multi-call continuations, receiveTokens returns void anyway.
+                    (true, vec![])
+                })
+            };
 
         let (call_entry, result_entry) = crate::cross_chain::build_cross_chain_call_entries(
             rollup_id,
@@ -1041,7 +1040,11 @@ where
                 value: c.value,
                 source_address: c.source_address,
                 parent_call_index: c.parent_call_index,
-                l2_return_data: c.l2_return_data.as_ref().map(|b| b.to_vec()).unwrap_or_default(),
+                l2_return_data: c
+                    .l2_return_data
+                    .as_ref()
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default(),
                 l2_delivery_failed: c.l2_delivery_failed,
             })
             .collect();

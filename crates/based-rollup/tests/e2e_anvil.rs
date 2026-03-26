@@ -3153,21 +3153,21 @@ async fn test_proposer_backfill_from_local_chain() {
     }
 
     // Blocks 1-3 from proposer1
-    for i in 0..3 {
+    for (i, derived) in all_derived.iter().enumerate().take(3) {
         let n = (i + 1) as u64;
         let expected = Bytes::from(format!("p1_block_{n}").into_bytes());
         assert_eq!(
-            all_derived[i].transactions, expected,
+            derived.transactions, expected,
             "block {n} transactions should match proposer1's submission"
         );
     }
 
     // Blocks 4-5 from proposer2
-    for i in 3..5 {
+    for (i, derived) in all_derived.iter().enumerate().take(5).skip(3) {
         let n = (i + 1) as u64;
         let expected = Bytes::from(format!("p2_block_{n}").into_bytes());
         assert_eq!(
-            all_derived[i].transactions, expected,
+            derived.transactions, expected,
             "block {n} transactions should match proposer2's submission"
         );
     }
@@ -5005,7 +5005,7 @@ async fn test_cross_chain_full_roundtrip() {
     post_batch_and_consume_same_block(
         &rpc_url,
         rollups_address,
-        calldata.into(),
+        calldata,
         1,
         &[(pre_root, &rlp_data)],
     )
@@ -5112,7 +5112,7 @@ async fn test_cross_chain_load_execution_table_system_call() {
     post_batch_and_consume_same_block(
         &rpc_url,
         rollups_address,
-        calldata.into(),
+        calldata,
         1,
         &[(B256::with_last_byte(0xAA), test_rlp_data)],
     )
@@ -5222,7 +5222,7 @@ async fn test_cross_chain_action_hash_matches_solidity() {
     post_batch_and_consume_same_block(
         &rpc_url,
         rollups_address,
-        calldata.into(),
+        calldata,
         1,
         &[(B256::ZERO, &rlp_tx)],
     )
@@ -5346,8 +5346,7 @@ async fn test_cross_chain_multiple_entries_single_batch() {
     let consumptions: Vec<(B256, &[u8])> = (0u8..3)
         .map(|i| (B256::with_last_byte(i), rlp_datas[i as usize].as_slice()))
         .collect();
-    post_batch_and_consume_same_block(&rpc_url, rollups_address, calldata.into(), 1, &consumptions)
-        .await;
+    post_batch_and_consume_same_block(&rpc_url, rollups_address, calldata, 1, &consumptions).await;
 
     mine_blocks(&rpc_url, 2).await;
 
@@ -5371,7 +5370,7 @@ async fn test_cross_chain_multiple_entries_single_batch() {
     );
 
     // Verify each CALL + RESULT pair was parsed correctly
-    for i in 0usize..3 {
+    for (i, rlp_data) in rlp_datas.iter().enumerate().take(3) {
         let i_u8 = i as u8;
         let call_entry = &derived[0].execution_entries[i * 2];
         let result_entry = &derived[0].execution_entries[i * 2 + 1];
@@ -5379,7 +5378,7 @@ async fn test_cross_chain_multiple_entries_single_batch() {
         // CALL trigger entry: keeps original action_hash and state_deltas
         assert_eq!(
             call_entry.action_hash,
-            compute_l2tx_action_hash(1, &rlp_datas[i]),
+            compute_l2tx_action_hash(1, rlp_data),
             "pair {i}: CALL action_hash should match"
         );
         assert_eq!(
@@ -6120,7 +6119,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     // ── Step 6: Execute the block with cross-chain entries loaded directly ──
     // This tests the EVM execution path (loadExecutionTable system call +
     // CrossChainManagerL2) independently from L1 derivation filtering.
-    let _cross_chain_entries = vec![result_entry.clone(), call_entry.clone()];
+    let _cross_chain_entries = [result_entry.clone(), call_entry.clone()];
     // Set up a CacheDB with the L2 contracts
     let mut db = CacheDB::new(EmptyDB::default());
 
@@ -6195,7 +6194,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
         system_addr,
         AccountInfo {
             balance: U256::from(1_000_000_000_000_000_000u128),
-            code_hash: keccak256(&[]),
+            code_hash: keccak256([]),
             nonce: 0,
             code: None,
             account_id: None,
@@ -6344,7 +6343,7 @@ async fn test_cross_chain_partial_consumption_rewind_convergence() {
     post_batch_and_consume_same_block(
         &rpc_url,
         rollups_address,
-        calldata.into(),
+        calldata,
         1,
         &[(y, &[0xc0, 0x01])],
     )
@@ -6663,7 +6662,7 @@ async fn test_build_and_derive_paths_identical_state_roots() {
     post_batch_and_consume_same_block(
         &rpc_url,
         rollups_address,
-        calldata_2.into(),
+        calldata_2,
         1,
         &[(pre_cc, &rlp_data_cc)],
     )
@@ -6807,7 +6806,7 @@ async fn test_partial_consumption_rewind_recovery_consistency() {
     post_batch_and_consume_same_block(
         &rpc_url,
         rollups_address,
-        calldata.into(),
+        calldata,
         1,
         &[(y, &[0xc0, 0x11])], // only E1 consumed
     )

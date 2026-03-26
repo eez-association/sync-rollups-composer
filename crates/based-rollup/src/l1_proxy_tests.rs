@@ -356,7 +356,7 @@ fn test_bridge_selector_mismatch_returns_early() {
 #[test]
 fn test_bridge_calldata_too_short() {
     // bridgeEther needs at least 68 bytes (4 selector + 32 rollupId + 32 destinationAddress)
-    let short_calldata = vec![0xf4, 0x02, 0xd9, 0xf3, 0x00, 0x01]; // only 6 bytes
+    let short_calldata = [0xf4, 0x02, 0xd9, 0xf3, 0x00, 0x01]; // only 6 bytes
     assert!(short_calldata.len() < 68);
 
     // bridgeTokens needs at least 132 bytes (4 selector + 32×4 args)

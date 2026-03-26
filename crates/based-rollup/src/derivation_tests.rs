@@ -696,7 +696,7 @@ fn test_restart_with_l1_far_ahead() {
 
     assert_eq!(from, 1001);
     assert_eq!(to, 3000);
-    assert!(to - from + 1 <= MAX_LOG_RANGE);
+    assert!(to - from < MAX_LOG_RANGE);
 
     let l1_very_ahead = 11000u64;
     let to2 = l1_very_ahead.min(from.saturating_add(MAX_LOG_RANGE - 1));

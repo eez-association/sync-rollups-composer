@@ -65,11 +65,11 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
-    let result = build_continuation_entries(&[call_a.clone()], l2_id);
+    let result = build_continuation_entries(std::slice::from_ref(&call_a), l2_id);
 
     // L2: 1 terminal entry (RESULT(L2,void) hash → RESULT(L2,void))
     assert_eq!(
@@ -131,8 +131,8 @@ fn test_flash_loan_continuation_entries() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     // CALL_B: executor → executorL2.claimAndBridgeBack (continuation of A)
@@ -145,8 +145,8 @@ fn test_flash_loan_continuation_entries() {
         is_continuation: true,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     // CALL_C: Bridge_L2 → Bridge_L1.receiveTokens (child of B)
@@ -158,8 +158,8 @@ fn test_flash_loan_continuation_entries() {
         is_continuation: false,
         depth: 1,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     let calls = vec![call_a, call_b, call_c];
@@ -355,8 +355,8 @@ fn test_two_continuations_no_children() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
     let call_b = DetectedCall {
         direction: CallDirection::L1ToL2,
@@ -365,8 +365,8 @@ fn test_two_continuations_no_children() {
         is_continuation: true,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     let result = build_continuation_entries(&[call_a, call_b], l2_id);
@@ -423,8 +423,8 @@ fn make_l2_to_l1_detected(
         is_continuation: false,
         depth,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     }
 }
 
@@ -1111,8 +1111,8 @@ fn test_all_entries_have_empty_state_deltas() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     let result = build_continuation_entries(&[call], l2_id);
@@ -1323,7 +1323,10 @@ fn test_l2_mixed_void_nonvoid_children() {
     // Should have L2 entries: CALL(parent) → callReturn[0] for child_a,
     // then RESULT(void) → callReturn[1] for child_b (transition uses child_a's void data),
     // then scope resolution using child_b's non-void data.
-    assert!(cont.l2_entries.len() >= 3, "mixed children need >= 3 L2 entries");
+    assert!(
+        cont.l2_entries.len() >= 3,
+        "mixed children need >= 3 L2 entries"
+    );
 
     // The LAST L2 entry (scope resolution) should use child_b's return data
     let last = cont.l2_entries.last().unwrap();
@@ -1505,11 +1508,19 @@ fn test_void_children_still_use_result_void() {
 
     // L2 scope resolution should be void
     let l2_scope = cont.l2_entries.last().unwrap();
-    assert_eq!(l2_scope.action_hash, void_l2_hash, "void child → L2 scope uses result_void");
+    assert_eq!(
+        l2_scope.action_hash, void_l2_hash,
+        "void child → L2 scope uses result_void"
+    );
 
     // L1 delivery result should be void
-    let l1_delivery_results: Vec<_> = cont.l1_entries.iter()
+    let l1_delivery_results: Vec<_> = cont
+        .l1_entries
+        .iter()
         .filter(|e| e.action_hash == void_l1_hash)
         .collect();
-    assert!(!l1_delivery_results.is_empty(), "void delivery → L1 uses result_void");
+    assert!(
+        !l1_delivery_results.is_empty(),
+        "void delivery → L1 uses result_void"
+    );
 }
