@@ -119,7 +119,7 @@ R(D,1) = block state with all D deposits + 1st withdrawal
 R(D,W) = block state with all deposits + all withdrawals (speculative — builder's local state)
 ```
 
-Deposits precede withdrawals in the chain because `executeRemoteCall` txs appear before `bridgeEther(0)` txs in block execution order.
+Deposits precede withdrawals in the chain because `executeRemoteCall` txs appear before L2-to-L1 cross-chain txs in block execution order.
 
 **Note**: The clean root R(0,0) may include effects of L1-fetched entries (incoming cross-chain calls from other rollups that are already consumed on L1). These canonical entries are always present in every prefix and do not need chained deltas. Only speculative (RPC-originated) deposit entries and withdrawal entries get chained deltas for L1 submission.
 
@@ -134,7 +134,7 @@ D2: actionHash=hash(CALL₂), nextAction=RESULT₂, StateDelta(rollupId, R(1,0),
 DD: actionHash=hash(CALLd), nextAction=RESULTd, StateDelta(rollupId, R(D-1,0), R(D,0), etherDelta=+call_valueD)
 ```
 
-Each deposit entry's `etherDelta` equals the `call_value` (i.e., `msg.value`) of the corresponding CALL action. For deposit entries (`bridgeEther` on L1), `etherDelta` is positive and equals the deposited ETH amount. For zero-value cross-chain calls, `etherDelta` is 0. This must match the `_etherDelta` accumulated by `Rollups.sol` during `executeCrossChainCall`; a mismatch causes `postBatch` to revert with `EtherDeltaMismatch`.
+Each deposit entry's `etherDelta` equals the `call_value` (i.e., `msg.value`) of the corresponding CALL action. For ETH deposit entries (e.g., `Bridge.bridgeEther` on L1), `etherDelta` is positive and equals the deposited ETH amount. For zero-value cross-chain calls, `etherDelta` is 0. This must match the `_etherDelta` accumulated by `Rollups.sol` during `executeCrossChainCall`; a mismatch causes `postBatch` to revert with `EtherDeltaMismatch`.
 
 **Withdrawal entries** continue the chain from R(D,0):
 
@@ -246,35 +246,43 @@ Algorithm:
 
 **The fetch range extends to `to_block`** (the full derivation window, not just the batch's L1 block) because the user's proxy call may land in a later L1 block than the `postBatch`.
 
-**Consequence for the builder**: The builder optimistically builds blocks WITH cross-chain entries (state root X). The immediate entry submitted to L1 uses the clean state root (Y). When all entries are consumed on L1, the on-chain root evolves to X — matching the builder's local state. When entries are NOT consumed, the on-chain root stays at Y (or an intermediate X_k for partial consumption). All nodes — builder, fullnodes, and sync — apply protocol tx filtering (§4f) during derivation, discarding `executeRemoteCall` txs for unconsumed entries from the callData before execution. This produces root Y (zero consumption) or X_k (partial consumption) on every node, matching on-chain. The builder detects the mismatch in `flush_to_l1`, rewinds to Sync mode, and re-derives the block with filtered txs — producing the correct root. The builder can then submit new blocks without a pre_state_root mismatch.
+**Consequence for the builder**: The builder optimistically builds blocks WITH cross-chain entries (state root X). The immediate entry submitted to L1 uses the clean state root (Y). When all entries are consumed on L1, the on-chain root evolves to X — matching the builder's local state. When entries are NOT consumed, the on-chain root stays at Y (or an intermediate X_k for partial consumption). All nodes — builder, fullnodes, and sync — apply protocol tx filtering (§4f) during derivation, discarding `executeRemoteCall` txs (deposits) and L2-to-L1 cross-chain txs for unconsumed entries from the callData before execution. This produces root Y (zero consumption) or X_k (partial consumption) on every node, matching on-chain. The builder detects the mismatch in `flush_to_l1`, rewinds to Sync mode, and re-derives the block with filtered txs — producing the correct root. The builder can then submit new blocks without a pre_state_root mismatch.
 
 **Builder batch constraint**: After posting a `postBatch` that includes cross-chain entries, the builder sets an **entry verification hold** that prevents both new `postBatch` submissions and new block production until derivation has verified the entry-bearing block. While the hold is active, the builder **halts block production** — `step_builder` returns early without building. This is necessary because building during hold would accumulate blocks with advancing L1 context that mismatch after a rewind, causing double rewind cycles (the first rewind produces blocks that themselves need rewinding). The hold is cleared when `verify_local_block_matches_l1` confirms the entry-bearing block matches the L1-derived state (entries consumed correctly), or when `clear_pending_state` runs during a rewind (which re-derives with §4f filtering). Once cleared, the builder resumes block production and submission in the next `step_builder` call.
 
 ### 4f. Protocol tx filtering (callData transaction discarding)
 
-When §4e determines that deferred entries were NOT consumed on L1, the corresponding builder protocol transactions must also be discarded from the block's callData transaction list before execution. This is critical: the callData contains pre-signed speculative protocol txs (`loadExecutionTable`, `executeRemoteCall`, `bridgeEther(0)`) that would produce phantom state if executed. All nodes perform the same filtering (based on the same `ExecutionConsumed` events), ensuring consensus.
+When §4e determines that deferred entries were NOT consumed on L1, the corresponding builder protocol transactions must also be discarded from the block's callData transaction list before execution. This is critical: the callData contains pre-signed speculative protocol txs (`loadExecutionTable`, `executeRemoteCall`, and L2-to-L1 cross-chain txs) that would produce phantom state if executed. All nodes perform the same filtering (based on the same `ExecutionConsumed` events), ensuring consensus.
 
-Filtering uses a **unified single-pass** algorithm (`filter_block_entries`) that applies independent prefix counting to both deposit and withdrawal txs simultaneously. A block may contain both types.
+Filtering uses a **unified single-pass** algorithm (`filter_block_entries`) that applies independent prefix counting to both deposit and L2-to-L1 cross-chain txs simultaneously. A block may contain both types.
 
-**Identification algorithm (unified prefix counting)**:
+**Two-phase identification**: L2-to-L1 cross-chain txs are identified **generically** via receipt-based event scanning, not by matching Bridge-specific selectors. This means any contract calling through a `CrossChainProxy` on L2 (whether `Bridge.bridgeEther`, `Bridge.bridgeTokens`, or any future cross-chain contract) is correctly classified without code changes.
+
+Phase 1 (derivation, from L1 data only): Derivation computes `consumed_deposit_count` and `unconsumed_withdrawal_pair_count` from the batch entries and `ExecutionConsumed` events. These counts are attached to the derived block as `DeferredFiltering` metadata.
+
+Phase 2 (driver, trial execution): The driver trial-executes the unfiltered block to obtain execution receipts. It scans receipts for `CrossChainCallExecuted` events (emitted by `CrossChainManagerL2.executeCrossChainCall` whenever a proxy forwards a call through the CCM). The tx indices that produced such events are the L2-to-L1 cross-chain txs. The driver then computes `consumed_l2_to_l1_count = total_l2_to_l1_txs - unconsumed_withdrawal_pair_count` and calls `filter_block_entries` with these counts.
+
+**Filtering algorithm (unified prefix counting)**:
 
 For each block in the batch that has unconsumed deferred entries:
 
 1. Decode the block's RLP transaction list from callData
-2. Count **consumed deposit entries** (N_d): the number of `executeRemoteCall` txs to keep. Computed as `total_executeRemoteCall_txs - unconsumed_deposit_entries`.
-3. Count **consumed withdrawal entries** (N_w): the number of `bridgeEther(0)` txs to keep. Computed as `total_bridgeEther(0)_txs - unconsumed_withdrawal_pairs`. Withdrawal entries come in CALL+RESULT pairs in the batch; each pair maps to one `bridgeEther(0)` tx.
-4. Walk the transaction list once. For each transaction:
+2. Count **consumed deposit entries** (N_d): the number of `executeRemoteCall` txs to keep (from Phase 1).
+3. Count **consumed L2-to-L1 entries** (N_w): the number of L2-to-L1 cross-chain txs to keep (from Phase 2). Computed as `total_l2_to_l1_txs - unconsumed_withdrawal_pairs`. Withdrawal entries come in CALL+RESULT pairs in the batch; each pair maps to one L2-to-L1 tx.
+4. Walk the transaction list once. For each transaction at index `i`:
    a. If the tx targets `cross_chain_manager_address` with the `executeRemoteCall` selector: this is the K-th such tx (counting from 1). If K <= N_d, **keep**. If K > N_d, **discard**.
-   b. If the tx targets `bridge_l2_address` with the `bridgeEther` selector and `rollupId=0`: this is the J-th such tx (counting from 1). If J <= N_w, **keep**. If J > N_w, **discard**.
+   b. If index `i` is in the L2-to-L1 tx index set (from receipt scanning): this is the J-th such tx (counting from 1). If J <= N_w, **keep**. If J > N_w, **discard**.
    c. If the tx targets `cross_chain_manager_address` with the `loadExecutionTable` selector, **always keep**.
    d. All other txs (setContext, user txs), **keep**.
 5. Execute the filtered transaction list. The builder account nonce advances only for executed txs — discarded txs do not consume nonces.
 
-**Why prefix counting (not actionHash matching)**: The chained delta ordering (§3e) guarantees that consumption is always a **prefix** — within each type, entry 1 must be consumed before entry 2, etc. Therefore, the first N_d `executeRemoteCall` txs correspond to consumed deposit entries, and the first N_w `bridgeEther(0)` txs correspond to consumed withdrawal entries. Prefix counting is simpler than actionHash reconstruction and correctly handles the **duplicate actionHash edge case**: when two entries call the same contract with identical parameters, they produce the same `keccak256(abi.encode(action))`. ActionHash matching cannot distinguish them, but prefix counting correctly keeps only the first N regardless of hash collisions.
+**Why receipt-based identification (not selector matching)**: The previous approach matched `bridgeEther(0)` selectors to identify L2-to-L1 txs. This was Bridge-specific and would not detect other cross-chain contracts (e.g., `bridgeTokens`, direct proxy calls, wrapper contracts). The `CrossChainCallExecuted` event is emitted by the CCM itself for **every** outgoing L2-to-L1 call, regardless of which contract initiated it. Receipt scanning is therefore fully generic and future-proof.
+
+**Why prefix counting (not actionHash matching)**: The chained delta ordering (§3e) guarantees that consumption is always a **prefix** — within each type, entry 1 must be consumed before entry 2, etc. Therefore, the first N_d `executeRemoteCall` txs correspond to consumed deposit entries, and the first N_w L2-to-L1 txs correspond to consumed withdrawal entries. Prefix counting is simpler than actionHash reconstruction and correctly handles the **duplicate actionHash edge case**: when two entries call the same contract with identical parameters, they produce the same `keccak256(abi.encode(action))`. ActionHash matching cannot distinguish them, but prefix counting correctly keeps only the first N regardless of hash collisions.
 
 **Why loadExecutionTable is always kept**: `loadExecutionTable` writes RESULT entries to the CCM's internal execution table — outgoing data for other rollups to consume. `executeRemoteCall` takes its parameters directly (destination, data, etc.) and does NOT read from the execution table. The table data has zero effect on user-facing contract state (balances, storage). Keeping loadTable with all entries is safe, enables per-tx filtering for partial consumption, and preserves the builder's nonce sequence on all nodes.
 
-**Intermediate root alignment**: The builder's `compute_unified_intermediate_roots` computes intermediate roots with loadTable always loading ALL entries and uses the same `filter_block_entries` function that derivation uses. This ensures the chained state deltas on L1 entries use roots that match what derivation produces. See §3e.
+**Intermediate root alignment**: The builder's `compute_unified_intermediate_roots` computes intermediate roots with loadTable always loading ALL entries, applies the same two-phase identification (trial execution + receipt scanning for `CrossChainCallExecuted` events), and uses the same `filter_block_entries` function that derivation uses. This ensures the chained state deltas on L1 entries use roots that match what derivation produces. See §3e.
 
 **Nonce consistency**: All nodes discard the same transactions (deterministic filtering from L1 events). The builder account nonce after the block is identical on every node. Subsequent blocks' protocol txs (signed by the builder with sequential nonces) are valid because the nonce sequence is consistent across all nodes.
 
@@ -296,23 +304,25 @@ filtered:  [setContext(nonce=10), loadTable(nonce=11), executeRemoteCall_D1(nonc
 
 Builder nonce after: 13 on all nodes. State root: R(1,0) (D1 applied). The intermediate root R(1,0) matches the on-chain root after D1 consumption because `compute_unified_intermediate_roots` uses the same loadTable and filtering.
 
-**Example — mixed block, partial consumption** (2 deposits D1,D2 consumed; 1 withdrawal W1 not consumed):
+**Example — mixed block, partial consumption** (2 deposits D1,D2 consumed; 1 L2-to-L1 call W1 not consumed):
 
 ```
-callData:  [setContext, loadTable, executeRemoteCall_D1, executeRemoteCall_D2, bridgeEther_W1, userTxs...]
+callData:  [setContext, loadTable, executeRemoteCall_D1, executeRemoteCall_D2, l2_to_l1_W1, userTxs...]
 filtered:  [setContext, loadTable, executeRemoteCall_D1, executeRemoteCall_D2, userTxs...]
 ```
 
-State root: R(2,0) (both deposits applied, no withdrawals). On-chain root after D1+D2 consumption = R(2,0).
+State root: R(2,0) (both deposits applied, no L2-to-L1 calls). On-chain root after D1+D2 consumption = R(2,0).
 
-**Example — withdrawal partial consumption** (W1 consumed, W2 not, no deposits):
+**Example — L2-to-L1 partial consumption** (W1 consumed, W2 not, no deposits):
 
 ```
-callData:  [setContext(nonce=10), loadTable(nonce=11), bridgeEther_W1(user_tx), bridgeEther_W2(user_tx), ...]
-filtered:  [setContext(nonce=10), loadTable(nonce=11), bridgeEther_W1(user_tx), ...]
+callData:  [setContext(nonce=10), loadTable(nonce=11), l2_to_l1_W1(user_tx), l2_to_l1_W2(user_tx), ...]
+filtered:  [setContext(nonce=10), loadTable(nonce=11), l2_to_l1_W1(user_tx), ...]
 ```
 
 State root: R(0,1) (W1 applied). On-chain root after W1 consumption = R(0,1). Matches derivation.
+
+In these examples, `l2_to_l1_W*` represents any L2-to-L1 cross-chain tx (e.g., `bridgeEther`, `bridgeTokens`, or any contract calling through a proxy). The filtering logic does not inspect the tx calldata -- it uses the L2-to-L1 tx index set from receipt scanning.
 
 **Multi-block batch constraint**: Protocol tx filtering can cause nonce breaks within a multi-block batch. If block K's protocol txs are discarded but block K+1 exists in the same batch, K+1's pre-signed txs have nonces that assume block K's txs executed — the nonces are too high and execution fails. To prevent this, the builder flushes immediately after building a block with speculative cross-chain entries. Previously-queued blocks (without entries) are included in the same batch ahead of the entries block, making the entries block the **last** in the batch. Since no subsequent blocks follow it, nonce consistency is preserved. This is a builder-side constraint enforced in `step_builder`.
 
@@ -543,13 +553,13 @@ These must hold at all times:
 3. State root chaining is enforced on L1: each block's `currentState` matches the previous `newState`
 4. A block's L1 context always refers to the L1 block BEFORE the containing block
 5. Gap-fill blocks produce deterministic state (same as executing an empty block)
-6. Deferred cross-chain entries are only executed on L2 if `ExecutionConsumed` exists on L1. Unconsumed entries are skipped, and their `executeRemoteCall` txs are discarded from the callData before block execution (§4f). `loadExecutionTable` is always kept as it contains only internal CCM bookkeeping. Each CALL entry carries a chained `StateDelta` that evolves the on-chain `stateRoot` upon consumption. Partial consumption produces the correct intermediate state (see §3e).
+6. Deferred cross-chain entries are only executed on L2 if `ExecutionConsumed` exists on L1. Unconsumed entries are skipped, and their corresponding protocol txs (`executeRemoteCall` for deposits, L2-to-L1 cross-chain txs for withdrawals) are discarded from the callData before block execution (§4f). `loadExecutionTable` is always kept as it contains only internal CCM bookkeeping. Each CALL entry carries a chained `StateDelta` that evolves the on-chain `stateRoot` upon consumption. Partial consumption produces the correct intermediate state (see §3e).
 7. Only ONE `postBatch()` per L1 block (enforced by `lastStateUpdateBlock`)
 8. The derivation pipeline cursor never advances past successfully-processed blocks
 9. The execution cursor only moves backward during reorg rollbacks, never forward
 10. Builder protocol transactions (§5b, §5c) are deterministic and in the same order on all nodes
 11. The immediate entry's `newState` is the **clean** state root — the block executed WITHOUT cross-chain entry effects. Entry effects are encoded in deferred entries' chained state deltas. The on-chain `stateRoot` equals the clean root after `postBatch`, and evolves toward the speculative root as entries are consumed.
-12. Deposits and withdrawals may coexist in the same block and `postBatch`. The unified intermediate root chain (§3e) handles both types: D+W+1 roots from R(0,0) through R(D,0) to R(D,W). §4f filtering applies independent prefix counting to both `executeRemoteCall` and `bridgeEther(0)` txs in a single pass.
+12. Deposits and withdrawals may coexist in the same block and `postBatch`. The unified intermediate root chain (§3e) handles both types: D+W+1 roots from R(0,0) through R(D,0) to R(D,W). §4f filtering applies independent prefix counting to both `executeRemoteCall` (deposit) and L2-to-L1 cross-chain txs (identified generically via `CrossChainCallExecuted` receipt events) in a single pass.
 13. Both deposit and withdrawal deferred entries carry chained intermediate state roots (§3e, §13d), not identity deltas. Each CALL entry (deposit or withdrawal) has a unique `currentState` enabling L1 disambiguation via `_findAndApplyExecution`. Partial consumption produces deterministic intermediate state roots, and derivation filters unconsumed txs of both types to produce matching roots (§4f).
 14. Multi-call continuation L2 entries MUST use scope navigation (`callReturn` with `scope=[0]`) whenever a call has children whose effects must be delivered within the same L2 transaction. This applies to flash loan token returns (§14a, §14b) and recursive ping-pong patterns (§14g). Without scope navigation, `_processCallAtScope` never executes the return call. For depth > 1 patterns, scope navigation entries are generated recursively at every level of the call tree (§14f).
 15. Return calls for multi-call L2-to-L1 continuations MUST be discovered via combined L1 simulation (`simulate_l1_combined_delivery`, which bundles all triggers in one `debug_traceCallMany` so later calls see earlier state effects) OR constructed analytically from the forward trip's `receiveTokens` parameters (swap `destinationAddress` and `sourceRollupId`). Combined simulation is the primary path; analytical construction is the fallback when simulation fails or returns no return calls. Per-call L1 delivery simulation cannot be used because it runs each call in isolation, so the second call cannot see tokens released by the first (§14c).
@@ -566,14 +576,16 @@ L2→L1 ETH withdrawals are symmetric with L1→L2 deposits, using the same two-
 
 ### 13a. Withdrawal Flow
 
-1. User calls `Bridge.bridgeEther{value:X}(0)` on L2 (rollupId=0 means L1)
-2. Bridge creates proxy(user, 0) on L2, calls `proxy{value:X}("")`
-3. Proxy → `CCM.executeCrossChainCall(user, "")` with msg.value=X
-4. CCM burns X ETH (sends to `SYSTEM_ADDRESS`), computes actionHash, consumes pre-loaded execution table entry
-5. Builder posts `postBatch` to L1 with deferred withdrawal entries
+The canonical example uses `Bridge.bridgeEther`, but the detection and entry construction pipeline is fully generic -- any contract calling through a `CrossChainProxy` on L2 triggers the same flow. The L2-to-L1 composer RPC (`composer_rpc/l2_to_l1.rs`) detects all cross-chain calls via the protocol-level `executeCrossChainCall` child pattern in traces, not contract-specific selectors.
+
+1. User calls a cross-chain contract on L2 (e.g., `Bridge.bridgeEther{value:X}(0)` where rollupId=0 means L1)
+2. Contract creates proxy(user, 0) on L2, calls `proxy{value:X}(data)`
+3. Proxy → `CCM.executeCrossChainCall(user, data)` with msg.value=X
+4. CCM burns X ETH (sends to `SYSTEM_ADDRESS`), computes actionHash, emits `CrossChainCallExecuted`, consumes pre-loaded execution table entry
+5. Builder posts `postBatch` to L1 with deferred L2-to-L1 entries
 6. Builder sends trigger tx: calls proxy(user, rollup_id) on L1 with value=0
 7. `Rollups.executeCrossChainCall` matches trigger CALL against stored deferred entry
-8. `_processCallAtScope` sends X ETH to user via `proxy.executeOnBehalf{value:X}(user, "")`
+8. `_processCallAtScope` sends X ETH to user via `proxy.executeOnBehalf{value:X}(user, data)`
 9. RESULT entry consumed, `_applyStateDeltas` verifies `_etherDelta == totalEtherDelta`
 
 ### 13b. Nonce-Linked Atomicity
@@ -587,7 +599,7 @@ Since all transactions share the same sender, L1 miners include all or none. The
 
 **Trigger failure recovery**: If the trigger tx fails to send (RPC error, nonce corruption), the builder immediately rewinds to Sync mode: clears pending state, rolls back derivation to the last confirmed anchor, and re-derives. The trigger tx never lands on L1, so entries remain unconsumed. Re-derivation produces the clean root (R0), matching the on-chain state.
 
-If `postBatch` succeeds but the trigger tx **reverts** on L1 (e.g., `EtherDeltaMismatch` on one of several triggers, or gas estimation failure), the builder waits for the `postBatch` receipt, then checks all trigger receipts. If any trigger reverted, the builder rewinds for re-derivation with §4f withdrawal filtering. The on-chain root is at some intermediate R_k; derivation filters unconsumed `bridgeEther(0)` txs and produces the matching root.
+If `postBatch` succeeds but the trigger tx **reverts** on L1 (e.g., `EtherDeltaMismatch` on one of several triggers, or gas estimation failure), the builder waits for the `postBatch` receipt, then checks all trigger receipts. If any trigger reverted, the builder rewinds for re-derivation with §4f filtering. The on-chain root is at some intermediate R_k; derivation filters unconsumed L2-to-L1 txs and produces the matching root.
 
 ### 13c. Entry Format
 
@@ -651,9 +663,9 @@ Deposits and withdrawals may coexist in the same block and `postBatch`. The unif
 
 **Why mutual exclusion was previously required**: Before unified intermediate roots, withdrawal entries used identity state deltas (`currentState = newState`), making them invisible to state root comparison. In a mixed block, derivation could not determine which type of entry was consumed or unconsumed. The unified chain eliminates this problem because every entry — deposit or withdrawal — advances the state root.
 
-**Builder block construction**: The builder drains both the deposit queue and the withdrawal queue into the same block. In the unified intermediate root chain, deposits come first (matching `executeRemoteCall` execution order before `bridgeEther(0)` in the block).
+**Builder block construction**: The builder drains both the deposit queue and the withdrawal queue into the same block. In the unified intermediate root chain, deposits come first (matching `executeRemoteCall` execution order before L2-to-L1 cross-chain txs in the block).
 
-**Filtering**: §4f applies independent prefix counting to `executeRemoteCall` (deposits) and `bridgeEther(0)` (withdrawals) in a single pass. No type disambiguation is needed within a batch.
+**Filtering**: §4f applies independent prefix counting to `executeRemoteCall` (deposits) and L2-to-L1 cross-chain txs (identified generically via `CrossChainCallExecuted` receipt events) in a single pass. No type disambiguation is needed within a batch.
 
 **Entry ordering in `postBatch`**: Deposit entries (non-nested format) appear first, followed by withdrawal entries (nested format). This matches the consumption order on L1: deposits are consumed before withdrawals.
 
@@ -663,7 +675,7 @@ During derivation, fullnodes reconstruct withdrawal entries from `BatchPosted` e
 - Identify withdrawal entries by `nextAction.actionType == CALL` (nested format)
 - From the L1 trigger CALL action, reconstruct L2 table entries for `loadExecutionTable`
 - If entries are consumed (`ExecutionConsumed` events): include L2 table entries in block, user's Bridge tx succeeds
-- If entries are NOT consumed: skip L2 table entries, user's Bridge.bridgeEther tx reverts (no matching `_executions[actionHash]`), ETH not burned — safe fallback
+- If entries are NOT consumed: skip L2 table entries, user's cross-chain tx reverts (no matching `_executions[actionHash]`), ETH not burned — safe fallback
 
 ### 13g. Deferral Exhaustion and Builder Crash Recovery
 
@@ -671,7 +683,7 @@ During derivation, fullnodes reconstruct withdrawal entries from `BatchPosted` e
 
 **Deferral exhaustion -> rewind**: If deferrals are exhausted (entries still not consumed), the builder **rewinds** to Sync mode. The rewind target is `entry_block - 1`, so the entry block itself gets re-derived with §4f-filtered txs. This produces correct nonces for subsequent blocks. Without rewind, fullnodes would diverge permanently because they derive with filtered txs while the builder's local state has unfiltered nonces.
 
-**Builder crash between `postBatch` and trigger**: If the builder crashes after `postBatch` confirmation but before sending the trigger tx, entries remain unconsumed on L1. On restart, the builder re-derives from L1. Derivation applies §4f filtering: all unconsumed `executeRemoteCall` and `bridgeEther(0)` txs are filtered out (consumed count = 0), producing R(0,0) as the effective state root. For withdrawals, the user's `bridgeEther(0)` tx is not executed, so ETH is not burned on L2 — the user retains their funds and can retry.
+**Builder crash between `postBatch` and trigger**: If the builder crashes after `postBatch` confirmation but before sending the trigger tx, entries remain unconsumed on L1. On restart, the builder re-derives from L1. Derivation applies §4f filtering: all unconsumed `executeRemoteCall` and L2-to-L1 cross-chain txs are filtered out (consumed count = 0), producing R(0,0) as the effective state root. For L2-to-L1 calls, the user's cross-chain tx is not executed, so ETH is not burned on L2 — the user retains their funds and can retry.
 
 **Permanent builder failure**: If the builder never restarts (permanent hardware failure with no backup):
 - Entries remain unconsumed on L1 indefinitely
@@ -908,7 +920,7 @@ The builder detects multi-call continuations via iterative `debug_traceCallMany`
 
 The recursive discovery mechanism enables detection of arbitrarily deep L2-to-L1 and L1-to-L2 call chains, extending the depth-1 flash loan pattern (section 14b) to N-hop ping-pong patterns. A depth-1 interaction is a single L2-to-L1 call whose L1 execution produces at most one L1-to-L2 return call. Depth > 1 arises when the return call's L2 execution makes another L2-to-L1 call, whose L1 execution may produce another return call, and so on.
 
-**Discovery algorithm**: The L2 proxy (`proxy.rs`) runs a Phase A/B alternating loop after initial call detection:
+**Discovery algorithm**: The L2-to-L1 composer RPC (`composer_rpc/l2_to_l1.rs`) runs a Phase A/B alternating loop after initial call detection:
 
 ```
 Phase A: Simulate L2-to-L1 calls on L1 (via simulate_l1_combined_delivery)
