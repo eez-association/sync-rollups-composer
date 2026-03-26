@@ -225,9 +225,11 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Start Docker stack
+      - name: Start Docker stack (core services only)
         run: |
-          docker compose -f deployments/testnet-eez/docker-compose.yml up -d
+          docker compose -f deployments/testnet-eez/docker-compose.yml \
+            up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender \
+            deploy-reverse-flash-loan complex-tx-sender crosschain-tx-sender
         env:
           COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
@@ -247,8 +249,10 @@ jobs:
           done
           echo "FATAL: builder did not become healthy in 5 minutes"
           docker compose -f deployments/testnet-eez/docker-compose.yml logs builder --tail 50
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs deploy --tail 50
           exit 1
         env:
+          COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
           DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
@@ -293,6 +297,7 @@ jobs:
           echo "=== Health ==="
           curl -s http://localhost:9560/health || echo "unreachable"
         env:
+          COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
           DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
@@ -301,5 +306,6 @@ jobs:
         run: |
           docker compose -f deployments/testnet-eez/docker-compose.yml down -v
         env:
+          COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
           DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
