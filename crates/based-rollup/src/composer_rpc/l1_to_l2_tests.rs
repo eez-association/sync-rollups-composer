@@ -226,7 +226,7 @@ fn test_cross_chain_rpc_request_structure() {
             "destination": format!("{destination}"),
             "data": calldata_hex,
             "sourceAddress": format!("{from_addr}"),
-            "sourceRollup": format!("{}", U256::from(MAINNET_ROLLUP_ID)),
+            "sourceRollup": format!("{}", U256::from(0u64)),
             "gasPrice": gas_price,
             "rawL1Tx": raw_tx
         }],

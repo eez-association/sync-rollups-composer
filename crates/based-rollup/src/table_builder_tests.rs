@@ -454,7 +454,7 @@ fn make_l2_to_l1_detected(
 #[test]
 fn test_l2_to_l1_depth2_entry_generation() {
     let l2_id = U256::from(1);
-    let builder = address!("0000000000000000000000000000000000000001");
+    let _builder = address!("0000000000000000000000000000000000000001");
 
     // Distinct addresses per call to prevent hash collisions masking bugs.
     let dest_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -767,7 +767,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
 #[test]
 fn test_l2_to_l1_depth2_child_not_orphaned() {
     let l2_id = U256::from(1);
-    let builder = address!("0000000000000000000000000000000000000001");
+    let _builder = address!("0000000000000000000000000000000000000001");
 
     // Minimal tree: one root with one child (depth=1) that has one grandchild (depth=2).
     let dest_root = address!("1111111111111111111111111111111111111111");
@@ -866,7 +866,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
 #[test]
 fn test_l2_to_l1_depth1_regression() {
     let l2_id = U256::from(1);
-    let builder = address!("dead000000000000000000000000000000000000");
+    let _builder = address!("dead000000000000000000000000000000000000");
 
     let dest_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let src_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabb");
@@ -1124,7 +1124,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
     let logger_l2 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let logger_l1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let counter_l2 = address!("cccccccccccccccccccccccccccccccccccccccc");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
     let increment_data = vec![0xd0, 0x9d, 0xe0, 0x8a];
 
     // Simulate Counter.increment() returning uint256(1) = 32 bytes
@@ -1231,7 +1231,7 @@ fn test_l2_mixed_void_nonvoid_children() {
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child_a = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let child_b = address!("cccccccccccccccccccccccccccccccccccccccc");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
 
     let child_b_return = vec![0x00, 0x01, 0x02]; // non-void return
     // The L1 delivery of the root call also returns data (#246: scope resolution
@@ -1355,7 +1355,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
     let l2_id = U256::from(1);
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
 
     let delivery_data = vec![0xDE, 0xAD, 0xBE, 0xEF]; // non-void delivery return
 
@@ -1440,7 +1440,7 @@ fn test_void_children_still_use_result_void() {
     let l2_id = U256::from(1);
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
 
     let detected = vec![
         DetectedCall {

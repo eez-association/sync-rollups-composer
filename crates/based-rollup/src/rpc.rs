@@ -768,10 +768,10 @@ where
             ));
         }
 
-        if params.calls.len() < 2 {
+        if params.calls.is_empty() {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "buildExecutionTable requires at least 2 calls (use initiateCrossChainCall for single calls)",
+                "buildExecutionTable requires at least 1 call",
                 None::<()>,
             ));
         }

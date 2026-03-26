@@ -525,7 +525,8 @@ fn default_call_success() -> bool {
 /// L1→L2 and no children. Child discovery (L2→L1 return calls) comes from the simulation's
 /// iterative `debug_traceCallMany` loop -- not from analytical ABI decoding.
 ///
-/// Returns an empty vec for single calls (use the legacy path in cross_chain.rs).
+/// Handles any number of calls: 1 call produces a simple CALL+RESULT pair,
+/// 2+ calls produce a continuation chain.
 ///
 /// # Arguments
 /// * `calls` - L1→L2 calls detected by the L1 proxy (in execution order)
@@ -536,11 +537,6 @@ pub fn analyze_continuation_calls(
 ) -> Vec<DetectedCall> {
     let our_rollup = U256::from(our_rollup_id);
     let mainnet_rollup = U256::ZERO;
-
-    if calls.len() < 2 {
-        // Single call -- no continuations possible, use legacy path
-        return vec![];
-    }
 
     calls
         .iter()
