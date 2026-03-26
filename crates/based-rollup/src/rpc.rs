@@ -397,17 +397,6 @@ pub trait SyncRollupsApi {
     #[method(name = "queueL1ForwardTx")]
     fn queue_l1_forward_tx(&self, raw_tx: Bytes) -> RpcResult<B256>;
 
-    /// Initiate an L2→L1 ETH withdrawal. Builds L2 table entries and L1 deferred
-    /// entries, queues them for the builder. Returns the L2 CALL action hash.
-    /// `raw_l2_tx` is the held user transaction (hold-then-forward pattern).
-    #[method(name = "initiateWithdrawal")]
-    fn initiate_withdrawal(
-        &self,
-        sender: Address,
-        amount: U256,
-        raw_l2_tx: Bytes,
-    ) -> RpcResult<B256>;
-
     /// Initiate a general L2→L1 cross-chain call. Builds L2 table entries and
     /// L1 deferred entries with delivery calldata and return data. Queues them
     /// for the builder. Returns the L2 CALL action hash.
@@ -706,79 +695,6 @@ where
         );
 
         Ok(tx_hash)
-    }
-
-    fn initiate_withdrawal(
-        &self,
-        sender: Address,
-        amount: U256,
-        raw_l2_tx: Bytes,
-    ) -> RpcResult<B256> {
-        use jsonrpsee::types::ErrorObjectOwned;
-
-        if self.config.rollups_address.is_zero() {
-            return Err(ErrorObjectOwned::owned(
-                -32000,
-                "ROLLUPS_ADDRESS not configured — cross-chain mode disabled",
-                None::<()>,
-            ));
-        }
-
-        if amount.is_zero() {
-            return Err(ErrorObjectOwned::owned(
-                -32000,
-                "withdrawal amount must be > 0",
-                None::<()>,
-            ));
-        }
-
-        let entries = crate::cross_chain::build_l2_to_l1_call_entries(
-            sender, // destination: ETH goes to user on L1
-            vec![], // data: no calldata for ETH withdrawal
-            amount, // value: withdrawal amount
-            sender, // source_address: user initiates the L2→L1 call
-            self.config.rollup_id,
-            self.config.builder_address,
-            vec![], // delivery_return_data: EOA recipient
-            false,  // delivery_failed: withdrawals always succeed
-        );
-
-        let call_id = entries.l2_table_entries[0].action_hash;
-
-        tracing::info!(
-            target: "based_rollup::rpc",
-            %sender,
-            amount = %amount,
-            %call_id,
-            "queued L2→L1 withdrawal"
-        );
-
-        {
-            let mut queue = self
-                .queued_withdrawals
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if queue.len() >= 100 {
-                return Err(ErrorObjectOwned::owned(
-                    -32000,
-                    "withdrawal queue full",
-                    None::<()>,
-                ));
-            }
-            queue.push(QueuedWithdrawal {
-                l2_table_entries: entries.l2_table_entries,
-                l1_deferred_entries: entries.l1_deferred_entries,
-                user: entries.user,
-                amount: entries.amount,
-                raw_l2_tx,
-                trigger_source: None,
-                trigger_calldata: Bytes::new(),
-                trigger_value: U256::ZERO,
-                extra_triggers: vec![],
-            });
-        }
-
-        Ok(call_id)
     }
 
     fn initiate_l2_cross_chain_call(&self, params: L2CrossChainCallParams) -> RpcResult<B256> {

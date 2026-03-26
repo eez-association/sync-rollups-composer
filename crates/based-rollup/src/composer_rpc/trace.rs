@@ -391,17 +391,28 @@ async fn walk_trace_tree_inner(
                 source_address: parsed.from,
             });
         } else {
+            // Proxy identity not found — this could be a contract that directly
+            // calls the manager (not a real proxy). Recurse into children to find
+            // any real proxy calls in sibling frames.
             tracing::warn!(
                 target: "based_rollup::trace",
                 proxy = %parsed.to,
                 source = %parsed.from,
-                "node has executeCrossChainCall child but proxy identity not found — skipping"
+                "node has executeCrossChainCall child but proxy identity not found — recursing"
             );
+            recurse_children(
+                node,
+                manager_addresses,
+                lookup,
+                proxy_cache,
+                ephemeral_proxies,
+                detected_calls,
+            )
+            .await;
         }
 
-        // Do NOT recurse into proxy children — the executeCrossChainCall
-        // and everything beneath it are protocol internals, not user-level
-        // cross-chain calls.
+        // When proxy was found: do NOT recurse into proxy children —
+        // the executeCrossChainCall and everything beneath are protocol internals.
         return;
     }
 
