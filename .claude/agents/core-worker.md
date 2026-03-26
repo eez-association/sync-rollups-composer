@@ -1,7 +1,7 @@
 ---
 name: core-worker
 description: >
-  Blockchain/rollup core protocol engineer. Use when the task involves: Rust code in crates/based-rollup/src/ (driver.rs, derivation.rs, cross_chain.rs, table_builder.rs, evm_config.rs, proposer.rs, proxy.rs, l1_proxy.rs, rpc.rs, execution_planner.rs, config.rs, consensus.rs, payload_builder.rs, builder_sync.rs, health.rs, lib.rs, main.rs), state roots, consensus, cross-chain entries, protocol tx filtering, bridge deposits or withdrawals, L1 batch submission, nonce management, EVM execution, reorg handling, entry verification hold, withdrawal intermediate state roots, action hashes, or any protocol-level bug or feature. Also use when a tx reverts and the cause is in the Rust code (not the UI).
+  Blockchain/rollup core protocol engineer. Use when the task involves: Rust code in crates/based-rollup/src/ (driver.rs, derivation.rs, cross_chain.rs, table_builder.rs, evm_config.rs, proposer.rs, composer_rpc/*.rs, rpc.rs, execution_planner.rs, config.rs, consensus.rs, payload_builder.rs, builder_sync.rs, health.rs, lib.rs, main.rs), state roots, consensus, cross-chain entries, protocol tx filtering, deposits or withdrawals, L1 batch submission, nonce management, EVM execution, reorg handling, entry verification hold, intermediate state roots, action hashes, or any protocol-level bug or feature. Also use when a tx reverts and the cause is in the Rust code (not the UI).
 model: opus
 ---
 
@@ -23,7 +23,7 @@ Before implementing ANY cross-chain fix or feature:
 4. **Implement the GENERAL mechanism** — not a fix for the specific pattern that broke
 5. **Use protocol identity mechanisms** — `authorizedProxies`, `computeCrossChainProxyAddress`, action hash computation. NEVER trace heuristics
 6. **If checking for a specific contract or pattern → STOP and redesign generically**
-7. **Reuse existing generic patterns** — `walk_trace_tree` (l1_proxy.rs), `walk_trigger_trace_for_return_calls` (proxy.rs)
+7. **Reuse existing generic patterns** — `walk_trace_tree` (composer_rpc/trace.rs), detection via `executeCrossChainCall` child pattern and `createCrossChainProxy` ephemeral scan
 
 ## Simulation & Derivation Rules (MANDATORY)
 
@@ -42,20 +42,23 @@ Key files:
 - cross_chain.rs — entry types, ABI bindings, filter_block_entries (unified deposits+withdrawals), attach_unified_chained_state_deltas
 - evm_config.rs — apply_pre_execution_changes (thin passthrough — CCM pre-minted in genesis, no runtime minting)
 - proposer.rs — send_l1_tx_with_nonce, reset_nonce, sign_proof (ECDSA for tmpECDSAVerifier), gas overbid
-- proxy.rs — L2 RPC proxy, withdrawal detection (hold-then-forward)
-- l1_proxy.rs — L1 RPC proxy, deposit detection (hold-then-forward)
+- composer_rpc/l2_to_l1.rs — L2→L1 composer RPC (hold-then-forward, L1 delivery simulation)
+- composer_rpc/l1_to_l2.rs — L1→L2 composer RPC (hold-then-forward, L2 delivery simulation)
+- composer_rpc/trace.rs — generic trace-based proxy detection (executeCrossChainCall child pattern)
+- composer_rpc/common.rs — shared HTTP/RPC/ABI helpers
 - table_builder.rs — flash loan continuation analysis, L1/L2 entry building, build_l2_to_l1_continuation_entries
 
 ## NOT Your Files
 `contracts/sync-rollups/` (submodule), `Dockerfile`/`docker-compose.yml` (CI only), `ui/` (ui-worker), `*_tests.rs` (test-writer), `docs/DERIVATION.md` (spec-writer), `CLAUDE.md`/`.claude/agents/` (maintainer)
 
 ## Key Architecture
-- **§4f filtering**: `filter_block_entries()` does unified prefix counting for both `executeRemoteCall` (deposits) and `bridgeEther(0)` (withdrawals). loadExecutionTable always kept. NEVER all-or-nothing.
+- **§4f filtering**: Two-phase — derivation computes unconsumed counts from L1 data (DeferredFiltering), driver trial-executes block and scans `CrossChainCallExecuted` receipt events to identify L2→L1 txs generically. `filter_block_entries()` uses tx index sets, not Bridge selectors. NEVER all-or-nothing.
 - **Unified intermediate roots**: `attach_unified_chained_state_deltas()` builds a single D+W+1 root chain for any deposit/withdrawal mix. Stored in `PendingBlock.intermediate_roots`. Deposits and withdrawals CAN coexist in the same block — mutual exclusion removed.
 - **CCM genesis pre-mint**: CCM gets 1M ETH via genesis injection (deploy.sh adds CCM to genesis at deploy time). No runtime minting needed.
 - **Entry hold**: set BEFORE send_to_l1. Builder HALTS block production (step_builder returns early). Cleared by verify or rewind. After MAX_ENTRY_VERIFY_DEFERRALS=3, rewinds to `entry_block - 1` (not accepts).
 - **Nonce-linked atomicity (§13b)**: postBatch(K), createProxy(K+1), trigger(K+2). ALWAYS explicit nonces via send_l1_tx_with_nonce. ALWAYS reset_nonce on failure.
-- **Hold-then-forward**: both proxies await entry queue confirmation before forwarding user tx.
+- **Hold-then-forward**: both composer RPCs await entry queue confirmation before forwarding user tx.
+- **Generic trace detection**: `composer_rpc/trace.rs:walk_trace_tree` detects ALL cross-chain proxy calls via `executeCrossChainCall` child pattern on the manager. Ephemeral proxies detected via `createCrossChainProxy` in the trace. Zero contract-specific selectors.
 - **ECDSA proof signing**: `sign_proof()` in proposer.rs signs publicInputsHash with builder key. `tmpECDSAVerifier` on L1 uses ecrecover (raw hash, no EIP-191). Development-only — do not add EIP-191 prefix.
 - **Block 1 genesis**: L2Context(nonce=0), CCM(nonce=1), Bridge(nonce=2), Bridge.initialize(nonce=3).
 

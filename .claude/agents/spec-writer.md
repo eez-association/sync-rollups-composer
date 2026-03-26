@@ -27,7 +27,7 @@ Everything else.
 1. Verify ALL cross-references: every "§N" reference points to a section that exists and says what the reference claims
 2. Verify §12 invariants are still correct — walk through code mentally for each invariant
 3. Verify notation consistency: R(d,w) for unified roots, not mix of R0/Y/X₁ old notation
-4. Verify no stale language: "identity deltas", "mutual exclusion", "MockZKVerifier", "bridgeEther(uint256)" — these are all removed/changed
+4. Verify no stale language: "identity deltas", "mutual exclusion", "MockZKVerifier", "bridgeEther(uint256) as detection mechanism", "proxy.rs", "l1_proxy.rs" — these are all removed/changed. §4f now uses receipt-based CrossChainCallExecuted detection, not Bridge selectors.
 
 ## Standards
 - **Precise**: exact field names, function signatures, algorithm steps

@@ -49,9 +49,9 @@ Examples of lessons learned this session:
 # Test count
 cargo nextest run --workspace 2>&1 | tail -3
 
-# Selectors match
-cast sig "bridgeEther(uint256,address)"  # should be 0xf402d9f3
-cast sig "bridgeTokens(address,uint256,uint256,address)"  # should be 0x33b15aad
+# Protocol selectors — derive, NEVER hardcode
+cast sig "executeCrossChainCall(address,bytes)"
+cast sig "createCrossChainProxy(address,uint256)"
 
 # Dev account assignments — verify no overlaps
 grep -rn "private-key\|PRIVATE_KEY\|_KEY=" deployments/shared/scripts/*.sh scripts/e2e/*.sh | grep -oP '0x[a-f0-9]{64}' | sort | uniq -c | sort -rn | head -5

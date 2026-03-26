@@ -25,7 +25,7 @@ When a tx fails or a test fails, follow this EXACT order. Never speculate.
 5. **Check what's in the same L1/L2 block** — `cast block <N> --rpc-url <rpc> --json | jq '.transactions'` → list all txs, check from/to/nonce/status
 6. **Check the builder logs** — grep for the block number, look for "forwarded", "failed to forward", "replacement", "hold", "deferral", "rewind"
 7. **Check nonces** — `cast nonce <address> --block <N> --rpc-url <rpc>` on builder vs fullnode
-8. **Check the L1/L2 proxy logs** — did it detect the call? did it queue entries? did it forward the raw tx?
+8. **Check the composer RPC logs** — did it detect the call? did it queue entries? did it forward the raw tx?
 
 ## Environment Reference
 
@@ -33,8 +33,8 @@ When a tx fails or a test fails, follow this EXACT order. Never speculate.
 - L1 RPC: `localhost:9555`
 - Builder RPC: `localhost:9545`
 - Builder WS: `localhost:9550`
-- Builder L2 Proxy: `localhost:9548` (intercepts withdrawals — hold-then-forward)
-- Builder L1 Proxy: `localhost:9556` (intercepts deposits — hold-then-forward)
+- Builder L2→L1 composer RPC: `localhost:9548` (intercepts L2→L1 cross-chain calls — hold-then-forward)
+- Builder L1→L2 composer RPC: `localhost:9556` (intercepts L1→L2 cross-chain calls — hold-then-forward)
 - Builder Health: `localhost:9560/health`
 - Fullnode1: `localhost:9546`
 - Fullnode2: `localhost:9547`
@@ -68,13 +68,21 @@ When a tx fails or a test fails, follow this EXACT order. Never speculate.
 **All E2E tests use dedicated keys.** Keys #10-#18 are funded by deploy.sh from dev#9. Run sequentially — the single builder can't handle parallel postBatch load.
 
 ### Key Selectors
-- `0xf402d9f3` = Bridge.bridgeEther(uint256,address)
-- `0x33b15aad` = Bridge.bridgeTokens(address,uint256,uint256,address)
-- `0x96609ad5` = CCM.loadExecutionTable(...)
-- `0x9af53259` = Rollups.executeCrossChainCall(address,bytes)
-- `0xed6bc750` = ExecutionNotFound() error
-- `0xde315ee4` = EtherDeltaMismatch() error
-- `0xd4bae993` = InvalidRevertData() error
+Derive selectors with `cast sig` — NEVER hardcode in source code:
+```bash
+cast sig "executeCrossChainCall(address,bytes)"      # protocol-level, used by trace walker
+cast sig "createCrossChainProxy(address,uint256)"    # protocol-level, ephemeral proxy detection
+cast sig "loadExecutionTable((bytes32[],bytes32,(uint8,uint256,address,uint256,bytes,bool,address,uint256,uint256[]))[]))"
+cast sig "bridgeEther(uint256,address)"              # user-facing (not used in detection)
+cast sig "bridgeTokens(address,uint256,uint256,address)"  # user-facing (not used in detection)
+```
+
+Key error selectors (for trace debugging):
+```bash
+cast sig "ExecutionNotFound()"
+cast sig "EtherDeltaMismatch()"
+cast sig "InvalidRevertData()"
+```
 
 ### Key Addresses (from rollup.env)
 Load with: `sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env`
@@ -141,10 +149,10 @@ sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments
 
 ### Bridge Testing
 ```bash
-# L1→L2 deposit (through L1 proxy — REQUIRED for entry detection)
+# L1→L2 deposit (through L1→L2 composer RPC — REQUIRED for entry detection)
 cast send $BRIDGE_ADDRESS "bridgeEther(uint256,address)" 1 "$USER_ADDR" --value 0.1ether --rpc-url localhost:9556 --private-key $KEY
 
-# L2→L1 withdrawal (through L2 proxy — REQUIRED for entry detection)
+# L2→L1 withdrawal (through L2→L1 composer RPC — REQUIRED for entry detection)
 cast send $BRIDGE_L2_ADDRESS "bridgeEther(uint256,address)" 0 "$USER_ADDR" --value 0.1ether --rpc-url localhost:9548 --private-key $KEY --gas-limit 500000
 ```
 
@@ -168,7 +176,7 @@ cast send $BRIDGE_L2_ADDRESS "bridgeEther(uint256,address)" 0 "$USER_ADDR" --val
 3. Check if the entry was consumed: look for ExecutionConsumed events in the L1 block
 
 ### Withdrawal reverts on L2
-1. Check if L2 proxy detected it: grep "detected L2→L1 withdrawal"
+1. Check if composer RPC detected it: grep "detected cross-chain proxy call"
 2. Check if entries were queued: grep "queued L2→L1 withdrawal"
 3. Check if mutual exclusion blocked drain: this is REMOVED — should not happen
 4. Check if entries made it to builder: grep "draining withdrawal queue"
@@ -231,8 +239,9 @@ them when those services have completed successfully.
 ## E2E Scenarios (manual)
 
 **Health check**: all 3 nodes healthy, same block (±1), same state root, 0 rewinds, 0 pending.
-**Deposit**: bridgeEther(1,addr) on L1 → ETH on L2 on all nodes → roots match → no rewind.
-**Withdrawal**: bridgeEther(0,addr) on L2 → trigger on L1 → ETH on L1 → roots match → no rewind.
+**Deposit**: L1→L2 cross-chain call (e.g., bridgeEther(1,addr)) on L1 → ETH on L2 on all nodes → roots match → no rewind.
+**Withdrawal**: L2→L1 cross-chain call (e.g., bridgeEther(0,addr)) on L2 → trigger on L1 → ETH on L1 → roots match → no rewind.
+**Token withdrawal**: bridgeTokens on L2 → receiveTokens on L1 → tokens delivered → roots match.
 **Concurrent deposit+withdrawal**: both in same block → unified intermediate roots handle both → no mutual exclusion needed.
 **Nonce recovery**: trigger failure → deferral exhaustion → rewind → rebuild with filtered txs → fullnodes converge.
 

@@ -24,7 +24,7 @@ Always cross-reference `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any p
 - docs/DERIVATION.md §13 ↔ driver.rs withdrawal triggers + cross_chain.rs entry construction + `attach_unified_chained_state_deltas()`
 - docs/DERIVATION.md §3e ↔ driver.rs `compute_unified_intermediate_roots()` + `PendingBlock.intermediate_roots`
 - docs/DERIVATION.md §12 ↔ all invariants
-- docs/DERIVATION.md §14 ↔ table_builder.rs entry generation + proxy.rs recursive discovery + driver.rs continuation entries
+- docs/DERIVATION.md §14 ↔ table_builder.rs entry generation + composer_rpc/trace.rs generic detection + driver.rs continuation entries
 
 ## Protocol Completeness Check
 

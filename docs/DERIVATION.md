@@ -939,7 +939,7 @@ The loop runs in two code paths:
 **`simulate_l2_return_call_delivery`**: Simulates return calls on L2 to discover nested L2-to-L1 proxy calls. For each return call:
 
 1. Trace the call directly (from=CCM, to=destination, data=calldata) using `debug_traceCall` with `callTracer`
-2. Walk the trace tree via `walk_trace_tree_l2` to find calls targeting L2 `authorizedProxies` (L2-to-L1 proxy calls)
+2. Walk the trace tree via `composer_rpc/trace.rs:walk_trace_tree` to find cross-chain proxy calls (via `executeCrossChainCall` child pattern)
 3. If the simple trace finds nothing (e.g., because an inner call reverts without entries), retry with `debug_traceCallMany` that pre-loads dummy entries via `loadExecutionTable`
 4. Return discovered `DetectedL2InternalCall` entries for the next Phase A iteration
 
