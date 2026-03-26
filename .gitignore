@@ -16,3 +16,4 @@ ui/node_modules/
 ui/tsconfig.tsbuildinfo
 **/proptest-regressions/
 .shared/
+.claude/worktrees/

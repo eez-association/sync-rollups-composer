@@ -2700,7 +2700,6 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         increment_selector,
         U256::ZERO,
         source,
-        source,
         rollup_id,
         builder,
         return_data.clone(),
@@ -2749,12 +2748,20 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
 #[test]
 fn test_build_withdrawal_entries_still_void() {
     let user = Address::with_last_byte(0x01);
-    let bridge = Address::with_last_byte(0xBD);
     let builder = Address::with_last_byte(0xBB);
     let rollup_id = 1u64;
     let amount = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
 
-    let entries = build_withdrawal_entries(user, amount, rollup_id, bridge, builder);
+    let entries = build_l2_to_l1_call_entries(
+        user,    // destination
+        vec![],  // data: no calldata for ETH withdrawal
+        amount,  // value
+        user,    // source_address
+        rollup_id,
+        builder,
+        vec![],  // delivery_return_data: EOA recipient
+        false,   // delivery_failed
+    );
 
     // L2 RESULT entries should have empty data (EOA target, no return data).
     let l2_entry_0 = &entries.l2_table_entries[0];
@@ -2789,7 +2796,6 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         vec![0xd0, 0x9d, 0xe0, 0x8a],
         U256::ZERO,
         source,
-        source,
         1,
         builder,
         vec![],
@@ -2802,7 +2808,6 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         destination,
         vec![0xd0, 0x9d, 0xe0, 0x8a],
         U256::ZERO,
-        source,
         source,
         1,
         builder,

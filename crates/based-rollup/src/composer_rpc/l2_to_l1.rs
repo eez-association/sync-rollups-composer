@@ -907,7 +907,6 @@ async fn enrich_return_calls_via_l2_trace(
                                         rp.data.clone(),
                                         rp.value,
                                         rp.source_address,
-                                        rp.source_address, // trigger_user placeholder
                                         rollup_id,
                                         Address::ZERO,     // builder_address placeholder
                                         vec![],            // delivery_return_data placeholder
@@ -1342,7 +1341,6 @@ async fn try_chained_l2_enrichment(
                 rp.data.clone(),
                 rp.value,
                 rp.source_address,
-                rp.source_address, // trigger_user placeholder
                 rollup_id,
                 Address::ZERO, // builder_address placeholder
                 vec![],        // delivery_return_data placeholder
@@ -1662,7 +1660,6 @@ async fn simulate_l1_delivery(
                 data.to_vec(),
                 value,
                 trigger_user,
-                trigger_user,
                 rollup_id,
                 builder_address,
                 vec![], // placeholder delivery_return_data
@@ -1678,7 +1675,6 @@ async fn simulate_l1_delivery(
                 destination,
                 data.to_vec(),
                 value,
-                trigger_user,
                 trigger_user,
                 rollup_id,
                 builder_address,
@@ -2605,7 +2601,6 @@ async fn simulate_l1_combined_delivery(
                     call.calldata.to_vec(),
                     call.value,
                     call.source_address,
-                    call.source_address,
                     rollup_id,
                     builder_address,
                     per_call_return_data[i].clone(),
@@ -2643,7 +2638,6 @@ async fn simulate_l1_combined_delivery(
                             call.calldata.to_vec(),
                             call.value,
                             call.source_address,
-                            call.source_address,
                             rollup_id,
                             builder_address,
                             per_call_return_data[i].clone(),
@@ -2658,7 +2652,6 @@ async fn simulate_l1_combined_delivery(
                             call.calldata.to_vec(),
                             call.value,
                             call.source_address,
-                            call.source_address,
                             rollup_id,
                             builder_address,
                             per_call_return_data[i].clone(),
@@ -2672,7 +2665,6 @@ async fn simulate_l1_combined_delivery(
                         call.destination,
                         call.calldata.to_vec(),
                         call.value,
-                        call.source_address,
                         call.source_address,
                         rollup_id,
                         builder_address,
@@ -3770,7 +3762,6 @@ async fn trace_and_detect_l2_internal_calls(
                     call.calldata.clone(),
                     call.value,
                     call.source_address,
-                    call.source_address, // trigger_user (not used for L2 entries)
                     rollup_id,
                     builder_address,
                     vec![], // delivery_return_data (placeholder for discovery)
@@ -4680,7 +4671,6 @@ async fn simulate_l2_return_call_delivery(
                 rc.destination,
                 rc.data.clone(),
                 rc.value,
-                rc.source_address,
                 rc.source_address,
                 rollup_id,
                 Address::ZERO, // builder_address placeholder

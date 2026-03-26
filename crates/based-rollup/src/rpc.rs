@@ -732,12 +732,15 @@ where
             ));
         }
 
-        let entries = crate::cross_chain::build_withdrawal_entries(
-            sender,
-            amount,
+        let entries = crate::cross_chain::build_l2_to_l1_call_entries(
+            sender,                        // destination: ETH goes to user on L1
+            vec![],                        // data: no calldata for ETH withdrawal
+            amount,                        // value: withdrawal amount
+            sender,                        // source_address: user initiates the L2→L1 call
             self.config.rollup_id,
-            self.config.bridge_l2_address,
             self.config.builder_address,
+            vec![],                        // delivery_return_data: EOA recipient
+            false,                         // delivery_failed: withdrawals always succeed
         );
 
         let call_id = entries.l2_table_entries[0].action_hash;
@@ -789,14 +792,11 @@ where
             ));
         }
 
-        // For general L2→L1 calls, source_address IS the trigger_user (L2 tx sender).
-        // For withdrawals (separate path), bridge_l2 is source but user is trigger.
         let entries = crate::cross_chain::build_l2_to_l1_call_entries(
             params.destination,
             params.data.to_vec(),
             params.value,
-            params.source_address, // msg.sender in L2 proxy fallback
-            params.source_address, // trigger_user = L2 sender (gets L1 proxy)
+            params.source_address, // L2 sender: msg.sender in L2 proxy fallback
             self.config.rollup_id,
             self.config.builder_address,
             params.delivery_return_data.to_vec(),

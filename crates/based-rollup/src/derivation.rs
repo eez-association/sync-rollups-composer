@@ -619,14 +619,14 @@ impl DerivationPipeline {
                     let consumed_deposit_count =
                         total_execute.saturating_sub(unconsumed_deposit_count);
 
-                    // Count total bridgeEther(0) txs in the block
+                    // Count total Bridge withdrawal txs (bridgeEther/bridgeTokens with rollupId=0)
                     let total_withdrawals = {
                         let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
                             alloy_rlp::Decodable::decode(&mut transactions.as_ref())
                                 .unwrap_or_default();
                         txs.iter()
                             .filter(|tx| {
-                                cross_chain::is_bridge_ether_withdrawal(
+                                cross_chain::is_bridge_withdrawal(
                                     tx,
                                     self.config.bridge_l2_address,
                                 )

@@ -92,6 +92,14 @@ sol! {
         function initialize(address _manager, uint256 _rollupId, address _admin) external;
         function setCanonicalBridgeAddress(address bridgeAddress) external;
 
+        /// Bridge.bridgeEther — bridge ETH to destination rollup.
+        /// Used for selector-based withdrawal detection in §4f filtering.
+        function bridgeEther(uint256 _rollupId, address destinationAddress) external payable;
+
+        /// Bridge.bridgeTokens — bridge ERC20 tokens to destination rollup.
+        /// Used for selector-based withdrawal detection in §4f filtering.
+        function bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress) external;
+
         /// Bridge.receiveTokens — called cross-chain to mint/release tokens.
         /// Used for ABI decode/encode in continuation entry construction.
         function receiveTokens(
@@ -681,23 +689,17 @@ pub struct WithdrawalEntries {
 
 /// Build L2→L1 call entries for a general cross-chain call.
 ///
-/// Generalizes withdrawal entries to support arbitrary L1 targets, calldata,
-/// and return data (from L1 simulation). Withdrawal is a special case where
-/// destination=user, data=[], source_address=bridge_l2, delivery_return_data=[].
-///
-/// L2 table entries are consumed by CCM.executeCrossChainCall on L2 when the
-/// user's tx hits the proxy. L1 deferred entries are posted via postBatch and
-/// consumed by the builder's trigger tx calling proxy(trigger_user, rollup_id).
+/// Produces both L2 table entries (loaded via loadExecutionTable, consumed by
+/// the L2 proxy call) and L1 deferred entries (posted via postBatch, consumed
+/// by the builder's trigger tx calling proxy(source_address, rollup_id) on L1).
 ///
 /// Parameters:
 /// - `destination`: L1 target address (originalAddress from the L2 proxy)
-/// - `data`: calldata for the L1 execution (empty for withdrawals)
+/// - `data`: calldata for the L1 execution (empty for ETH withdrawals)
 /// - `value`: ETH value to deliver on L1
-/// - `source_address`: msg.sender in the L2 proxy fallback (bridge for withdrawals,
-///   L2 tx sender for general proxy calls)
-/// - `trigger_user`: the L2 initiator who gets an L1 proxy(trigger_user, rollup_id).
-///   For withdrawals this equals `destination` (user). For general L2→L1 calls
-///   this is the L2 sender (distinct from the L1 target).
+/// - `source_address`: the L2 initiator — msg.sender in the L2 proxy fallback.
+///   Also used as the L1 proxy owner (proxy(source_address, rollup_id)) and as the
+///   delivery source identity on L1.
 /// - `rollup_id`: our rollup's ID
 /// - `builder_address`: builder key that will trigger on L1
 /// - `delivery_return_data`: return data from L1 simulation (empty for EOA/withdrawals)
@@ -708,7 +710,6 @@ pub fn build_l2_to_l1_call_entries(
     data: Vec<u8>,
     value: U256,
     source_address: Address,
-    trigger_user: Address,
     rollup_id: u64,
     builder_address: Address,
     delivery_return_data: Vec<u8>,
@@ -776,12 +777,12 @@ pub fn build_l2_to_l1_call_entries(
 
     // ── L1 deferred entries (nested format) ──
     // Entry 1: Trigger CALL — matches what Rollups.executeCrossChainCall builds
-    // when proxy(trigger_user, rollup_id) is called with empty data and value=0.
+    // when proxy(source_address, rollup_id) is called with empty data and value=0.
     //
     // Rollups.sol action fields (Rollups.sol:280-290):
     //   action.actionType = CALL
     //   action.rollupId = proxyInfo.originalRollupId = rollup_id (proxy for our rollup)
-    //   action.destination = proxyInfo.originalAddress = trigger_user
+    //   action.destination = proxyInfo.originalAddress = source_address
     //   action.value = msg.value = 0 (trigger sends no ETH)
     //   action.data = callData = "" (proxy fallback passes msg.data which is empty)
     //   action.sourceAddress = msg.sender in proxy fallback = builder_address
@@ -791,7 +792,7 @@ pub fn build_l2_to_l1_call_entries(
     let l1_trigger_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: rollup_id_u256,
-        destination: trigger_user,
+        destination: source_address,
         value: U256::ZERO, // trigger sends 0 ETH
         data: vec![],
         failed: false,
@@ -812,7 +813,7 @@ pub fn build_l2_to_l1_call_entries(
         value,
         data,
         failed: false,
-        source_address: trigger_user, // L2 initiator is the source on L1
+        source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_u256,
         scope: vec![U256::ZERO],
     };
@@ -855,50 +856,9 @@ pub fn build_l2_to_l1_call_entries(
     WithdrawalEntries {
         l2_table_entries,
         l1_deferred_entries,
-        user: trigger_user,
+        user: source_address,
         amount: value,
     }
-}
-
-/// Build withdrawal entries for an L2→L1 ETH withdrawal.
-///
-/// Thin wrapper around `build_l2_to_l1_call_entries` for the withdrawal special case:
-/// - destination = user (ETH goes to user on L1)
-/// - data = [] (no calldata, just ETH transfer)
-/// - source_address = bridge_l2_address (Bridge calls proxy on behalf of user)
-/// - trigger_user = user (same as destination for withdrawals)
-/// - delivery_return_data = [] (recipient is EOA)
-/// - delivery_failed = false
-///
-/// The withdrawal flow:
-/// 1. User calls Bridge.bridgeEther{value:X}(0) on L2
-/// 2. Bridge creates proxy(user, 0), calls proxy{value:X}("")
-/// 3. Proxy → CCM.executeCrossChainCall(user, "") with msg.value=X
-/// 4. CCM builds CALL action, looks up `_executions[actionHash]` → consumes L2 table entry
-///
-/// On L1, the builder's trigger:
-/// 1. Calls proxy(user, rollup_id) on L1 with empty data and value=0
-/// 2. Proxy → Rollups.executeCrossChainCall(user, "") with msg.value=0
-/// 3. Matches L1 deferred CALL entry, nextAction = delivery CALL
-/// 4. `_processCallAtScope` sends ETH to user
-pub fn build_withdrawal_entries(
-    user: Address,
-    amount: U256,
-    rollup_id: u64,
-    bridge_l2_address: Address,
-    builder_address: Address,
-) -> WithdrawalEntries {
-    build_l2_to_l1_call_entries(
-        user,              // destination: ETH goes to user on L1
-        vec![],            // data: no calldata for ETH withdrawal
-        amount,            // value: withdrawal amount
-        bridge_l2_address, // source_address: Bridge is msg.sender to L2 proxy
-        user,              // trigger_user: same as destination for withdrawals
-        rollup_id,
-        builder_address,
-        vec![], // delivery_return_data: EOA recipient, no return data
-        false,  // delivery_failed: withdrawals always succeed
-    )
 }
 
 /// Check if an L1 deferred entry is a withdrawal entry (nested format with delivery CALL).
@@ -2017,30 +1977,58 @@ pub fn filter_unconsumed_execute_remote_calls(
 
 /// 4-byte function selector for `Bridge.bridgeEther(uint256,address)`.
 ///
-/// Selector = 0xf402d9f3.
-const BRIDGE_ETHER_SELECTOR: [u8; 4] = [0xf4, 0x02, 0xd9, 0xf3];
+/// Derived from the IBridge sol! macro: `IBridge::bridgeEtherCall::SELECTOR`.
+const BRIDGE_ETHER_SELECTOR: [u8; 4] = IBridge::bridgeEtherCall::SELECTOR;
 
-/// Check if a transaction is a `Bridge.bridgeEther(0)` withdrawal tx.
+/// 4-byte function selector for `Bridge.bridgeTokens(address,uint256,uint256,address)`.
 ///
-/// Withdrawal txs target the Bridge L2 contract with `bridgeEther(0)` where
-/// rollupId=0 means "withdraw to L1".
-pub fn is_bridge_ether_withdrawal(tx: &TransactionSigned, bridge_l2_address: Address) -> bool {
+/// Derived from the IBridge sol! macro: `IBridge::bridgeTokensCall::SELECTOR`.
+const BRIDGE_TOKENS_SELECTOR: [u8; 4] = IBridge::bridgeTokensCall::SELECTOR;
+
+/// Check if a transaction is a Bridge withdrawal to L1.
+///
+/// Matches both `bridgeEther(rollupId=0, ...)` and `bridgeTokens(..., rollupId=0, ...)`
+/// targeting the Bridge L2 contract. rollupId=0 means "withdraw to L1".
+///
+/// TODO: Replace with entry-hash-based classification once filter_block_entries
+/// receives the set of entry-producing tx hashes from the block (Step 7).
+pub fn is_bridge_withdrawal(tx: &TransactionSigned, bridge_l2_address: Address) -> bool {
     use alloy_consensus::Transaction;
 
-    tx.to() == Some(bridge_l2_address)
-        && tx.input().len() >= 68
-        && tx.input()[..4] == BRIDGE_ETHER_SELECTOR
-        && U256::from_be_slice(&tx.input()[4..36]).is_zero()
+    if tx.to() != Some(bridge_l2_address) || tx.input().len() < 4 {
+        return false;
+    }
+    let selector = &tx.input()[..4];
+
+    // bridgeEther(uint256 _rollupId, address destinationAddress)
+    // rollupId is at bytes [4..36], must be 0 for L1 withdrawal
+    if selector == BRIDGE_ETHER_SELECTOR {
+        return tx.input().len() >= 68
+            && U256::from_be_slice(&tx.input()[4..36]).is_zero();
+    }
+
+    // bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress)
+    // rollupId is at bytes [68..100], must be 0 for L1 withdrawal
+    if selector == BRIDGE_TOKENS_SELECTOR {
+        return tx.input().len() >= 132
+            && U256::from_be_slice(&tx.input()[68..100]).is_zero();
+    }
+
+    false
 }
 
 /// Unified filter for both deposit and withdrawal txs in a mixed block.
 ///
 /// Iterates the block's transaction list and applies prefix-counting to both
-/// `executeRemoteCall` (deposit) and `bridgeEther(0)` (withdrawal) txs independently.
+/// `executeRemoteCall` (deposit) and Bridge withdrawal (bridgeEther/bridgeTokens
+/// with rollupId=0) txs independently.
 /// All other txs (setContext, loadExecutionTable, user txs) are always kept.
 ///
 /// `keep_deposit_count`: number of `executeRemoteCall` txs to keep (prefix).
-/// `keep_withdrawal_count`: number of `bridgeEther(0)` txs to keep (prefix).
+/// `keep_withdrawal_count`: number of Bridge withdrawal txs to keep (prefix).
+///
+/// TODO: Replace Bridge-selector withdrawal detection with entry-hash-based
+/// classification once the caller provides the set of entry-producing tx hashes.
 pub fn filter_block_entries(
     encoded_transactions: &Bytes,
     ccm_address: Address,
@@ -2065,7 +2053,7 @@ pub fn filter_block_entries(
             if is_ccm_execute_remote_call(tx, ccm_address) {
                 deposit_count += 1;
                 deposit_count <= keep_deposit_count
-            } else if is_bridge_ether_withdrawal(tx, bridge_l2_address) {
+            } else if is_bridge_withdrawal(tx, bridge_l2_address) {
                 withdrawal_count += 1;
                 withdrawal_count <= keep_withdrawal_count
             } else {

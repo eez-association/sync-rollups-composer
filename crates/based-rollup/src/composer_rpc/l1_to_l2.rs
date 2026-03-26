@@ -848,7 +848,6 @@ async fn simulate_l1_to_l2_call_on_l2(
                         rp.data.clone(),
                         rp.value,
                         rp.source_address,
-                        rp.source_address,
                         rollup_id,
                         Address::ZERO,
                         vec![],
