@@ -12,10 +12,9 @@ pub mod driver;
 pub mod evm_config;
 pub mod execution_planner;
 pub mod health;
-pub mod l1_proxy;
+pub mod composer_rpc;
 pub mod payload_builder;
 pub mod proposer;
-pub mod proxy;
 pub mod rpc;
 pub mod table_builder;
 

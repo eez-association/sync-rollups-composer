@@ -5930,5 +5930,5 @@ fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
 }
 
 #[cfg(test)]
-#[path = "proxy_tests.rs"]
+#[path = "l2_to_l1_tests.rs"]
 mod tests;

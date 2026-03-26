@@ -942,7 +942,7 @@ async fn simulate_l1_to_l2_call_on_l2(
             let rollup_id = 1u64; // L2 rollup ID (same as used elsewhere in l1_proxy)
             let mut proxy_cache: HashMap<Address, Option<(Address, u64)>> = HashMap::new();
             let mut discovered = Vec::new();
-            crate::proxy::find_failed_proxy_calls_in_l2_trace(
+            crate::composer_rpc::l2_to_l1::find_failed_proxy_calls_in_l2_trace(
                 client,
                 l2_rpc_url,
                 cross_chain_manager_address,
@@ -3149,5 +3149,5 @@ mod hex {
 }
 
 #[cfg(test)]
-#[path = "l1_proxy_tests.rs"]
+#[path = "l1_to_l2_tests.rs"]
 mod tests;
