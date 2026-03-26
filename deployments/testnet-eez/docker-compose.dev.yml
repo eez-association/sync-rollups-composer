@@ -58,6 +58,9 @@ services:
       - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
       - ../../deployments/shared/genesis.json:/etc/based-rollup/genesis.json
 
+  deploy-reverse-flash-loan:
+    image: based-rollup:dev-deploy
+
   fullnode1:
     image: based-rollup:dev
     environment:

@@ -47,11 +47,7 @@ services:
   # for local dev convenience. Production deployments should use separate keys
   # for contract deployment and block building.
   deploy:
-    build:
-      context: ../..
-      dockerfile: deployments/shared/Dockerfile
-      target: deploy
-    image: based-rollup:deploy
+    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
     # Root required to write to the shared volume
     user: root
     entrypoint: ["bash", "-c"]
@@ -77,11 +73,7 @@ services:
   # L2 deployment — runs after builder is healthy.
   # Sets canonicalBridgeAddress + deploys flash loan contracts on L2.
   deploy-l2:
-    build:
-      context: ../..
-      dockerfile: deployments/shared/Dockerfile
-      target: deploy
-    image: based-rollup:deploy
+    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
     user: root
     entrypoint: ["bash", "-c"]
     command:
@@ -106,10 +98,6 @@ services:
     extends:
       file: ../shared/docker-compose.base.yml
       service: builder
-    build:
-      context: ../..
-      dockerfile: deployments/shared/Dockerfile
-      target: runtime
     volumes:
       - ../shared/scripts:/app/scripts
       - shared:/shared
@@ -121,6 +109,7 @@ services:
       - "9560:9100"   # Health endpoint (dashboard monitoring)
       - "127.0.0.1:9550:8546"   # L2 WebSocket (localhost only)
     environment:
+      GENESIS: /shared/genesis.json
       # Well-known anvil default key — LOCAL DEVELOPMENT ONLY
       BUILDER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
     depends_on:
@@ -138,6 +127,8 @@ services:
       - fullnode1-data:/data
     ports:
       - "9546:8545"   # L2 JSON-RPC
+    environment:
+      GENESIS: /shared/genesis.json
     depends_on:
       deploy:
         condition: service_completed_successfully
@@ -155,6 +146,8 @@ services:
       - fullnode2-data:/data
     ports:
       - "9547:8545"   # L2 JSON-RPC
+    environment:
+      GENESIS: /shared/genesis.json
     depends_on:
       deploy:
         condition: service_completed_successfully
@@ -181,7 +174,7 @@ services:
   # Uses dev key #5 (same as deploy-l2), so must not overlap with it.
   # If FLASH_TOKEN_ADDRESS is zero (flash loan infra not deployed), exits cleanly.
   deploy-reverse-flash-loan:
-    image: based-rollup:deploy
+    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
     user: root
     restart: "no"
     entrypoint: ["bash", "-c"]
