@@ -192,7 +192,7 @@ pub struct QueuedCrossChainCall {
 pub struct QueuedWithdrawal {
     /// L2 table entries (loaded via loadExecutionTable).
     pub l2_table_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
-    /// L1 deferred entries (posted via postBatch, consumed by trigger).
+    /// L1 deferred entries (posted via postBatch, consumed by executeL2TX trigger).
     pub l1_deferred_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
     /// User address (withdrawal initiator).
     pub user: Address,
@@ -202,19 +202,13 @@ pub struct QueuedWithdrawal {
     /// When non-empty, the proxy held this tx instead of forwarding to upstream;
     /// the driver injects it into the pool after loading entries.
     pub raw_l2_tx: Bytes,
-    /// For multi-call L2→L1: the L2 source address whose L1 proxy is the trigger target.
-    /// When set, the driver computes `proxy(trigger_source, rollup_id)` instead of
-    /// `proxy(user, rollup_id)` for the trigger call.
-    pub trigger_source: Option<Address>,
-    /// For multi-call L2→L1: calldata to send to the trigger proxy.
-    /// When empty, sends empty data (simple withdrawal behavior).
-    pub trigger_calldata: Bytes,
-    /// For multi-call L2→L1: ETH value to send with the trigger call.
-    /// When zero, sends 0 value (simple withdrawal behavior).
-    pub trigger_value: U256,
-    /// Additional trigger calls for multi-call L2→L1 patterns.
-    /// Each entry = (source_address, calldata, value).
-    pub extra_triggers: Vec<(Address, Bytes, U256)>,
+    /// RLP-encoded L2 transaction for the L2TX trigger on L1.
+    /// The driver calls `Rollups.executeL2TX(rollupId, rlpEncodedTx)` to trigger
+    /// consumption of the L1 deferred entries.
+    pub rlp_encoded_tx: Vec<u8>,
+    /// Number of `executeL2TX` calls needed.
+    /// Simple withdrawals = 1. Multi-call patterns with N root L2→L1 calls = N.
+    pub trigger_count: usize,
 }
 
 /// Result of simulating a contract call.
@@ -714,7 +708,7 @@ where
             params.value,
             params.source_address, // L2 sender: msg.sender in L2 proxy fallback
             self.config.rollup_id,
-            self.config.builder_address,
+            params.raw_l2_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger on L1
             params.delivery_return_data.to_vec(),
             params.delivery_failed,
         );
@@ -749,10 +743,8 @@ where
                 user: entries.user,
                 amount: entries.amount,
                 raw_l2_tx: params.raw_l2_tx.clone(),
-                trigger_source: None,
-                trigger_calldata: Bytes::new(),
-                trigger_value: U256::ZERO,
-                extra_triggers: vec![],
+                rlp_encoded_tx: params.raw_l2_tx.to_vec(),
+                trigger_count: 1, // Simple L2→L1 call: one executeL2TX
             });
         }
 
@@ -988,9 +980,10 @@ where
             );
         }
 
-        // Build the 3-entry L1 structure and L2 table entries.
+        // Build L2 table entries and L1 deferred entries for the continuation pattern.
+        // Pass rlp_encoded_tx for the L2TX trigger entries on L1.
         let continuation =
-            build_l2_to_l1_continuation_entries(&detected, rollup_id, self.config.builder_address);
+            build_l2_to_l1_continuation_entries(&detected, rollup_id, params.raw_l2_tx.as_ref());
 
         let l2_count = continuation.l2_entries.len();
         let l1_count = continuation.l1_entries.len();
@@ -1053,56 +1046,32 @@ where
                     None::<()>,
                 ));
             }
-            // For multi-call L2→L1 patterns, the trigger must call the L1 proxy
-            // for the first L2→L1 call's source_address with its calldata/value.
-            // This produces the correct action hash matching L1 deferred Entry 0.
-            let first_call = &params.l2_calls[0];
+            // L2TX trigger: one executeL2TX per root L2→L1 call. Each invocation
+            // consumes one L2TX-triggered entry via _findAndApplyExecution (swap-and-pop).
+            // Continuation entries (reentrant children) are consumed within scope resolution.
+            let root_call_count = params.l2_calls.len();
             queue.push(QueuedWithdrawal {
                 l2_table_entries: continuation.l2_entries,
                 l1_deferred_entries: continuation.l1_entries,
-                user: first_call.source_address,
+                user: params.l2_calls[0].source_address,
                 amount: params
                     .l2_calls
                     .iter()
                     .map(|c| c.value)
                     .fold(U256::ZERO, |a, b| a + b),
                 raw_l2_tx: params.raw_l2_tx.clone(),
-                trigger_source: Some(first_call.source_address),
-                trigger_calldata: first_call.data.clone(),
-                trigger_value: first_call.value,
-                // Extra triggers for subsequent L2→L1 calls (2nd, 3rd, etc.).
-                // The first trigger handles call[0]; extras handle call[1..].
-                extra_triggers: params
-                    .l2_calls
-                    .iter()
-                    .skip(1)
-                    .map(|c| (c.source_address, c.data.clone(), c.value))
-                    .collect(),
+                rlp_encoded_tx: params.raw_l2_tx.to_vec(),
+                trigger_count: root_call_count,
             });
         }
 
         {
-            let trigger_source = params.l2_calls[0].source_address;
-            let trigger_calldata_len = params.l2_calls[0].data.len();
-            let extra_count = params.l2_calls.len().saturating_sub(1);
             tracing::info!(
                 target: "based_rollup::rpc",
-                trigger_source = %trigger_source,
-                trigger_calldata_len,
-                extra_trigger_count = extra_count,
-                "queued L2->L1 multi-call withdrawal with triggers"
+                l2_call_count = params.l2_calls.len(),
+                return_call_count = params.return_calls.len(),
+                "queued L2->L1 multi-call withdrawal with L2TX trigger"
             );
-            for (i, c) in params.l2_calls.iter().skip(1).enumerate() {
-                tracing::info!(
-                    target: "based_rollup::rpc",
-                    idx = i,
-                    source = %c.source_address,
-                    calldata_len = c.data.len(),
-                    calldata_prefix = %format!("0x{}", hex::encode(&c.data[..c.data.len().min(8)])),
-                    value = %c.value,
-                    "extra trigger"
-                );
-            }
         }
 
         Ok(BuildExecutionTableResult {

@@ -1020,11 +1020,11 @@ fn push_reentrant_child_entries(
 /// # Arguments
 /// * `detected` - Output of `analyze_l2_to_l1_continuation_calls`
 /// * `our_rollup_id` - L2 rollup ID as U256
-/// * `builder_address` - Builder's L1 address (msg.sender for trigger txs)
+/// * `rlp_encoded_tx` - RLP-encoded L2 transaction for the L2TX trigger on L1
 pub fn build_l2_to_l1_continuation_entries(
     detected: &[DetectedCall],
     our_rollup_id: U256,
-    builder_address: Address,
+    rlp_encoded_tx: &[u8],
 ) -> L2ToL1ContinuationEntries {
     if detected.is_empty() {
         return L2ToL1ContinuationEntries {
@@ -1384,23 +1384,23 @@ pub fn build_l2_to_l1_continuation_entries(
         // Find children belonging to THIS call using original detected index.
         let this_call_children = find_children(detected, orig_idx);
 
-        // Build the trigger action (trigger perspective: builder calls proxy on L1).
+        // Build the L2TX trigger action (matches Rollups.executeL2TX on L1).
         let trigger = CrossChainAction {
-            action_type: CrossChainActionType::Call,
+            action_type: CrossChainActionType::L2Tx,
             rollup_id: our_rollup_id,
-            destination: l2_call.call_action.source_address, // proxy's originalAddress
-            value: l2_call.call_action.value,
-            data: l2_call.call_action.data.clone(),
+            destination: Address::ZERO,
+            value: U256::ZERO,
+            data: rlp_encoded_tx.to_vec(),
             failed: false,
-            source_address: builder_address,
-            source_rollup: U256::ZERO,
+            source_address: Address::ZERO,
+            source_rollup: U256::ZERO, // MAINNET_ROLLUP_ID = 0
             scope: vec![],
         };
         let trigger_hash = compute_action_hash(&trigger);
 
         if root_pos == 0 {
-            // FIRST call: nested DELIVERY with scope=[0].
-            // _resolveScopes enters newScope → _processCallAtScope →
+            // FIRST call: delivery CALL with scope=[] (empty per spec).
+            // _resolveScopes sees CALL with empty scope → _processCallAtScope →
             // executeOnBehalf(destination, data) which ACTUALLY EXECUTES the delivery.
             let delivery = CrossChainAction {
                 action_type: CrossChainActionType::Call,
@@ -1411,7 +1411,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 failed: false,
                 source_address: l2_call.call_action.source_address, // L2 source (e.g., Bridge_L2)
                 source_rollup: our_rollup_id,
-                scope: vec![U256::ZERO],
+                scope: vec![],
             };
 
             tracing::info!(

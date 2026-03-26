@@ -21,6 +21,7 @@
 
 use crate::cross_chain::filter_new_by_count;
 use alloy_primitives::{Address, U256};
+use alloy_sol_types::SolCall;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -903,9 +904,9 @@ async fn enrich_return_calls_via_l2_trace(
                                             rp.value,
                                             rp.source_address,
                                             rollup_id,
-                                            Address::ZERO, // builder_address placeholder
-                                            vec![],        // delivery_return_data placeholder
-                                            false,         // delivery_failed placeholder
+                                            vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
+                                            vec![],     // delivery_return_data placeholder
+                                            false,      // delivery_failed placeholder
                                         );
                                     all_placeholder_entries.extend(placeholder.l2_table_entries);
                                 }
@@ -1364,9 +1365,9 @@ async fn try_chained_l2_enrichment(
                 rp.value,
                 rp.source_address,
                 rollup_id,
-                Address::ZERO, // builder_address placeholder
-                vec![],        // delivery_return_data placeholder
-                false,         // delivery_failed placeholder
+                vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
+                vec![],     // delivery_return_data placeholder
+                false,      // delivery_failed placeholder
             );
             all_placeholder_entries.extend(placeholder.l2_table_entries);
         }
@@ -1591,10 +1592,11 @@ async fn simulate_l1_delivery(
     builder_address: Address,
     builder_private_key: Option<&str>,
     rollup_id: u64,
-    trigger_user: Address,
+    _trigger_user: Address,
     destination: Address,
     data: &[u8],
     value: U256,
+    rlp_encoded_tx: &[u8],
 ) -> Option<(Vec<u8>, bool, Vec<DetectedReturnCall>)> {
     // First check if destination has code on L1.
     // If it's an EOA, return data is empty and we skip simulation.
@@ -1614,7 +1616,7 @@ async fn simulate_l1_delivery(
 
     // Contract target — full traceCallMany simulation.
     // Build preliminary L1 deferred entries, sign postBatch proof, simulate
-    // [postBatch, createProxy, trigger] on L1, and extract delivery return data.
+    // [postBatch, executeL2TX] on L1, and extract delivery return data.
     tracing::info!(
         target: "based_rollup::proxy",
         %destination,
@@ -1637,27 +1639,6 @@ async fn simulate_l1_delivery(
         }
     };
 
-    // Compute proxy address on L1 for the trigger transaction.
-    let proxy_address = match compute_proxy_address_on_l1(
-        client,
-        l1_rpc_url,
-        rollups_address,
-        trigger_user,
-        rollup_id,
-    )
-    .await
-    {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::warn!(
-                target: "based_rollup::proxy",
-                %e,
-                "failed to compute L1 proxy address for simulation"
-            );
-            return Some((vec![], false, vec![]));
-        }
-    };
-
     // Iterative discovery loop: simulate, extract return calls, rebuild entries, repeat.
     let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
     let mut final_return_data: Vec<u8> = Vec::new();
@@ -1672,7 +1653,7 @@ async fn simulate_l1_delivery(
             "L1 delivery simulation iteration"
         );
 
-        // Build L1 deferred entries. On first iteration, use simple CALL+RESULT entries.
+        // Build L1 deferred entries. On first iteration, use simple L2TX+RESULT entries.
         // On subsequent iterations, include continuation entries for discovered return calls.
         let entries = if all_return_calls.is_empty() {
             // Simple case: just the original L2→L1 call
@@ -1680,11 +1661,11 @@ async fn simulate_l1_delivery(
                 destination,
                 data.to_vec(),
                 value,
-                trigger_user,
+                _trigger_user,
                 rollup_id,
-                builder_address,
-                vec![], // placeholder delivery_return_data
-                false,  // placeholder delivery_failed
+                rlp_encoded_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger
+                vec![],                  // placeholder delivery_return_data
+                false,                   // placeholder delivery_failed
             );
             withdrawal_entries.l1_deferred_entries
         } else {
@@ -1696,9 +1677,9 @@ async fn simulate_l1_delivery(
                 destination,
                 data.to_vec(),
                 value,
-                trigger_user,
+                _trigger_user,
                 rollup_id,
-                builder_address,
+                rlp_encoded_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger
                 final_return_data.clone(),
                 final_delivery_failed,
             );
@@ -1836,16 +1817,18 @@ async fn simulate_l1_delivery(
         let post_batch_calldata =
             crate::cross_chain::encode_post_batch_calldata(&entries, call_data_bytes, proof);
 
-        // Encode createProxy calldata.
-        let create_proxy_calldata =
-            crate::cross_chain::encode_create_proxy_calldata(trigger_user, rollup_id);
+        // Encode executeL2TX calldata using typed ABI encoding (NEVER hardcode selectors).
+        let execute_l2tx_calldata = crate::cross_chain::IRollups::executeL2TXCall {
+            rollupId: alloy_primitives::U256::from(rollup_id),
+            rlpEncodedTx: rlp_encoded_tx.to_vec().into(),
+        }
+        .abi_encode();
 
-        // Build traceCallMany request: [postBatch, createProxy, trigger] in a single bundle.
+        // Build traceCallMany request: [postBatch, executeL2TX] in a single bundle.
         let builder_addr_hex = format!("{builder_address}");
         let rollups_hex = format!("{rollups_address}");
         let post_batch_data = format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
-        let create_proxy_data = format!("0x{}", hex::encode(create_proxy_calldata.as_ref()));
-        let proxy_addr_hex = format!("{proxy_address}");
+        let execute_l2tx_data = format!("0x{}", hex::encode(&execute_l2tx_calldata));
         let next_block = format!("{:#x}", trace_block_number);
 
         let trace_req = serde_json::json!({
@@ -1864,14 +1847,7 @@ async fn simulate_l1_delivery(
                             {
                                 "from": builder_addr_hex,
                                 "to": rollups_hex,
-                                "data": create_proxy_data,
-                                "gas": "0x7a120"
-                            },
-                            {
-                                "from": builder_addr_hex,
-                                "to": proxy_addr_hex,
-                                "data": "0x",
-                                "value": "0x0",
+                                "data": execute_l2tx_data,
                                 "gas": "0xc35000"
                             }
                         ],
@@ -1909,13 +1885,13 @@ async fn simulate_l1_delivery(
             }
         };
 
-        // Extract traces from result.
+        // Extract traces from result — now 2 traces: [postBatch, executeL2TX].
         let bundle_traces = match resp
             .get("result")
             .and_then(|r| r.get(0))
             .and_then(|b| b.as_array())
         {
-            Some(arr) if arr.len() >= 3 => arr,
+            Some(arr) if arr.len() >= 2 => arr,
             _ => {
                 if let Some(error) = resp.get("error") {
                     tracing::warn!(
@@ -1926,7 +1902,7 @@ async fn simulate_l1_delivery(
                 } else {
                     tracing::warn!(
                         target: "based_rollup::proxy",
-                        "traceCallMany returned unexpected structure (expected 3 traces)"
+                        "traceCallMany returned unexpected structure (expected 2 traces)"
                     );
                 }
                 return Some((final_return_data, final_delivery_failed, all_return_calls));
@@ -1953,17 +1929,8 @@ async fn simulate_l1_delivery(
             return Some((final_return_data, final_delivery_failed, all_return_calls));
         }
 
-        // Check createProxy result (tx1) — not fatal if it fails (proxy may already exist).
-        let tx1_trace = &bundle_traces[1];
-        if tx1_trace.get("error").is_some() {
-            tracing::info!(
-                target: "based_rollup::proxy",
-                "createProxy reverted in simulation (proxy may already exist) — continuing"
-            );
-        }
-
-        // Extract delivery output from trigger trace (tx2).
-        let trigger_trace = &bundle_traces[2];
+        // Extract delivery output from executeL2TX trace (tx1).
+        let trigger_trace = &bundle_traces[1];
         let (return_data, _delivery_failed) =
             extract_delivery_output_from_trigger_trace(trigger_trace, destination);
 
@@ -2012,7 +1979,8 @@ async fn simulate_l1_delivery(
             final_return_data = return_data.clone();
         } else if truly_new.is_empty() && all_return_calls.is_empty() {
             // Depth-1: no return calls at all. Run a standalone delivery trace
-            // to capture the real return data.
+            // to capture the real return data. Use builder_address as the sender
+            // since the proxy is created dynamically by executeL2TX on L1.
             let delivery_trace_req = serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "debug_traceCallMany",
@@ -2021,7 +1989,7 @@ async fn simulate_l1_delivery(
                         {
                             "transactions": [
                                 {
-                                    "from": format!("{proxy_address}"),
+                                    "from": builder_addr_hex,
                                     "to": format!("{destination}"),
                                     "data": format!("0x{}", hex::encode(data)),
                                     "value": format!("0x{:x}", value),
@@ -2501,6 +2469,7 @@ async fn simulate_l1_combined_delivery(
     builder_private_key: Option<&str>,
     rollup_id: u64,
     calls: &[&DetectedL2InternalCall],
+    rlp_encoded_tx: &[u8],
 ) -> Option<Vec<(Vec<u8>, bool, Vec<DetectedReturnCall>)>> {
     if calls.is_empty() {
         return Some(vec![]);
@@ -2548,37 +2517,6 @@ async fn simulate_l1_combined_delivery(
         }
     };
 
-    // Compute proxy addresses for each unique trigger user.
-    let mut user_proxy_map: std::collections::HashMap<Address, Address> =
-        std::collections::HashMap::new();
-    for call in calls {
-        if user_proxy_map.contains_key(&call.source_address) {
-            continue;
-        }
-        match compute_proxy_address_on_l1(
-            client,
-            l1_rpc_url,
-            rollups_address,
-            call.source_address,
-            rollup_id,
-        )
-        .await
-        {
-            Ok(addr) => {
-                user_proxy_map.insert(call.source_address, addr);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "based_rollup::proxy",
-                    %e,
-                    user = %call.source_address,
-                    "failed to compute L1 proxy address for combined simulation"
-                );
-                return None;
-            }
-        }
-    }
-
     // Iterative discovery loop.
     let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
     // Per-call results: indexed by position in `calls` slice.
@@ -2612,7 +2550,7 @@ async fn simulate_l1_combined_delivery(
                     call.value,
                     call.source_address,
                     rollup_id,
-                    builder_address,
+                    rlp_encoded_tx.to_vec(),
                     per_call_return_data[i].clone(),
                     per_call_delivery_failed[i],
                 );
@@ -2645,7 +2583,7 @@ async fn simulate_l1_combined_delivery(
                             call.value,
                             call.source_address,
                             rollup_id,
-                            builder_address,
+                            rlp_encoded_tx.to_vec(),
                             per_call_return_data[i].clone(),
                             per_call_delivery_failed[i],
                         );
@@ -2659,7 +2597,7 @@ async fn simulate_l1_combined_delivery(
                             call.value,
                             call.source_address,
                             rollup_id,
-                            builder_address,
+                            rlp_encoded_tx.to_vec(),
                             per_call_return_data[i].clone(),
                             per_call_delivery_failed[i],
                         );
@@ -2673,7 +2611,7 @@ async fn simulate_l1_combined_delivery(
                         call.value,
                         call.source_address,
                         rollup_id,
-                        builder_address,
+                        rlp_encoded_tx.to_vec(),
                         per_call_return_data[i].clone(),
                         per_call_delivery_failed[i],
                     );
@@ -2774,54 +2712,38 @@ async fn simulate_l1_combined_delivery(
 
         // Build the traceCallMany bundle:
         //   tx0: postBatch(combined_entries)
-        //   For each call i:
-        //     tx(2*i+1): createProxy(user_i)   [skip if same user already created]
-        //     tx(2*i+2): trigger_i(to=proxy_i)
+        //   tx1: executeL2TX(rollupId, rlpTx)
+        // One executeL2TX handles all entries via scope resolution.
         let builder_addr_hex = format!("{builder_address}");
         let rollups_hex = format!("{rollups_address}");
         let post_batch_data = format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
         let next_block = format!("{:#x}", trace_block_number);
 
-        let mut transactions = vec![serde_json::json!({
-            "from": builder_addr_hex,
-            "to": rollups_hex,
-            "data": post_batch_data,
-            "gas": "0x1c9c380"
-        })];
-
-        // Track which users already have createProxy in the bundle to avoid duplicates.
-        let mut created_users: std::collections::HashSet<Address> =
-            std::collections::HashSet::new();
-        // Map from call index to trigger transaction index in the bundle (for trace extraction).
-        let mut call_trigger_tx_indices: Vec<usize> = Vec::new();
-
-        for call in calls.iter() {
-            let user = call.source_address;
-            let proxy_addr = user_proxy_map[&user];
-
-            if !created_users.contains(&user) {
-                let create_proxy_calldata =
-                    crate::cross_chain::encode_create_proxy_calldata(user, rollup_id);
-                transactions.push(serde_json::json!({
-                    "from": builder_addr_hex,
-                    "to": rollups_hex,
-                    "data": format!("0x{}", hex::encode(create_proxy_calldata.as_ref())),
-                    "gas": "0x7a120"
-                }));
-                created_users.insert(user);
-            }
-
-            // Trigger transaction — call the proxy.
-            let trigger_tx_idx = transactions.len();
-            call_trigger_tx_indices.push(trigger_tx_idx);
-            transactions.push(serde_json::json!({
-                "from": builder_addr_hex,
-                "to": format!("{proxy_addr}"),
-                "data": "0x",
-                "value": "0x0",
-                "gas": "0xc35000"
-            }));
+        // Encode executeL2TX calldata using typed ABI encoding (NEVER hardcode selectors).
+        let execute_l2tx_calldata = crate::cross_chain::IRollups::executeL2TXCall {
+            rollupId: alloy_primitives::U256::from(rollup_id),
+            rlpEncodedTx: rlp_encoded_tx.to_vec().into(),
         }
+        .abi_encode();
+        let execute_l2tx_data = format!("0x{}", hex::encode(&execute_l2tx_calldata));
+
+        let transactions = vec![
+            serde_json::json!({
+                "from": builder_addr_hex,
+                "to": rollups_hex,
+                "data": post_batch_data,
+                "gas": "0x1c9c380"
+            }),
+            serde_json::json!({
+                "from": builder_addr_hex,
+                "to": rollups_hex,
+                "data": execute_l2tx_data,
+                "gas": "0xc35000"
+            }),
+        ];
+
+        // All calls share a single executeL2TX trigger at index 1.
+        let call_trigger_tx_indices: Vec<usize> = (0..calls.len()).map(|_| 1).collect();
 
         let expected_trace_count = transactions.len();
 
@@ -3772,9 +3694,9 @@ async fn trace_and_detect_l2_internal_calls(
                     call.value,
                     call.source_address,
                     rollup_id,
-                    builder_address,
-                    vec![], // delivery_return_data (placeholder for discovery)
-                    false,  // delivery_failed (placeholder for discovery)
+                    tx_bytes.clone(), // rlp_encoded_tx for L2TX trigger
+                    vec![],           // delivery_return_data (placeholder for discovery)
+                    false,            // delivery_failed (placeholder for discovery)
                 );
                 l2_table_entries.extend(withdrawal_entries.l2_table_entries);
             }
@@ -4024,6 +3946,7 @@ async fn trace_and_detect_l2_internal_calls(
                 builder_private_key,
                 rollup_id,
                 &call_refs,
+                &tx_bytes,
             )
             .await;
 
@@ -4145,6 +4068,7 @@ async fn trace_and_detect_l2_internal_calls(
         call.destination,
         &call.calldata,
         call.value,
+        &tx_bytes,
     )
     .await
     .unwrap_or((vec![], false, vec![]));
@@ -4226,6 +4150,7 @@ async fn trace_and_detect_l2_internal_calls(
                     builder_private_key,
                     rollup_id,
                     &call_refs,
+                    &tx_bytes,
                 )
                 .await;
 
@@ -4692,9 +4617,9 @@ async fn simulate_l2_return_call_delivery(
                 rc.value,
                 rc.source_address,
                 rollup_id,
-                Address::ZERO, // builder_address placeholder
-                vec![],        // delivery_return_data placeholder
-                false,         // delivery_failed placeholder
+                vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
+                vec![],     // delivery_return_data placeholder
+                false,      // delivery_failed placeholder
             );
 
             if !placeholder_entries.l2_table_entries.is_empty() {

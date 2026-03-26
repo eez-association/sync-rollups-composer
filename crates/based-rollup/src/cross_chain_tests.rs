@@ -2691,7 +2691,7 @@ fn test_selector_constants_are_correct() {
 fn test_build_l2_to_l1_call_entries_propagates_return_data() {
     let destination = Address::with_last_byte(0x42);
     let source = Address::with_last_byte(0x01);
-    let builder = Address::with_last_byte(0xBB);
+    let _builder = Address::with_last_byte(0xBB);
     let rollup_id = 1u64;
 
     // Simulate Counter.increment() returning uint256(1).
@@ -2704,7 +2704,7 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         U256::ZERO,
         source,
         rollup_id,
-        builder,
+        vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
         return_data.clone(),
         false,
     );
@@ -2751,7 +2751,7 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
 #[test]
 fn test_build_withdrawal_entries_still_void() {
     let user = Address::with_last_byte(0x01);
-    let builder = Address::with_last_byte(0xBB);
+    let _builder = Address::with_last_byte(0xBB);
     let rollup_id = 1u64;
     let amount = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
 
@@ -2761,9 +2761,9 @@ fn test_build_withdrawal_entries_still_void() {
         amount, // value
         user,   // source_address
         rollup_id,
-        builder,
-        vec![], // delivery_return_data: EOA recipient
-        false,  // delivery_failed
+        vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
+        vec![],     // delivery_return_data: EOA recipient
+        false,      // delivery_failed
     );
 
     // L2 RESULT entries should have empty data (EOA target, no return data).
@@ -2791,7 +2791,7 @@ fn test_build_withdrawal_entries_still_void() {
 fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
     let destination = Address::with_last_byte(0x42);
     let source = Address::with_last_byte(0x01);
-    let builder = Address::with_last_byte(0xBB);
+    let _builder = Address::with_last_byte(0xBB);
 
     // Build entries with empty return data.
     let entries_void = build_l2_to_l1_call_entries(
@@ -2800,7 +2800,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         U256::ZERO,
         source,
         1,
-        builder,
+        vec![0xc0], // rlp_encoded_tx placeholder
         vec![],
         false,
     );
@@ -2813,7 +2813,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         U256::ZERO,
         source,
         1,
-        builder,
+        vec![0xc0], // rlp_encoded_tx placeholder
         return_data,
         false,
     );

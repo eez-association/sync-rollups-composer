@@ -118,11 +118,11 @@ async fn deploy_rollups(rpc_url: &str) -> (Address, u64) {
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/sync-rollups-protocol/out/Rollups.sol/Rollups.json"
     );
-    let rollups_artifact: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(rollups_artifact_path)
-            .expect("Rollups artifact not found — run forge build in contracts/sync-rollups-protocol"),
-    )
-    .unwrap();
+    let rollups_artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(rollups_artifact_path).expect(
+            "Rollups artifact not found — run forge build in contracts/sync-rollups-protocol",
+        ))
+        .unwrap();
     let rollups_hex = rollups_artifact["bytecode"]["object"]
         .as_str()
         .unwrap()
@@ -4276,11 +4276,11 @@ async fn deploy_rollups_contracts(rpc_url: &str) -> (Address, Address) {
         env!("CARGO_MANIFEST_DIR"),
         "/../../contracts/sync-rollups-protocol/out/Rollups.sol/Rollups.json"
     );
-    let rollups_artifact: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(rollups_artifact_path)
-            .expect("Rollups artifact not found — run forge build in contracts/sync-rollups-protocol"),
-    )
-    .unwrap();
+    let rollups_artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(rollups_artifact_path).expect(
+            "Rollups artifact not found — run forge build in contracts/sync-rollups-protocol",
+        ))
+        .unwrap();
     let rollups_hex = rollups_artifact["bytecode"]["object"]
         .as_str()
         .unwrap()

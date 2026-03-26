@@ -199,20 +199,14 @@ struct WithdrawalMetadata {
     user: Address,
     /// Withdrawal amount in wei.
     amount: U256,
-    /// For multi-call L2→L1: the L2 source address whose L1 proxy is the trigger target.
-    /// When set, overrides the default `user`-based proxy computation.
-    /// The driver computes `proxy(trigger_source, rollup_id)` on L1.
-    trigger_source: Option<Address>,
-    /// For multi-call L2→L1: calldata to send to the trigger proxy.
-    /// When empty, sends empty data (simple withdrawal behavior).
-    trigger_calldata: Bytes,
-    /// For multi-call L2→L1: ETH value to send with the trigger call.
-    /// When zero, sends 0 value (simple withdrawal behavior).
-    trigger_value: U256,
-    /// Additional trigger calls for multi-call L2→L1 patterns.
-    /// Each entry = (source_address, calldata, value) for a subsequent trigger.
-    /// The first trigger uses trigger_source/trigger_calldata/trigger_value above.
-    extra_triggers: Vec<(Address, Bytes, U256)>,
+    /// RLP-encoded L2 transaction for the L2TX trigger on L1.
+    /// The driver calls `Rollups.executeL2TX(rollupId, rlpEncodedTx)` to trigger
+    /// consumption of the L1 deferred entries.
+    rlp_encoded_tx: Vec<u8>,
+    /// Number of `executeL2TX` calls needed for this withdrawal.
+    /// Simple withdrawals = 1. Multi-call patterns with N root L2→L1 calls need
+    /// N invocations since each `executeL2TX` consumes one entry via `_findAndApplyExecution`.
+    trigger_count: usize,
 }
 
 /// Stage ID for the persistent transaction replay journal.
@@ -1304,12 +1298,10 @@ where
                     // withdrawal path, because their 5-entry structure is not pair-based
                     // and would panic in attach_unified_chained_state_deltas.
                     //
-                    // Detect continuation via trigger_source: set by buildL2ToL1ExecutionTable
-                    // (rpc.rs:1094), None for simple withdrawals (rpc.rs:781).
-                    // Using extra_triggers.is_empty() was wrong: a depth-2 pattern with
-                    // 1 L2→L1 call + 1 return call has empty extra_triggers but IS a
-                    // continuation (issue #245).
-                    if w.trigger_source.is_none() {
+                    // Detect continuation by L1 entry count: simple withdrawals produce
+                    // exactly 2 L1 entries (L2TX trigger + RESULT); continuations produce
+                    // more (trigger + delivery + reentrant + scope resolution entries).
+                    if w.l1_deferred_entries.len() <= 2 {
                         self.pending_withdrawal_l1_entries
                             .extend(w.l1_deferred_entries);
                     } else {
@@ -1319,10 +1311,8 @@ where
                     self.pending_withdrawal_metadata.push(WithdrawalMetadata {
                         user: w.user,
                         amount: w.amount,
-                        trigger_source: w.trigger_source,
-                        trigger_calldata: w.trigger_calldata,
-                        trigger_value: w.trigger_value,
-                        extra_triggers: w.extra_triggers.clone(),
+                        rlp_encoded_tx: w.rlp_encoded_tx,
+                        trigger_count: w.trigger_count,
                     });
                 }
             }
@@ -2438,62 +2428,40 @@ where
             "starting withdrawal triggers with explicit nonce"
         );
 
-        /// Gas limits for withdrawal trigger txs (generous to avoid estimation).
-        const CREATE_PROXY_GAS: u64 = 500_000;
-        /// Gas limit for withdrawal trigger txs. Must be generous to accommodate
+        /// Gas limit for executeL2TX trigger txs. Must be generous to accommodate
         /// nested scope navigation (delivery + bridge return trips in multi-call patterns).
         /// The simpler ETH withdrawal trigger uses ~50k, but multi-call with nested
         /// delivery (receiveTokens + claimAndBridgeBack + bridge back) needs ~1.5M+.
         const TRIGGER_GAS: u64 = 3_000_000;
 
         for w in withdrawals {
-            // For multi-call L2→L1, trigger_source overrides the proxy address computation.
-            // Simple withdrawals use the user address; multi-call uses the L2 source address.
-            let proxy_original_address = w.trigger_source.unwrap_or(w.user);
-
-            // Compute proxy address via view call (no nonce consumed).
-            let compute_data = crate::cross_chain::IRollups::computeCrossChainProxyAddressCall {
-                originalAddress: proxy_original_address,
-                originalRollupId: U256::from(self.config.rollup_id),
+            // Encode executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx)
+            // using typed ABI encoding via sol! macro (NEVER hardcode selectors).
+            let execute_l2tx_calldata = crate::cross_chain::IRollups::executeL2TXCall {
+                rollupId: U256::from(self.config.rollup_id),
+                rlpEncodedTx: w.rlp_encoded_tx.clone().into(),
             }
             .abi_encode();
 
-            let l1_provider = self.get_l1_provider();
-            let proxy_result = l1_provider
-                .call(
-                    alloy_rpc_types::TransactionRequest::default()
-                        .to(self.config.rollups_address)
-                        .input(Bytes::from(compute_data).into()),
-                )
-                .await
-                .map_err(|err| eyre::eyre!("failed to compute proxy address: {err}"))?;
-
-            let proxy_address = if proxy_result.len() >= 32 {
-                Address::from_slice(&proxy_result[12..32])
-            } else {
-                return Err(eyre::eyre!(
-                    "invalid proxy address response (len={})",
-                    proxy_result.len()
-                ));
-            };
-
-            // Step 1: createCrossChainProxy — skip if proxy already has code on L1
-            let proposer = self.proposer.as_ref().expect("checked above");
-            let proxy_exists = proposer.has_code_at(proxy_address).await;
-
-            if !proxy_exists {
-                let create_proxy_data = crate::cross_chain::encode_create_proxy_calldata(
-                    proxy_original_address,
-                    self.config.rollup_id,
+            // Send trigger_count executeL2TX calls. Multi-call patterns with N root
+            // L2→L1 calls need N invocations since each _findAndApplyExecution on L1
+            // consumes one entry via swap-and-pop.
+            for trigger_idx in 0..w.trigger_count {
+                info!(
+                    target: "based_rollup::driver",
+                    "trigger action will be: executeL2TX(rollupId={}, rlpTx_len={}, trigger {}/{})",
+                    self.config.rollup_id, w.rlp_encoded_tx.len(),
+                    trigger_idx + 1, w.trigger_count
                 );
+
                 let proposer = self.proposer.as_ref().expect("checked above");
                 match proposer
                     .send_l1_tx_with_nonce(
                         self.config.rollups_address,
-                        create_proxy_data,
+                        Bytes::from(execute_l2tx_calldata.clone()),
                         U256::ZERO,
                         nonce,
-                        CREATE_PROXY_GAS,
+                        TRIGGER_GAS,
                     )
                     .await
                 {
@@ -2501,8 +2469,11 @@ where
                         info!(
                             target: "based_rollup::driver",
                             %hash, nonce, user = %w.user,
-                            proxy_for = %proxy_original_address,
-                            "sent createCrossChainProxy"
+                            amount = %w.amount,
+                            rlp_tx_len = w.rlp_encoded_tx.len(),
+                            trigger = trigger_idx + 1,
+                            total_triggers = w.trigger_count,
+                            "sent executeL2TX withdrawal trigger"
                         );
                         trigger_tx_hashes.push(hash);
                         nonce += 1;
@@ -2511,160 +2482,8 @@ where
                         warn!(
                             target: "based_rollup::driver",
                             %err, nonce, user = %w.user,
-                            proxy_for = %proxy_original_address,
-                            "createCrossChainProxy failed — resetting nonce and aborting triggers"
+                            "executeL2TX withdrawal trigger failed — resetting nonce and aborting"
                         );
-                        if let Some(p) = self.proposer.as_mut() {
-                            let _ = p.reset_nonce();
-                        }
-                        return Err(err);
-                    }
-                }
-            } else {
-                info!(
-                    target: "based_rollup::driver",
-                    user = %w.user, %proxy_address,
-                    proxy_for = %proxy_original_address,
-                    "proxy already deployed — skipping createCrossChainProxy"
-                );
-            }
-
-            // Step 2: trigger consumption via proxy call.
-            // Simple withdrawals: empty data, value=0.
-            // Multi-call L2→L1: real calldata and value from the first L2→L1 call.
-            let trigger_calldata = w.trigger_calldata.clone();
-            let trigger_value = w.trigger_value;
-            info!(
-                target: "based_rollup::driver",
-                "trigger action will be: CALL(rollupId={}, destination={}, source={}, source_rollup=0, data_len={}, data_prefix=0x{})",
-                self.config.rollup_id, proxy_original_address, self.config.builder_address,
-                trigger_calldata.len(),
-                hex::encode(&trigger_calldata[..trigger_calldata.len().min(8)])
-            );
-            let proposer = self.proposer.as_ref().expect("checked above");
-            match proposer
-                .send_l1_tx_with_nonce(
-                    proxy_address,
-                    trigger_calldata,
-                    trigger_value,
-                    nonce,
-                    TRIGGER_GAS,
-                )
-                .await
-            {
-                Ok(hash) => {
-                    info!(
-                        target: "based_rollup::driver",
-                        %hash, nonce, user = %w.user,
-                        amount = %w.amount, %proxy_address,
-                        calldata_len = w.trigger_calldata.len(),
-                        trigger_value = %trigger_value,
-                        "sent withdrawal trigger"
-                    );
-                    trigger_tx_hashes.push(hash);
-                    nonce += 1;
-                }
-                Err(err) => {
-                    warn!(
-                        target: "based_rollup::driver",
-                        %err, nonce, user = %w.user,
-                        "withdrawal trigger failed — resetting nonce and aborting"
-                    );
-                    if let Some(p) = self.proposer.as_mut() {
-                        let _ = p.reset_nonce();
-                    }
-                    return Err(err);
-                }
-            }
-
-            // Send extra triggers for multi-call L2→L1 patterns.
-            // Each extra trigger calls a different proxy with its own calldata.
-            for (extra_source, extra_calldata, extra_value) in &w.extra_triggers {
-                let extra_proxy = {
-                    let compute_data =
-                        crate::cross_chain::IRollups::computeCrossChainProxyAddressCall {
-                            originalAddress: *extra_source,
-                            originalRollupId: U256::from(self.config.rollup_id),
-                        }
-                        .abi_encode();
-                    let l1_provider = self.get_l1_provider();
-                    let result = l1_provider
-                        .call(
-                            alloy_rpc_types::TransactionRequest::default()
-                                .to(self.config.rollups_address)
-                                .input(Bytes::from(compute_data).into()),
-                        )
-                        .await
-                        .map_err(|e| eyre::eyre!("compute proxy for extra trigger: {e}"))?;
-                    if result.len() >= 32 {
-                        Address::from_slice(&result[12..32])
-                    } else {
-                        continue;
-                    }
-                };
-
-                // Ensure proxy exists
-                let proposer = self.proposer.as_ref().expect("checked above");
-                if !proposer.has_code_at(extra_proxy).await {
-                    let create_data = crate::cross_chain::encode_create_proxy_calldata(
-                        *extra_source,
-                        self.config.rollup_id,
-                    );
-                    let proposer = self.proposer.as_ref().expect("checked above");
-                    match proposer
-                        .send_l1_tx_with_nonce(
-                            self.config.rollups_address,
-                            create_data,
-                            U256::ZERO,
-                            nonce,
-                            CREATE_PROXY_GAS,
-                        )
-                        .await
-                    {
-                        Ok(hash) => {
-                            info!(target: "based_rollup::driver", %hash, nonce, source = %extra_source,
-                                "sent createCrossChainProxy for extra trigger");
-                            trigger_tx_hashes.push(hash);
-                            nonce += 1;
-                        }
-                        Err(err) => {
-                            warn!(target: "based_rollup::driver", %err, "extra trigger createProxy failed");
-                            if let Some(p) = self.proposer.as_mut() {
-                                let _ = p.reset_nonce();
-                            }
-                            return Err(err);
-                        }
-                    }
-                }
-
-                info!(
-                    target: "based_rollup::driver",
-                    "extra trigger action will be: CALL(rollupId={}, destination={}, source={}, source_rollup=0, data_len={}, data_prefix=0x{})",
-                    self.config.rollup_id, extra_source, self.config.builder_address,
-                    extra_calldata.len(),
-                    hex::encode(&extra_calldata[..extra_calldata.len().min(8)])
-                );
-                let proposer = self.proposer.as_ref().expect("checked above");
-                match proposer
-                    .send_l1_tx_with_nonce(
-                        extra_proxy,
-                        extra_calldata.clone(),
-                        *extra_value,
-                        nonce,
-                        TRIGGER_GAS,
-                    )
-                    .await
-                {
-                    Ok(hash) => {
-                        info!(target: "based_rollup::driver",
-                            %hash, nonce, source = %extra_source,
-                            calldata_len = extra_calldata.len(),
-                            "sent extra withdrawal trigger");
-                        trigger_tx_hashes.push(hash);
-                        nonce += 1;
-                    }
-                    Err(err) => {
-                        warn!(target: "based_rollup::driver", %err, "extra trigger failed");
                         if let Some(p) = self.proposer.as_mut() {
                             let _ = p.reset_nonce();
                         }

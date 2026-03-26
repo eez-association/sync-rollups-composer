@@ -689,7 +689,7 @@ pub struct WithdrawalEntries {
 ///   Also used as the L1 proxy owner (proxy(source_address, rollup_id)) and as the
 ///   delivery source identity on L1.
 /// - `rollup_id`: our rollup's ID
-/// - `builder_address`: builder key that will trigger on L1
+/// - `rlp_encoded_tx`: RLP-encoded L2 transaction for the L2TX trigger on L1
 /// - `delivery_return_data`: return data from L1 simulation (empty for EOA/withdrawals)
 /// - `delivery_failed`: whether the L1 simulation reverted (false for withdrawals)
 #[allow(clippy::too_many_arguments)]
@@ -699,7 +699,7 @@ pub fn build_l2_to_l1_call_entries(
     value: U256,
     source_address: Address,
     rollup_id: u64,
-    builder_address: Address,
+    rlp_encoded_tx: Vec<u8>,
     delivery_return_data: Vec<u8>,
     delivery_failed: bool,
 ) -> WithdrawalEntries {
@@ -764,35 +764,36 @@ pub fn build_l2_to_l1_call_entries(
     ];
 
     // ── L1 deferred entries (nested format) ──
-    // Entry 1: Trigger CALL — matches what Rollups.executeCrossChainCall builds
-    // when proxy(source_address, rollup_id) is called with empty data and value=0.
+    // Entry 0: L2TX trigger — matches what Rollups.executeL2TX builds
+    // (Rollups.sol:307-331).
     //
-    // Rollups.sol action fields (Rollups.sol:280-290):
-    //   action.actionType = CALL
-    //   action.rollupId = proxyInfo.originalRollupId = rollup_id (proxy for our rollup)
-    //   action.destination = proxyInfo.originalAddress = source_address
-    //   action.value = msg.value = 0 (trigger sends no ETH)
-    //   action.data = callData = "" (proxy fallback passes msg.data which is empty)
-    //   action.sourceAddress = msg.sender in proxy fallback = builder_address
-    //     (builder calls proxy directly, so msg.sender = builder)
-    //   action.sourceRollup = MAINNET_ROLLUP_ID = 0 (L1 domain, hardcoded in Rollups.sol)
+    // Rollups.sol action fields:
+    //   action.actionType = L2TX
+    //   action.rollupId = rollupId (our L2 rollup ID)
+    //   action.destination = address(0)
+    //   action.value = 0
+    //   action.data = rlpEncodedTx (the RLP-encoded L2 transaction)
+    //   action.sourceAddress = address(0)
+    //   action.sourceRollup = MAINNET_ROLLUP_ID = 0
     //   action.scope = [] (empty)
     let l1_trigger_action = CrossChainAction {
-        action_type: CrossChainActionType::Call,
+        action_type: CrossChainActionType::L2Tx,
         rollup_id: rollup_id_u256,
-        destination: source_address,
-        value: U256::ZERO, // trigger sends 0 ETH
-        data: vec![],
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: rlp_encoded_tx,
         failed: false,
-        source_address: builder_address, // builder is msg.sender to L1 proxy
-        source_rollup: U256::ZERO,       // MAINNET_ROLLUP_ID = 0 (L1 domain)
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO, // MAINNET_ROLLUP_ID = 0
         scope: vec![],
     };
     let l1_trigger_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l1_trigger_action.to_sol_action(),
     ));
 
-    // nextAction for trigger CALL = delivery CALL (executes on L1 via _processCallAtScope)
+    // nextAction for L2TX trigger = delivery CALL (executes on L1 via _resolveScopes)
+    // Per spec: scope=[] (empty). _resolveScopes sees CALL with empty scope → enters
+    // _processCallAtScope directly to execute the delivery.
     // For withdrawals: sends ETH to user. For general calls: calls destination with data.
     let l1_delivery_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
@@ -803,7 +804,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_u256,
-        scope: vec![U256::ZERO],
+        scope: vec![],
     };
 
     // Entry 2: Delivery RESULT — matches what _processCallAtScope builds
@@ -1808,7 +1809,8 @@ pub fn bridge_creation_bytecode() -> Vec<u8> {
         let path = std::path::Path::new("contracts/out/Bridge.sol/Bridge.json");
         let bc = load_bytecode_from_artifact(path);
         if bc.is_empty() {
-            let alt = std::path::Path::new("contracts/sync-rollups-protocol/out/Bridge.sol/Bridge.json");
+            let alt =
+                std::path::Path::new("contracts/sync-rollups-protocol/out/Bridge.sol/Bridge.json");
             load_bytecode_from_artifact(alt)
         } else {
             bc
@@ -1843,10 +1845,11 @@ fn load_bytecode_from_artifact(path: &std::path::Path) -> Vec<u8> {
 // ──────────────────────────────────────────────
 
 sol! {
-    /// Rollups.createCrossChainProxy(address,uint256)
+    /// Rollups contract interface for proxy management and L2TX trigger.
     interface IRollups {
         function createCrossChainProxy(address originalAddress, uint256 originalRollupId) external returns (address);
         function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId) external view returns (address);
+        function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external returns (bytes memory);
     }
 }
 

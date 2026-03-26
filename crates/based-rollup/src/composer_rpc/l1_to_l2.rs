@@ -912,9 +912,9 @@ async fn simulate_l1_to_l2_call_on_l2(
                         rp.value,
                         rp.source_address,
                         rollup_id,
-                        Address::ZERO,
-                        vec![],
-                        false,
+                        vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
+                        vec![],     // delivery_return_data placeholder
+                        false,      // delivery_failed placeholder
                     );
                     all_placeholder_entries.extend(placeholder.l2_table_entries);
                 }
