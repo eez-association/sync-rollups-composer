@@ -38,6 +38,77 @@ use super::common::{
 /// The MAINNET_ROLLUP_ID — L1 source rollup is always 0.
 const MAINNET_ROLLUP_ID: u64 = 0;
 
+/// Decode a `0x`-prefixed 4-byte error selector into a human-readable name.
+///
+/// Uses compile-time selectors from `common.rs` sol! macro definitions.
+/// Returns `"unknown"` for unrecognized selectors.
+fn decode_error_selector_prefixed(selector: Option<&str>) -> &'static str {
+    use super::common::{
+        CALL_EXECUTION_FAILED_SELECTOR, ERROR_STRING_SELECTOR, ETHER_DELTA_MISMATCH_SELECTOR,
+        EXECUTION_NOT_FOUND_SELECTOR, INVALID_REVERT_DATA_SELECTOR, PROXY_CALL_FAILED_SELECTOR,
+        STATE_ALREADY_UPDATED_SELECTOR, STATE_ROOT_MISMATCH_SELECTOR, UNAUTHORIZED_PROXY_SELECTOR,
+        selector_hex_prefixed,
+    };
+
+    let sel = match selector {
+        Some(s) => s,
+        None => return "unknown",
+    };
+    if sel == selector_hex_prefixed(&EXECUTION_NOT_FOUND_SELECTOR) {
+        "ExecutionNotFound"
+    } else if sel == selector_hex_prefixed(&INVALID_REVERT_DATA_SELECTOR) {
+        "InvalidRevertData"
+    } else if sel == selector_hex_prefixed(&STATE_ALREADY_UPDATED_SELECTOR) {
+        "StateAlreadyUpdatedThisBlock"
+    } else if sel == selector_hex_prefixed(&STATE_ROOT_MISMATCH_SELECTOR) {
+        "StateRootMismatch"
+    } else if sel == selector_hex_prefixed(&ETHER_DELTA_MISMATCH_SELECTOR) {
+        "EtherDeltaMismatch"
+    } else if sel == selector_hex_prefixed(&CALL_EXECUTION_FAILED_SELECTOR) {
+        "CallExecutionFailed"
+    } else if sel == selector_hex_prefixed(&UNAUTHORIZED_PROXY_SELECTOR) {
+        "UnauthorizedProxy"
+    } else if sel == selector_hex_prefixed(&PROXY_CALL_FAILED_SELECTOR) {
+        "ProxyCallFailed(inner)"
+    } else if sel == selector_hex_prefixed(&ERROR_STRING_SELECTOR) {
+        "Error(string)"
+    } else {
+        "unknown"
+    }
+}
+
+/// Decode a bare (non-prefixed) 4-byte error selector into a human-readable name.
+///
+/// Uses compile-time selectors from `common.rs` sol! macro definitions.
+/// Returns `""` for unrecognized selectors.
+fn decode_error_selector_bare(selector: Option<&str>) -> &'static str {
+    use super::common::{
+        CALL_EXECUTION_FAILED_SELECTOR, ETHER_DELTA_MISMATCH_SELECTOR,
+        EXECUTION_NOT_FOUND_SELECTOR, INVALID_REVERT_DATA_SELECTOR, STATE_ALREADY_UPDATED_SELECTOR,
+        STATE_ROOT_MISMATCH_SELECTOR, selector_hex_bare,
+    };
+
+    let sel = match selector {
+        Some(s) => s,
+        None => return "",
+    };
+    if sel == selector_hex_bare(&EXECUTION_NOT_FOUND_SELECTOR) {
+        "ExecutionNotFound"
+    } else if sel == selector_hex_bare(&INVALID_REVERT_DATA_SELECTOR) {
+        "InvalidRevertData"
+    } else if sel == selector_hex_bare(&STATE_ALREADY_UPDATED_SELECTOR) {
+        "StateAlreadyUpdatedThisBlock"
+    } else if sel == selector_hex_bare(&STATE_ROOT_MISMATCH_SELECTOR) {
+        "StateRootMismatch"
+    } else if sel == selector_hex_bare(&ETHER_DELTA_MISMATCH_SELECTOR) {
+        "EtherDeltaMismatch"
+    } else if sel == selector_hex_bare(&CALL_EXECUTION_FAILED_SELECTOR) {
+        "CallExecutionFailed"
+    } else {
+        ""
+    }
+}
+
 /// Run the L1 RPC proxy server.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_l1_rpc_proxy(
@@ -508,6 +579,7 @@ async fn queue_independent_calls_l1_to_l2(
     detected_calls: &[DetectedInternalCall],
     effective_gas_price: u128,
     cross_chain_manager_address: Address,
+    rollup_id: u64,
 ) -> eyre::Result<Option<String>> {
     // 1. Run chained simulation to get correct per-call return data.
     let chained_results = simulate_chained_delivery_l1_to_l2(
@@ -515,6 +587,7 @@ async fn queue_independent_calls_l1_to_l2(
         l2_rpc_url,
         cross_chain_manager_address,
         detected_calls,
+        rollup_id,
     )
     .await;
 
@@ -645,6 +718,7 @@ struct DetectedInternalCall {
 ///
 /// Returns `(return_data, call_success)`. On simulation failure, returns
 /// `(vec![], true)` as a safe fallback (void return, success).
+#[allow(clippy::too_many_arguments)]
 async fn simulate_l1_to_l2_call_on_l2(
     client: &reqwest::Client,
     l2_rpc_url: &str,
@@ -653,6 +727,7 @@ async fn simulate_l1_to_l2_call_on_l2(
     data: &[u8],
     value: U256,
     source_address: Address,
+    rollup_id: u64,
 ) -> (Vec<u8>, bool) {
     // Step 1: Compute L2 proxy address for the source (L1 contract).
     // computeCrossChainProxyAddress(originalAddress, originalRollupId=0)
@@ -814,7 +889,6 @@ async fn simulate_l1_to_l2_call_on_l2(
         // loaded. Walk the trace to find failed proxy calls; if any are found, build
         // placeholder entries and retry with loadExecutionTable pre-loaded.
         if !cross_chain_manager_address.is_zero() {
-            let rollup_id = 1u64; // L2 rollup ID (same as used elsewhere in l1_proxy)
             let mut proxy_cache: HashMap<Address, Option<(Address, u64)>> = HashMap::new();
             let mut discovered = Vec::new();
             find_failed_proxy_calls_in_l2_trace(
@@ -859,13 +933,15 @@ async fn simulate_l1_to_l2_call_on_l2(
 
                 if !all_placeholder_entries.is_empty() {
                     // Query SYSTEM_ADDRESS from the CCM.
+                    // Uses typed ABI encoding via sol! macro — NEVER hardcode selectors.
                     let system_addr = {
+                        let sys_calldata = super::common::encode_system_address_calldata();
                         let sys_req = serde_json::json!({
                             "jsonrpc": "2.0",
                             "method": "eth_call",
                             "params": [{
                                 "to": format!("{cross_chain_manager_address}"),
-                                "data": "0xbe890557"
+                                "data": sys_calldata
                             }, "latest"],
                             "id": 99970
                         });
@@ -1016,6 +1092,7 @@ async fn simulate_chained_delivery_l1_to_l2(
     l2_rpc_url: &str,
     cross_chain_manager_address: Address,
     calls: &[DetectedInternalCall],
+    rollup_id: u64,
 ) -> Vec<(Vec<u8>, bool)> {
     if calls.is_empty() {
         return vec![];
@@ -1055,6 +1132,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                     l2_rpc_url,
                     cross_chain_manager_address,
                     calls,
+                    rollup_id,
                 )
                 .await;
             }
@@ -1072,6 +1150,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                     l2_rpc_url,
                     cross_chain_manager_address,
                     calls,
+                    rollup_id,
                 )
                 .await;
             }
@@ -1087,6 +1166,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                 l2_rpc_url,
                 cross_chain_manager_address,
                 calls,
+                rollup_id,
             )
             .await;
         }
@@ -1106,6 +1186,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                         l2_rpc_url,
                         cross_chain_manager_address,
                         calls,
+                        rollup_id,
                     )
                     .await;
                 }
@@ -1116,6 +1197,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                     l2_rpc_url,
                     cross_chain_manager_address,
                     calls,
+                    rollup_id,
                 )
                 .await;
             }
@@ -1167,6 +1249,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                 l2_rpc_url,
                 cross_chain_manager_address,
                 calls,
+                rollup_id,
             )
             .await;
         }
@@ -1184,6 +1267,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                 l2_rpc_url,
                 cross_chain_manager_address,
                 calls,
+                rollup_id,
             )
             .await;
         }
@@ -1231,6 +1315,7 @@ async fn simulate_chained_delivery_l1_to_l2(
                 l2_rpc_url,
                 cross_chain_manager_address,
                 calls,
+                rollup_id,
             )
             .await;
         }
@@ -1269,6 +1354,7 @@ async fn fallback_per_call_simulation(
     l2_rpc_url: &str,
     cross_chain_manager_address: Address,
     calls: &[DetectedInternalCall],
+    rollup_id: u64,
 ) -> Vec<(Vec<u8>, bool)> {
     tracing::info!(
         target: "based_rollup::l1_proxy",
@@ -1285,6 +1371,7 @@ async fn fallback_per_call_simulation(
             &call.calldata,
             call.value,
             call.source_address,
+            rollup_id,
         )
         .await;
         results.push((data, success));
@@ -1313,8 +1400,9 @@ impl super::trace::ProxyLookup for L1ProxyLookup<'_> {
     > {
         Box::pin(async move {
             // authorizedProxies(address) — query Rollups.sol for proxy identity.
+            // Uses typed ABI encoding via sol! macro — NEVER hardcode selectors.
             // Uses eth_call_view (read-only view call, not tracing — appropriate per spec).
-            let calldata = format!("0x360d95b6{:0>64}", hex::encode(address.as_slice()));
+            let calldata = super::common::encode_authorized_proxies_calldata(address);
 
             let hex_data = eth_call_view(
                 self.client,
@@ -1517,7 +1605,11 @@ async fn trace_and_detect_internal_calls(
         || trace_result
             .get("output")
             .and_then(|v| v.as_str())
-            .map(|s| s.starts_with("0x08c379a0")) // Error(string) selector
+            .map(|s| {
+                s.starts_with(&super::common::selector_hex_prefixed(
+                    &super::common::ERROR_STRING_SELECTOR,
+                ))
+            }) // Error(string) selector
             .unwrap_or(false);
 
     // Walk the trace tree using the generic trace::walk_trace_tree.
@@ -1546,6 +1638,7 @@ async fn trace_and_detect_internal_calls(
                 &call.calldata,
                 call.value,
                 call.source_address,
+                rollup_id,
             )
             .await;
             tracing::info!(
@@ -1943,31 +2036,15 @@ async fn trace_and_detect_internal_calls(
                         .and_then(|v| v.as_array())
                         .map(|a| a.len())
                         .unwrap_or(0);
-                    // Decode known Rollups.sol error selectors from output
-                    let decoded_error = match user_output_raw.get(..10).or(user_output_raw.get(..))
-                    {
-                        Some("0xed6bc750") => "ExecutionNotFound",
-                        Some("0xd4bae993") => "InvalidRevertData",
-                        Some("0x622d0c4a") => "StateAlreadyUpdatedThisBlock",
-                        Some("0x1b2075cd") => "StateRootMismatch",
-                        Some("0xde315ee4") => "EtherDeltaMismatch",
-                        Some("0x6b3b6576") => "CallExecutionFailed",
-                        Some("0xe53dc94a") => "UnauthorizedProxy",
-                        Some("0x096aa082") => "CallReverted(inner)",
-                        _ => "unknown",
-                    };
-                    // If CallReverted, decode inner error
+                    // Decode known Rollups.sol error selectors from output.
+                    // Selectors derived at compile time via sol! macro — NEVER hardcode hex.
+                    let decoded_error = decode_error_selector_prefixed(
+                        user_output_raw.get(..10).or(user_output_raw.get(..)),
+                    );
+                    // If ProxyCallFailed, decode inner error
                     let inner_error = if user_output_raw.len() > 138 {
                         // Inner error selector at bytes 68..72 (hex chars 136..144, after 0x prefix = 138..146)
-                        match user_output_raw.get(138..146) {
-                            Some("ed6bc750") => "ExecutionNotFound",
-                            Some("d4bae993") => "InvalidRevertData",
-                            Some("622d0c4a") => "StateAlreadyUpdatedThisBlock",
-                            Some("1b2075cd") => "StateRootMismatch",
-                            Some("de315ee4") => "EtherDeltaMismatch",
-                            Some("6b3b6576") => "CallExecutionFailed",
-                            _ => "",
-                        }
+                        decode_error_selector_bare(user_output_raw.get(138..146))
                     } else {
                         ""
                     };
@@ -2090,6 +2167,7 @@ async fn trace_and_detect_internal_calls(
                                 &call.calldata,
                                 call.value,
                                 call.source_address,
+                                rollup_id,
                             )
                             .await;
                             call.return_data = ret_data;
@@ -2160,6 +2238,7 @@ async fn trace_and_detect_internal_calls(
             &detected_calls,
             effective_gas_price,
             cross_chain_manager_address,
+            rollup_id,
         )
         .await;
     }
@@ -2247,7 +2326,8 @@ async fn is_cross_chain_proxy_on_l1(
     address: Address,
     rollups_address: Address,
 ) -> bool {
-    let calldata = format!("0x360d95b6{:0>64}", hex::encode(address.as_slice()));
+    // authorizedProxies(address) — typed ABI encoding via sol! macro — NEVER hardcode selectors.
+    let calldata = super::common::encode_authorized_proxies_calldata(address);
     let hex_data = match eth_call_view(client, l1_rpc_url, rollups_address, &calldata).await {
         Some(hex) => hex,
         None => return false,

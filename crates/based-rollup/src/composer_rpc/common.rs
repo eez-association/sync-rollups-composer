@@ -4,10 +4,145 @@
 //! functions used by both L1→L2 and L2→L1 composer RPC modules.
 
 use alloy_primitives::{Address, U256};
+use alloy_sol_types::sol;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::{Response, StatusCode};
 use serde_json::Value;
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  ABI bindings via sol! macro — selectors derived at compile time
+// ──────────────────────────────────────────────────────────────────────────────
+
+sol! {
+    /// Read-only view functions on the cross-chain manager / Rollups contracts.
+    /// Used for proxy identity queries (authorizedProxies), system address lookups,
+    /// and proxy calldata detection (executeOnBehalf).
+    interface IProxyRegistry {
+        /// Query proxy identity. Returns (originalAddress, originalRollupId) for
+        /// registered proxies; zero address if not registered.
+        function authorizedProxies(address proxy)
+            external
+            view
+            returns (address originalAddress, uint64 originalRollupId);
+
+        /// The system address authorized for admin operations (CCM getter).
+        function SYSTEM_ADDRESS() external view returns (address);
+
+        /// CrossChainProxy.executeOnBehalf — used to unwrap proxy calldata.
+        function executeOnBehalf(address destination, bytes calldata data) external payable;
+    }
+}
+
+sol! {
+    /// Known Rollups.sol / CrossChainManagerL2 error types for debug log decoding.
+    /// Selectors are derived at compile time — NEVER hardcode hex selectors.
+    interface IRollupsErrors {
+        error ExecutionNotFound();
+        error InvalidRevertData();
+        error EtherDeltaMismatch();
+        error StateAlreadyUpdatedThisBlock();
+        error StateRootMismatch();
+        error CallExecutionFailed();
+        error UnauthorizedProxy();
+    }
+}
+
+sol! {
+    /// Bridge.sol error for wrapped proxy call failures.
+    interface IBridgeErrors {
+        error ProxyCallFailed(bytes reason);
+    }
+}
+
+sol! {
+    /// Standard Solidity revert error — `Error(string)`.
+    interface ISolidityErrors {
+        error Error(string);
+    }
+}
+
+/// 4-byte selector for `authorizedProxies(address)`.
+/// Used indirectly via `encode_authorized_proxies_calldata()`.
+#[allow(dead_code)]
+pub(crate) const AUTHORIZED_PROXIES_SELECTOR: [u8; 4] =
+    <IProxyRegistry::authorizedProxiesCall as alloy_sol_types::SolCall>::SELECTOR;
+
+/// 4-byte selector for `SYSTEM_ADDRESS()`.
+/// Used indirectly via `encode_system_address_calldata()`.
+#[allow(dead_code)]
+pub(crate) const SYSTEM_ADDRESS_SELECTOR: [u8; 4] =
+    <IProxyRegistry::SYSTEM_ADDRESSCall as alloy_sol_types::SolCall>::SELECTOR;
+
+/// 4-byte selector for `executeOnBehalf(address,bytes)`.
+pub(crate) const EXECUTE_ON_BEHALF_SELECTOR: [u8; 4] =
+    <IProxyRegistry::executeOnBehalfCall as alloy_sol_types::SolCall>::SELECTOR;
+
+/// 4-byte selector for `Error(string)` — standard Solidity revert.
+pub(crate) const ERROR_STRING_SELECTOR: [u8; 4] =
+    <ISolidityErrors::Error as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `ExecutionNotFound()`.
+pub(crate) const EXECUTION_NOT_FOUND_SELECTOR: [u8; 4] =
+    <IRollupsErrors::ExecutionNotFound as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `InvalidRevertData()`.
+pub(crate) const INVALID_REVERT_DATA_SELECTOR: [u8; 4] =
+    <IRollupsErrors::InvalidRevertData as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `EtherDeltaMismatch()`.
+pub(crate) const ETHER_DELTA_MISMATCH_SELECTOR: [u8; 4] =
+    <IRollupsErrors::EtherDeltaMismatch as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `StateAlreadyUpdatedThisBlock()`.
+pub(crate) const STATE_ALREADY_UPDATED_SELECTOR: [u8; 4] =
+    <IRollupsErrors::StateAlreadyUpdatedThisBlock as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `StateRootMismatch()`.
+pub(crate) const STATE_ROOT_MISMATCH_SELECTOR: [u8; 4] =
+    <IRollupsErrors::StateRootMismatch as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `CallExecutionFailed()`.
+pub(crate) const CALL_EXECUTION_FAILED_SELECTOR: [u8; 4] =
+    <IRollupsErrors::CallExecutionFailed as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `UnauthorizedProxy()`.
+pub(crate) const UNAUTHORIZED_PROXY_SELECTOR: [u8; 4] =
+    <IRollupsErrors::UnauthorizedProxy as alloy_sol_types::SolError>::SELECTOR;
+
+/// 4-byte selector for `ProxyCallFailed(bytes)`.
+pub(crate) const PROXY_CALL_FAILED_SELECTOR: [u8; 4] =
+    <IBridgeErrors::ProxyCallFailed as alloy_sol_types::SolError>::SELECTOR;
+
+/// Build a `0x`-prefixed hex string for `authorizedProxies(address)` calldata.
+///
+/// Uses typed ABI encoding via `sol!` macro — NEVER hardcode selectors.
+pub(crate) fn encode_authorized_proxies_calldata(address: Address) -> String {
+    use alloy_sol_types::SolCall;
+    let calldata = IProxyRegistry::authorizedProxiesCall { proxy: address }.abi_encode();
+    format!("0x{}", hex::encode(&calldata))
+}
+
+/// Build a `0x`-prefixed hex string for `SYSTEM_ADDRESS()` calldata.
+///
+/// Uses typed ABI encoding via `sol!` macro — NEVER hardcode selectors.
+pub(crate) fn encode_system_address_calldata() -> String {
+    use alloy_sol_types::SolCall;
+    let calldata = IProxyRegistry::SYSTEM_ADDRESSCall {}.abi_encode();
+    format!("0x{}", hex::encode(&calldata))
+}
+
+/// Format a 4-byte selector as a `0x`-prefixed hex string for matching against
+/// trace output values (e.g., `"0xed6bc750"`).
+pub(crate) fn selector_hex_prefixed(sel: &[u8; 4]) -> String {
+    format!("0x{}", hex::encode(sel))
+}
+
+/// Format a 4-byte selector as a non-prefixed hex string for matching against
+/// inner error data (e.g., `"ed6bc750"`).
+pub(crate) fn selector_hex_bare(sel: &[u8; 4]) -> String {
+    hex::encode(sel)
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  JSON-RPC parsing
@@ -250,8 +385,8 @@ pub(crate) async fn detect_cross_chain_proxy_on_l2(
     address: Address,
     ccm_address: Address,
 ) -> Option<(Address, u64)> {
-    // authorizedProxies(address) — selector 0x360d95b6
-    let calldata = format!("0x360d95b6{:0>64}", hex::encode(address.as_slice()));
+    // authorizedProxies(address) — typed ABI encoding via sol! macro
+    let calldata = encode_authorized_proxies_calldata(address);
 
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -389,9 +524,9 @@ pub async fn find_failed_proxy_calls_in_l2_trace(
                             let mut input_bytes = hex::decode(input_clean).unwrap_or_default();
 
                             // Strip executeOnBehalf(address,bytes) wrapper if present.
-                            // executeOnBehalf selector = 0x532f0839
+                            // Selector derived via sol! macro — NEVER hardcode.
                             if input_bytes.len() >= 100
-                                && input_bytes[..4] == [0x53, 0x2f, 0x08, 0x39]
+                                && input_bytes[..4] == EXECUTE_ON_BEHALF_SELECTOR
                             {
                                 // ABI decode: executeOnBehalf(address dest, bytes data)
                                 // Skip: selector(4) + address(32) + offset(32) = 68

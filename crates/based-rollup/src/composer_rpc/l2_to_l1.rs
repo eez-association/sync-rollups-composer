@@ -913,16 +913,18 @@ async fn enrich_return_calls_via_l2_trace(
                                 if !all_placeholder_entries.is_empty() {
                                     // Query SYSTEM_ADDRESS from the CCM.
                                     let system_addr = {
+                                        // SYSTEM_ADDRESS() — typed ABI encoding via sol! macro — NEVER hardcode selectors.
+                                        let sys_calldata =
+                                            super::common::encode_system_address_calldata();
                                         let sys_req = serde_json::json!({
                                             "jsonrpc": "2.0",
                                             "method": "eth_call",
                                             "params": [{
                                                 "to": format!("{cross_chain_manager_address}"),
-                                                "data": "0xbe890557"
+                                                "data": sys_calldata
                                             }, "latest"],
                                             "id": 99957
                                         });
-                                        // 0xbe890557 = SYSTEM_ADDRESS() selector
                                         if let Ok(r) =
                                             client.post(l2_rpc_url).json(&sys_req).send().await
                                         {
@@ -1386,17 +1388,18 @@ async fn try_chained_l2_enrichment(
     }
 
     // Query SYSTEM_ADDRESS from the CCM.
+    // Uses typed ABI encoding via sol! macro — NEVER hardcode selectors.
     let system_addr = {
+        let sys_calldata = super::common::encode_system_address_calldata();
         let sys_req = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "eth_call",
             "params": [{
                 "to": format!("{cross_chain_manager_address}"),
-                "data": "0xbe890557"
+                "data": sys_calldata
             }, "latest"],
             "id": 99961
         });
-        // 0xbe890557 = SYSTEM_ADDRESS() selector
         if let Ok(r) = client.post(l2_rpc_url).json(&sys_req).send().await {
             if let Ok(b) = r.json::<Value>().await {
                 b.get("result").and_then(|v| v.as_str()).and_then(|s| {
@@ -3319,9 +3322,9 @@ async fn walk_trigger_trace_for_return_calls(
                                 // encoding instead of raw msg.data when the node is at the
                                 // Rollups→proxy→executeCrossChainCall level rather than the
                                 // caller→proxy level.
-                                // executeOnBehalf selector = 0x532f0839
+                                // Selector derived via sol! macro — NEVER hardcode.
                                 if input_bytes.len() > 100
-                                    && input_bytes[..4] == [0x53, 0x2f, 0x08, 0x39]
+                                    && input_bytes[..4] == super::common::EXECUTE_ON_BEHALF_SELECTOR
                                 {
                                     // ABI decode: executeOnBehalf(address dest, bytes data)
                                     // Skip: selector(4) + address(32) + offset(32) = 68
@@ -3410,8 +3413,8 @@ async fn detect_cross_chain_proxy_on_l1(
     address: Address,
     rollups_address: Address,
 ) -> Option<(Address, u64)> {
-    // authorizedProxies(address) — selector 0x360d95b6
-    let calldata = format!("0x360d95b6{:0>64}", hex::encode(address.as_slice()));
+    // authorizedProxies(address) — typed ABI encoding via sol! macro — NEVER hardcode selectors.
+    let calldata = super::common::encode_authorized_proxies_calldata(address);
 
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -4582,14 +4585,15 @@ async fn simulate_l2_return_call_delivery(
     // function doesn't. Use the existing iterative discovery pattern: query SYSTEM_ADDRESS
     // from the CCM, or use a known builder address.
     // For now, query it via eth_call.
+    // SYSTEM_ADDRESS() — typed ABI encoding via sol! macro — NEVER hardcode selectors.
     let system_addr = {
+        let sys_calldata = super::common::encode_system_address_calldata();
         let sys_req = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "eth_call",
-            "params": [{"to": format!("{ccm_address}"), "data": "0xbe890557"}, "latest"],
+            "params": [{"to": format!("{ccm_address}"), "data": sys_calldata}, "latest"],
             "id": 99969
         });
-        // 0xbe890557 = SYSTEM_ADDRESS() selector
         let sys_addr = if let Ok(resp) = client.post(l2_rpc_url).json(&sys_req).send().await {
             if let Ok(body) = resp.json::<Value>().await {
                 body.get("result").and_then(|v| v.as_str()).and_then(|s| {
