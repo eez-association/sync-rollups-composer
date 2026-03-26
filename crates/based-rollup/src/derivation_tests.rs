@@ -266,6 +266,7 @@ fn test_commit_batch_not_called_preserves_state() {
             transactions: Bytes::new(),
             is_empty: true,
             execution_entries: vec![],
+            filtering: None,
         }],
         cursor_update: CursorUpdate {
             last_processed_l1_block: 1600,

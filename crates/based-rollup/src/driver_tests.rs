@@ -937,6 +937,7 @@ fn test_gap_fill_block_at_block_1_uses_deployment_context() {
         transactions: Bytes::new(),
         is_empty: true,
         execution_entries: vec![],
+        filtering: None,
     };
 
     assert!(gap_block.is_empty);
@@ -995,6 +996,7 @@ fn test_gap_fill_block_still_checks_l1_context() {
         transactions: Bytes::new(),
         is_empty: true,
         execution_entries: vec![],
+        filtering: None,
     };
 
     // Gap-fill blocks are identified by B256::ZERO state root
@@ -1448,6 +1450,7 @@ fn test_gap_fill_l1_context_mismatch_detected() {
         transactions: Bytes::new(),
         is_empty: true,
         execution_entries: vec![],
+        filtering: None,
     };
 
     // The derived L1 context (95) differs from what the builder would have used (100).

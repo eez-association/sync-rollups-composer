@@ -48,12 +48,34 @@ pub struct DerivedBlock {
     pub l1_info: L1BlockInfo,
     /// State root submitted by the builder (for verification).
     pub state_root: B256,
-    /// Transactions from the postBatch callData.
+    /// Transactions from the postBatch callData (may be unfiltered if
+    /// `filtering` is `Some` — the driver applies §4f filtering using
+    /// receipt-based L2→L1 tx identification before execution).
     pub transactions: Bytes,
     /// Whether this was an empty submission (no transactions).
     pub is_empty: bool,
     /// Cross-chain execution entries to load into CrossChainManagerL2.
     pub execution_entries: Vec<CrossChainExecutionEntry>,
+    /// Deferred §4f filtering metadata — present when unconsumed entries
+    /// require the driver to filter protocol txs before execution.
+    /// `None` means no filtering needed (all entries consumed or no entries).
+    pub filtering: Option<DeferredFiltering>,
+}
+
+/// Metadata for §4f protocol tx filtering, computed by derivation from L1 data.
+///
+/// The driver uses this together with receipt-based L2→L1 tx identification
+/// to filter unconsumed cross-chain txs before block execution.
+#[derive(Debug, Clone)]
+pub struct DeferredFiltering {
+    /// Number of `executeRemoteCall` (deposit) txs to keep (consumed prefix count).
+    pub consumed_deposit_count: usize,
+    /// Number of unconsumed deposit entries (for logging).
+    pub unconsumed_deposit_count: usize,
+    /// Number of L2→L1 cross-chain txs to keep (consumed prefix count).
+    /// This is `total_l2_to_l1_txs - unconsumed_withdrawal_pair_count`, where
+    /// `total_l2_to_l1_txs` is determined at filtering time from receipts.
+    pub unconsumed_withdrawal_pair_count: usize,
 }
 
 /// A batch of derived blocks together with the cursor state that should be
@@ -520,6 +542,7 @@ impl DerivationPipeline {
                             transactions: Bytes::new(),
                             is_empty: true,
                             execution_entries: vec![],
+                            filtering: None,
                         });
                     }
                 }
@@ -536,13 +559,14 @@ impl DerivationPipeline {
                     vec![]
                 };
 
-                // §4f protocol tx filtering — unified for deposits and withdrawals.
+                // §4f protocol tx filtering — deferred to the driver.
                 //
-                // When unconsumed entries exist, filter both unconsumed
-                // `executeRemoteCall` (deposit) and `bridgeEther(0)` (withdrawal)
-                // txs from the block's callData. Uses a single `filter_block_entries`
-                // call with independent prefix counts for each type.
-                let effective_transactions = if has_unconsumed_entries && i == 0 {
+                // When unconsumed entries exist, compute filtering metadata
+                // (consumed deposit count, unconsumed withdrawal pair count)
+                // from L1 entry data. The actual filtering is performed by the
+                // driver using receipt-based L2→L1 tx identification, which
+                // eliminates Bridge-specific selector dependencies.
+                let filtering = if has_unconsumed_entries && i == 0 {
                     // Count unconsumed entries by walking deferred entries in pairs.
                     // Withdrawal entries come as CALL+RESULT pairs (nested format).
                     // is_withdrawal_entry() only identifies the CALL half; the RESULT
@@ -617,50 +641,23 @@ impl DerivationPipeline {
                     let consumed_deposit_count =
                         total_execute.saturating_sub(unconsumed_deposit_count);
 
-                    // Count total Bridge withdrawal txs (bridgeEther/bridgeTokens with rollupId=0)
-                    let total_withdrawals = {
-                        let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
-                            alloy_rlp::Decodable::decode(&mut transactions.as_ref())
-                                .unwrap_or_default();
-                        txs.iter()
-                            .filter(|tx| {
-                                cross_chain::is_bridge_withdrawal(tx, self.config.bridge_l2_address)
-                            })
-                            .count()
-                    };
-                    let consumed_withdrawal_count =
-                        total_withdrawals.saturating_sub(unconsumed_withdrawal_pair_count);
-
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,
                         %l1_block,
                         consumed_deposit_count,
                         unconsumed_deposit_count,
-                        consumed_withdrawal_count,
                         unconsumed_withdrawal_pair_count,
-                        "filtering unconsumed txs from block (§4f unified)"
+                        "§4f filtering deferred to driver (receipt-based)"
                     );
 
-                    match cross_chain::filter_block_entries(
-                        transactions,
-                        self.config.cross_chain_manager_address,
-                        self.config.bridge_l2_address,
+                    Some(DeferredFiltering {
                         consumed_deposit_count,
-                        consumed_withdrawal_count,
-                    ) {
-                        Ok(filtered) => filtered,
-                        Err(err) => {
-                            warn!(
-                                target: "based_rollup::derivation",
-                                %err,
-                                "failed to filter block entries — using original"
-                            );
-                            transactions.clone()
-                        }
-                    }
+                        unconsumed_deposit_count,
+                        unconsumed_withdrawal_pair_count,
+                    })
                 } else {
-                    transactions.clone()
+                    None
                 };
                 let effective_block_state_root = state_root;
 
@@ -669,9 +666,10 @@ impl DerivationPipeline {
                     l2_timestamp,
                     l1_info: l1_info.clone(),
                     state_root: effective_block_state_root,
-                    transactions: effective_transactions,
+                    transactions: transactions.clone(),
                     is_empty,
                     execution_entries,
+                    filtering,
                 });
 
                 // Update local tracking for gap-fill and L1 context

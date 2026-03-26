@@ -1000,13 +1000,17 @@ where
                 continue;
             }
 
+            // §4f deferred filtering: if derivation flagged this block as needing
+            // filtering, apply it now using receipt-based L2→L1 tx identification.
+            let effective_transactions = self.apply_deferred_filtering(block)?;
+
             let built = self
                 .build_and_insert_block(
                     block.l2_block_number,
                     block.l2_timestamp,
                     block.l1_info.l1_block_hash,
                     block.l1_info.l1_block_number,
-                    &block.transactions,
+                    &effective_transactions,
                 )
                 .await?;
 
@@ -1066,13 +1070,15 @@ where
                     is_empty = block.is_empty,
                     "another builder submitted this block, applying"
                 );
+                // §4f deferred filtering: apply receipt-based filtering if needed.
+                let effective_transactions = self.apply_deferred_filtering(block)?;
                 let _ = self
                     .build_and_insert_block(
                         block.l2_block_number,
                         block.l2_timestamp,
                         block.l1_info.l1_block_hash,
                         block.l1_info.l1_block_number,
-                        &block.transactions,
+                        &effective_transactions,
                     )
                     .await?;
                 continue;
@@ -2871,13 +2877,16 @@ where
                 continue;
             }
 
+            // §4f deferred filtering: apply receipt-based filtering if needed.
+            let effective_transactions = self.apply_deferred_filtering(block)?;
+
             let built = self
                 .build_and_insert_block(
                     block.l2_block_number,
                     block.l2_timestamp,
                     block.l1_info.l1_block_hash,
                     block.l1_info.l1_block_number,
-                    &block.transactions,
+                    &effective_transactions,
                 )
                 .await?;
 
@@ -3586,6 +3595,75 @@ where
         Ok(())
     }
 
+    /// Apply deferred §4f protocol tx filtering to a derived block.
+    ///
+    /// When derivation flags a block with `DeferredFiltering` metadata (unconsumed
+    /// entries exist), this method:
+    /// 1. Trial-executes the block to get receipts
+    /// 2. Scans receipts for `CrossChainCallExecuted` events to identify L2→L1 tx indices
+    /// 3. Applies prefix-counting filter using the generic `filter_block_entries`
+    ///
+    /// Returns the effective (filtered) transaction bytes. If no filtering is needed
+    /// (`block.filtering` is `None`), returns the original transactions unchanged.
+    fn apply_deferred_filtering(&self, block: &crate::derivation::DerivedBlock) -> Result<Bytes> {
+        let Some(ref filtering) = block.filtering else {
+            return Ok(block.transactions.clone());
+        };
+
+        // Trial-execute with full tx set to extract L2→L1 tx indices from receipts.
+        let parent_block_number = block.l2_block_number.saturating_sub(1);
+        let l2_to_l1_indices: std::collections::HashSet<usize> =
+            if filtering.unconsumed_withdrawal_pair_count > 0 {
+                self.extract_l2_to_l1_tx_indices_via_receipts(
+                    parent_block_number,
+                    block.l2_timestamp,
+                    block.l1_info.l1_block_hash,
+                    block.l1_info.l1_block_number,
+                    &block.transactions,
+                )
+                .wrap_err("failed to extract L2→L1 tx indices for §4f filtering")?
+                .into_iter()
+                .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
+        // Compute consumed L2→L1 count from total - unconsumed
+        let total_l2_to_l1 = l2_to_l1_indices.len();
+        let consumed_l2_to_l1_count =
+            total_l2_to_l1.saturating_sub(filtering.unconsumed_withdrawal_pair_count);
+
+        info!(
+            target: "based_rollup::driver",
+            l2_block = block.l2_block_number,
+            consumed_deposit_count = filtering.consumed_deposit_count,
+            unconsumed_deposit_count = filtering.unconsumed_deposit_count,
+            consumed_l2_to_l1_count,
+            unconsumed_withdrawal_pair_count = filtering.unconsumed_withdrawal_pair_count,
+            total_l2_to_l1,
+            "applying §4f filtering (receipt-based)"
+        );
+
+        match crate::cross_chain::filter_block_entries(
+            &block.transactions,
+            self.config.cross_chain_manager_address,
+            filtering.consumed_deposit_count,
+            consumed_l2_to_l1_count,
+            &l2_to_l1_indices,
+        ) {
+            Ok(filtered) => Ok(filtered),
+            Err(err) => {
+                warn!(
+                    target: "based_rollup::driver",
+                    %err,
+                    l2_block = block.l2_block_number,
+                    "failed to apply §4f filtering — using original transactions"
+                );
+                Ok(block.transactions.clone())
+            }
+        }
+    }
+
     /// Compute the state root for a block built with the given transactions.
     /// Uses an `isolated_clone` of the evm_config. The block is built on a fresh
     /// state snapshot of the parent with the same transactions as the speculative block.
@@ -3660,6 +3738,91 @@ where
         Ok(outcome.block.sealed_block().sealed_header().state_root())
     }
 
+    /// Trial-execute a block and extract L2→L1 cross-chain tx indices from receipts.
+    ///
+    /// Executes the full unfiltered block to get receipts, then scans for
+    /// `CrossChainCallExecuted` events emitted by the CCM. Returns the set of
+    /// tx indices that produced such events — these are the L2→L1 cross-chain txs.
+    ///
+    /// This is the generic replacement for Bridge-selector-based identification:
+    /// any contract calling through a CrossChainProxy produces this event,
+    /// whether it's bridgeEther, bridgeTokens, or any future cross-chain contract.
+    fn extract_l2_to_l1_tx_indices_via_receipts(
+        &self,
+        parent_block_number: u64,
+        timestamp: u64,
+        l1_block_hash: B256,
+        l1_block_number: u64,
+        encoded_transactions: &Bytes,
+    ) -> Result<Vec<usize>> {
+        use reth_evm::execute::BlockBuilder;
+
+        if encoded_transactions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let parent_header = self
+            .l2_provider
+            .sealed_header(parent_block_number)
+            .wrap_err("failed to get parent header for receipt extraction")?
+            .ok_or_eyre("parent header not found for receipt extraction")?;
+
+        let state_provider = self
+            .l2_provider
+            .state_by_block_hash(parent_header.hash())
+            .wrap_err("failed to get state provider for receipt extraction")?;
+
+        let state_db = StateProviderDatabase::new(state_provider.as_ref());
+        let mut db = State::builder()
+            .with_database(state_db)
+            .with_bundle_update()
+            .build();
+
+        let prev_randao = B256::from(alloy_primitives::U256::from(l1_block_number));
+        let attributes = NextBlockEnvAttributes {
+            timestamp,
+            suggested_fee_recipient: self.config.builder_address,
+            prev_randao,
+            gas_limit: calc_gas_limit(parent_header.gas_limit(), DESIRED_GAS_LIMIT),
+            parent_beacon_block_root: Some(l1_block_hash),
+            withdrawals: Some(Default::default()),
+            extra_data: Default::default(),
+        };
+
+        let sim_evm_config = self.evm_config.isolated_clone();
+
+        let mut builder = sim_evm_config
+            .builder_for_next_block(&mut db, &parent_header, attributes)
+            .wrap_err("failed to create block builder for receipt extraction")?;
+
+        builder
+            .apply_pre_execution_changes()
+            .wrap_err("pre-execution changes failed for receipt extraction")?;
+
+        let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
+            alloy_rlp::Decodable::decode(&mut encoded_transactions.as_ref())
+                .wrap_err("failed to RLP-decode transactions for receipt extraction")?;
+
+        for tx in txs {
+            let recovered = SignedTransaction::try_into_recovered(tx)
+                .map_err(|_| eyre::eyre!("failed to recover signer for receipt extraction tx"))?;
+            // Ignore execution errors — some txs may fail (e.g., reverts)
+            // but we still need to process subsequent txs to identify all
+            // L2→L1 calls in the block.
+            let _ = builder.execute_transaction(recovered);
+        }
+
+        let outcome = builder
+            .finish(state_provider.as_ref())
+            .wrap_err("block builder finish failed for receipt extraction")?;
+
+        let receipts = &outcome.execution_result.receipts;
+        Ok(crate::cross_chain::extract_l2_to_l1_tx_indices(
+            receipts,
+            self.config.cross_chain_manager_address,
+        ))
+    }
+
     /// Compute unified intermediate state roots for both deposit and withdrawal
     /// entry chained deltas in a single D+W+1 root chain.
     ///
@@ -3667,6 +3830,9 @@ where
     /// and filters them with `filter_block_entries` for each prefix. This
     /// guarantees byte-identical txs between the intermediate root computation
     /// and what derivation will execute.
+    ///
+    /// L2→L1 txs are identified generically via trial execution + receipt scanning
+    /// for `CrossChainCallExecuted` events, eliminating Bridge-specific selectors.
     ///
     /// Root chain:
     /// ```text
@@ -3697,6 +3863,23 @@ where
 
         let mut roots = Vec::with_capacity(total + 1);
 
+        // Extract L2→L1 tx indices from receipts via trial execution.
+        // This replaces Bridge-selector-based identification (bridgeEther/bridgeTokens).
+        let l2_to_l1_indices: std::collections::HashSet<usize> = if num_withdrawals > 0 {
+            self.extract_l2_to_l1_tx_indices_via_receipts(
+                parent_block_number,
+                timestamp,
+                l1_block_hash,
+                l1_block_number,
+                block_encoded_txs,
+            )
+            .wrap_err("failed to extract L2→L1 tx indices for intermediate roots")?
+            .into_iter()
+            .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         // Count total executeRemoteCall txs in the block. The RPC trigger entries
         // are the LAST `num_deposits` of these. L1-fetched trigger
         // entries (base) come first and are always kept.
@@ -3720,15 +3903,15 @@ where
         };
 
         // Deposit prefix roots: for d in 0..num_deposits
-        // Keep base_deposit_count + d executeRemoteCall txs, 0 withdrawal txs
+        // Keep base_deposit_count + d executeRemoteCall txs, 0 L2→L1 txs
         for d in 0..num_deposits {
             let keep_deposits = base_deposit_count + d;
             let filtered = crate::cross_chain::filter_block_entries(
                 block_encoded_txs,
                 self.config.cross_chain_manager_address,
-                self.config.bridge_l2_address,
                 keep_deposits,
                 0,
+                &l2_to_l1_indices,
             )?;
 
             let root = self.compute_state_root_with_entries(
@@ -3742,15 +3925,15 @@ where
         }
 
         // Withdrawal prefix roots: for w in 0..num_withdrawals
-        // Keep ALL deposit txs, w withdrawal txs
+        // Keep ALL deposit txs, w L2→L1 txs
         let total_deposit_keep = base_deposit_count + num_deposits;
         for w in 0..num_withdrawals {
             let filtered = crate::cross_chain::filter_block_entries(
                 block_encoded_txs,
                 self.config.cross_chain_manager_address,
-                self.config.bridge_l2_address,
                 total_deposit_keep,
                 w,
+                &l2_to_l1_indices,
             )?;
 
             let root = self.compute_state_root_with_entries(

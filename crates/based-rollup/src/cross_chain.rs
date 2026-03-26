@@ -75,6 +75,11 @@ sol! {
         /// by a user's proxy call on L1 (executeCrossChainCall succeeds).
         event ExecutionConsumed(bytes32 indexed actionHash, Action action);
 
+        /// CrossChainManagerL2.CrossChainCallExecuted — emitted when a proxy calls
+        /// executeCrossChainCall on L2, indicating an outgoing L2→L1 cross-chain call.
+        /// Used by receipt-based §4f filtering to identify L2→L1 txs generically.
+        event CrossChainCallExecuted(bytes32 indexed actionHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value);
+
         /// Rollups.postBatch — submit execution entries with proof to L1.
         /// Defined here (not on Rollups) so we can reuse the same type namespace.
         function postBatch(
@@ -93,11 +98,11 @@ sol! {
         function setCanonicalBridgeAddress(address bridgeAddress) external;
 
         /// Bridge.bridgeEther — bridge ETH to destination rollup.
-        /// Used for selector-based withdrawal detection in §4f filtering.
+        /// Used in table_builder.rs and composer_rpc for ABI encode/decode.
         function bridgeEther(uint256 _rollupId, address destinationAddress) external payable;
 
         /// Bridge.bridgeTokens — bridge ERC20 tokens to destination rollup.
-        /// Used for selector-based withdrawal detection in §4f filtering.
+        /// Used in table_builder.rs and composer_rpc for ABI encode/decode.
         function bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress) external;
 
         /// Bridge.receiveTokens — called cross-chain to mint/release tokens.
@@ -1978,67 +1983,77 @@ pub fn filter_unconsumed_execute_remote_calls(
 }
 
 // ──────────────────────────────────────────────
-//  Withdrawal transaction identification and filtering
+//  Receipt-based L2→L1 tx identification and filtering
 // ──────────────────────────────────────────────
 
-/// 4-byte function selector for `Bridge.bridgeEther(uint256,address)`.
+/// Event signature for `CrossChainCallExecuted(bytes32,address,address,bytes,uint256)`.
 ///
-/// Derived from the IBridge sol! macro: `IBridge::bridgeEtherCall::SELECTOR`.
-const BRIDGE_ETHER_SELECTOR: [u8; 4] = IBridge::bridgeEtherCall::SELECTOR;
+/// Emitted by `CrossChainManagerL2.executeCrossChainCall` when a proxy forwards
+/// a call through the CCM. The `actionHash` is `topic[1]` (first indexed param).
+/// Used to generically identify L2→L1 txs from block execution receipts without
+/// relying on Bridge-specific selectors.
+const CROSS_CHAIN_CALL_EXECUTED_TOPIC0: B256 = {
+    // keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)")
+    // Derived via sol! event binding: ICrossChainManagerL2::CrossChainCallExecuted::SIGNATURE_HASH
+    ICrossChainManagerL2::CrossChainCallExecuted::SIGNATURE_HASH
+};
 
-/// 4-byte function selector for `Bridge.bridgeTokens(address,uint256,uint256,address)`.
+/// Extract L2→L1 cross-chain tx indices from block execution receipts.
 ///
-/// Derived from the IBridge sol! macro: `IBridge::bridgeTokensCall::SELECTOR`.
-const BRIDGE_TOKENS_SELECTOR: [u8; 4] = IBridge::bridgeTokensCall::SELECTOR;
-
-/// Check if a transaction is a Bridge withdrawal to L1.
+/// Scans each transaction's receipt logs for `CrossChainCallExecuted` events
+/// emitted by the CCM at `ccm_address`. Returns the tx indices (in block order)
+/// of all transactions that produced at least one such event.
 ///
-/// Matches both `bridgeEther(rollupId=0, ...)` and `bridgeTokens(..., rollupId=0, ...)`
-/// targeting the Bridge L2 contract. rollupId=0 means "withdraw to L1".
+/// This is the generic replacement for `is_bridge_withdrawal` selector matching:
+/// any contract calling through a CrossChainProxy to the CCM will emit this event,
+/// regardless of whether it's Bridge.bridgeEther, Bridge.bridgeTokens, or any
+/// future cross-chain contract.
 ///
-/// TODO: Replace with entry-hash-based classification once filter_block_entries
-/// receives the set of entry-producing tx hashes from the block (Step 7).
-pub fn is_bridge_withdrawal(tx: &TransactionSigned, bridge_l2_address: Address) -> bool {
-    use alloy_consensus::Transaction;
-
-    if tx.to() != Some(bridge_l2_address) || tx.input().len() < 4 {
-        return false;
+/// # Arguments
+/// * `receipts` — block execution receipts, one per transaction in block order.
+///   Each receipt must implement `TxReceipt` with `Log = alloy_primitives::Log`.
+/// * `ccm_address` — address of the CrossChainManagerL2 contract on L2
+pub fn extract_l2_to_l1_tx_indices<R>(receipts: &[R], ccm_address: Address) -> Vec<usize>
+where
+    R: alloy_consensus::TxReceipt<Log = alloy_primitives::Log>,
+{
+    let mut indices = Vec::new();
+    for (tx_idx, receipt) in receipts.iter().enumerate() {
+        let has_cc_event = receipt.logs().iter().any(|log| {
+            log.address == ccm_address
+                && !log.data.topics().is_empty()
+                && log.data.topics()[0] == CROSS_CHAIN_CALL_EXECUTED_TOPIC0
+        });
+        if has_cc_event {
+            indices.push(tx_idx);
+        }
     }
-    let selector = &tx.input()[..4];
-
-    // bridgeEther(uint256 _rollupId, address destinationAddress)
-    // rollupId is at bytes [4..36], must be 0 for L1 withdrawal
-    if selector == BRIDGE_ETHER_SELECTOR {
-        return tx.input().len() >= 68 && U256::from_be_slice(&tx.input()[4..36]).is_zero();
-    }
-
-    // bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress)
-    // rollupId is at bytes [68..100], must be 0 for L1 withdrawal
-    if selector == BRIDGE_TOKENS_SELECTOR {
-        return tx.input().len() >= 132 && U256::from_be_slice(&tx.input()[68..100]).is_zero();
-    }
-
-    false
+    indices
 }
 
-/// Unified filter for both deposit and withdrawal txs in a mixed block.
+/// Unified filter for both deposit and L2→L1 cross-chain txs in a mixed block.
 ///
 /// Iterates the block's transaction list and applies prefix-counting to both
-/// `executeRemoteCall` (deposit) and Bridge withdrawal (bridgeEther/bridgeTokens
-/// with rollupId=0) txs independently.
+/// `executeRemoteCall` (deposit) and L2→L1 cross-chain txs independently.
 /// All other txs (setContext, loadExecutionTable, user txs) are always kept.
 ///
-/// `keep_deposit_count`: number of `executeRemoteCall` txs to keep (prefix).
-/// `keep_withdrawal_count`: number of Bridge withdrawal txs to keep (prefix).
+/// L2→L1 txs are identified generically by their position in the block
+/// (`l2_to_l1_tx_indices`), derived from `CrossChainCallExecuted` receipt events.
+/// This eliminates all Bridge-specific selector dependencies from the filtering
+/// pipeline.
 ///
-/// TODO: Replace Bridge-selector withdrawal detection with entry-hash-based
-/// classification once the caller provides the set of entry-producing tx hashes.
+/// # Arguments
+/// * `encoded_transactions` — RLP-encoded block transaction list
+/// * `ccm_address` — CCM address for identifying `executeRemoteCall` (deposit) txs
+/// * `keep_deposit_count` — number of `executeRemoteCall` txs to keep (prefix)
+/// * `keep_l2_to_l1_count` — number of L2→L1 cross-chain txs to keep (prefix)
+/// * `l2_to_l1_tx_indices` — set of tx indices that are L2→L1 (from receipt scanning)
 pub fn filter_block_entries(
     encoded_transactions: &Bytes,
     ccm_address: Address,
-    bridge_l2_address: Address,
     keep_deposit_count: usize,
-    keep_withdrawal_count: usize,
+    keep_l2_to_l1_count: usize,
+    l2_to_l1_tx_indices: &std::collections::HashSet<usize>,
 ) -> eyre::Result<Bytes> {
     use alloy_rlp::Decodable;
 
@@ -2050,21 +2065,23 @@ pub fn filter_block_entries(
         .map_err(|e| eyre::eyre!("failed to RLP-decode transactions: {e}"))?;
 
     let mut deposit_count: usize = 0;
-    let mut withdrawal_count: usize = 0;
+    let mut l2_to_l1_count: usize = 0;
     let filtered: Vec<TransactionSigned> = txs
         .into_iter()
-        .filter(|tx| {
+        .enumerate()
+        .filter(|(idx, tx)| {
             if is_ccm_execute_remote_call(tx, ccm_address) {
                 deposit_count += 1;
                 deposit_count <= keep_deposit_count
-            } else if is_bridge_withdrawal(tx, bridge_l2_address) {
-                withdrawal_count += 1;
-                withdrawal_count <= keep_withdrawal_count
+            } else if l2_to_l1_tx_indices.contains(idx) {
+                l2_to_l1_count += 1;
+                l2_to_l1_count <= keep_l2_to_l1_count
             } else {
                 // Keep all other txs (setContext, loadExecutionTable, user txs)
                 true
             }
         })
+        .map(|(_, tx)| tx)
         .collect();
 
     let mut buf = Vec::new();
