@@ -252,14 +252,34 @@ jobs:
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
           DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
+      - name: Extract rollup.env from Docker
+        run: |
+          docker compose -f deployments/testnet-eez/docker-compose.yml \
+            exec -T builder cat /shared/rollup.env > /tmp/rollup.env
+          echo "Loaded rollup.env:"
+          head -5 /tmp/rollup.env
+        env:
+          COMPOSE_PROJECT_NAME: ci-e2e
+          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
+          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
+
       - name: Run bridge E2E test
         run: bash scripts/e2e/bridge-health-check.sh
+        env:
+          SHARED_DIR: /tmp
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
       - name: Run cross-chain E2E test
         run: bash scripts/e2e/crosschain-health-check.sh
+        env:
+          SHARED_DIR: /tmp
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
       - name: Run multi-call E2E test
         run: bash scripts/e2e/test-multi-call-cross-chain.sh
+        env:
+          SHARED_DIR: /tmp
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
       - name: Collect logs on failure
         if: failure()
