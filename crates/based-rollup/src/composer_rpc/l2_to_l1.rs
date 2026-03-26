@@ -5,18 +5,16 @@
 //! `syncrollups_simulateTransaction`, enabling the execution planner to build
 //! state deltas and L1 submission entries without a separate proxy process.
 //!
-//! Also detects cross-chain proxy calls on L2: when a user sends a tx to a
-//! `CrossChainProxy` address (registered in `CrossChainManagerL2.authorizedProxies`),
-//! the proxy queues execution entries via `syncrollups_initiateL2CrossChainCall`
-//! BEFORE forwarding the user's tx (hold-then-forward pattern).
+//! Detects ALL cross-chain L2->L1 calls via a single generic trace path using
+//! `trace::walk_trace_tree`. Detection uses the protocol-level
+//! `executeCrossChainCall` child pattern — no contract-specific selectors.
+//! Works for bridgeEther, bridgeTokens, direct proxy calls, wrapper contracts,
+//! flash loans, and any future cross-chain pattern. The proxy queues execution
+//! entries BEFORE forwarding the user's tx (hold-then-forward pattern).
 //!
-//! Detects Bridge contract calls on L2: when a user calls `bridgeTokens` on an
-//! L2 Bridge targeting L1 (`rollupId=0`), the proxy queues L2-to-L1 entries.
-//! `bridgeEther(0)` is handled separately by the existing withdrawal path.
-//!
-//! Intercepts `eth_estimateGas` targeting CrossChainProxy addresses and Bridge
-//! contracts to return a conservative gas estimate, since the actual on-chain
-//! execution depends on loaded execution table entries.
+//! Intercepts `eth_estimateGas` targeting CrossChainProxy addresses to return
+//! a conservative gas estimate, since the actual on-chain execution depends on
+//! loaded execution table entries.
 //!
 //! The proxy listens on a configurable port (default: disabled) and forwards
 //! to `127.0.0.1:{reth_rpc_port}` (default: 8545).
@@ -39,11 +37,9 @@ use super::common::{detect_cross_chain_proxy_on_l2, find_failed_proxy_calls_in_l
 
 // Bring shared helpers into scope for internal use and `use super::*` in tests.
 use super::common::{
-    compute_tx_hash as compute_l2_tx_hash, cors_response, error_response,
-    eth_call_view as eth_call_view_l2, extract_methods,
+    compute_tx_hash as compute_l2_tx_hash, cors_response, error_response, extract_methods,
     get_l1_block_context as get_l1_block_context_for_proxy,
     get_verification_key as get_verification_key_for_proxy,
-    parse_address_from_abi_return as parse_address_from_hex,
 };
 
 /// Run the RPC proxy server.
@@ -52,12 +48,12 @@ use super::common::{
 /// `http://127.0.0.1:{upstream_port}`. Intercepts `eth_sendRawTransaction`
 /// to also call `syncrollups_simulateTransaction` in the background.
 ///
-/// Detects three types of cross-chain calls and queues entries SYNCHRONOUSLY
-/// before forwarding the user's tx (hold-then-forward pattern):
-/// - **CrossChainProxy calls**: txs targeting a `CrossChainProxy` address
-///   registered in `CrossChainManagerL2.authorizedProxies`
-/// - **Bridge calls**: `Bridge.bridgeTokens` with `rollupId=0` (targeting L1)
-/// - **Withdrawals**: `Bridge.bridgeEther(0)` calls
+/// Detects cross-chain calls via a single generic trace path and queues entries
+/// SYNCHRONOUSLY before forwarding the user's tx (hold-then-forward pattern).
+/// Detection uses protocol-level `executeCrossChainCall` child pattern from
+/// `trace::walk_trace_tree` — no contract-specific selectors. Works for
+/// bridgeEther, bridgeTokens, direct proxy calls, wrapper contracts, flash
+/// loans, and any future cross-chain pattern.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_rpc_proxy(
     proxy_port: u16,
@@ -160,7 +156,7 @@ async fn handle_request(
     client: reqwest::Client,
     upstream_url: String,
     _peer: SocketAddr,
-    bridge_l2_address: Address,
+    _bridge_l2_address: Address,
     cross_chain_manager_address: Address,
     rollup_id: u64,
     l1_rpc_url: String,
@@ -224,6 +220,9 @@ async fn handle_request(
                         if !cross_chain_manager_address.is_zero() {
                             if let Ok(to_addr) = to_str.parse::<Address>() {
                                 // Check CrossChainProxy first (fast path)
+                                // Check if target is a CrossChainProxy (conservative gas).
+                                // The actual on-chain execution depends on loaded entries,
+                                // so upstream gas estimation would fail or return wrong gas.
                                 if detect_cross_chain_proxy_on_l2(
                                     &client,
                                     &upstream_url,
@@ -242,32 +241,6 @@ async fn handle_request(
                                             .expect("valid response"),
                                     ));
                                 }
-
-                                // Check Bridge.bridgeTokens targeting L1 (medium path)
-                                let data_str =
-                                    tx_obj.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
-                                let data_clean = data_str.strip_prefix("0x").unwrap_or(data_str);
-                                if let Ok(data_bytes) = hex::decode(data_clean) {
-                                    if detect_bridge_call_on_l2(
-                                        &client,
-                                        &upstream_url,
-                                        to_addr,
-                                        cross_chain_manager_address,
-                                        &data_bytes,
-                                    )
-                                    .await
-                                    .is_some()
-                                    {
-                                        let gas_resp = build_gas_estimate_response(json, 500_000);
-                                        return Ok(cors_response(
-                                            Response::builder()
-                                                .status(StatusCode::OK)
-                                                .header("Content-Type", "application/json")
-                                                .body(Full::new(Bytes::from(gas_resp)))
-                                                .expect("valid response"),
-                                        ));
-                                    }
-                                }
                             }
                         }
                     }
@@ -278,59 +251,11 @@ async fn handle_request(
                 if let Some(raw_tx) = params.and_then(|p| p.first()).and_then(|v| v.as_str()) {
                     let mut cross_chain_detected = false;
 
-                    // 1. CrossChainProxy (fast path) — direct tx to proxy
-                    if !cross_chain_manager_address.is_zero()
-                        && queue_cross_chain_proxy_sync(
-                            &client,
-                            &upstream_url,
-                            raw_tx,
-                            cross_chain_manager_address,
-                            rollup_id,
-                            &l1_rpc_url,
-                            rollups_address,
-                            builder_address,
-                            builder_private_key.as_deref(),
-                        )
-                        .await
-                        .is_some()
-                    {
-                        cross_chain_detected = true;
-                    }
-
-                    // 2. Bridge bridgeTokens (medium path) — direct tx to Bridge
-                    if !cross_chain_detected
-                        && !cross_chain_manager_address.is_zero()
-                        && queue_bridge_call_sync(
-                            &client,
-                            &upstream_url,
-                            raw_tx,
-                            cross_chain_manager_address,
-                            rollup_id,
-                            &l1_rpc_url,
-                            rollups_address,
-                            builder_address,
-                            builder_private_key.as_deref(),
-                        )
-                        .await
-                        .is_some()
-                    {
-                        cross_chain_detected = true;
-                    }
-
-                    // 3. Withdrawal bridgeEther(0) (existing)
-                    if !cross_chain_detected
-                        && !bridge_l2_address.is_zero()
-                        && queue_withdrawal_sync(&client, &upstream_url, raw_tx, bridge_l2_address)
-                            .await
-                            .is_some()
-                    {
-                        cross_chain_detected = true;
-                    }
-
-                    // 4. Slow path: trace for internal cross-chain calls.
-                    // Only runs when fast/medium/withdrawal paths didn't match
-                    // and the target has code on L2 (is a contract).
-                    if !cross_chain_detected && !cross_chain_manager_address.is_zero() {
+                    // Single generic path: trace and detect ALL cross-chain calls
+                    // via protocol-level detection (executeCrossChainCall child pattern).
+                    // No contract-specific selectors. Works for bridgeEther, bridgeTokens,
+                    // direct proxy calls, wrapper contracts, flash loans — everything.
+                    if !cross_chain_manager_address.is_zero() {
                         let detected = trace_and_detect_l2_internal_calls(
                             &client,
                             &upstream_url,
@@ -459,160 +384,6 @@ async fn simulate_in_background(client: &reqwest::Client, upstream_url: &str, ra
             );
         }
     }
-}
-
-/// bridgeEther(uint256,address) selector = 0xf402d9f3
-const BRIDGE_ETHER_SELECTOR: [u8; 4] = [0xf4, 0x02, 0xd9, 0xf3];
-
-/// Detect a CrossChainProxy call on L2 and queue entries SYNCHRONOUSLY.
-///
-/// Checks if the tx's `to` address is a CrossChainProxy registered in
-/// `CrossChainManagerL2.authorizedProxies(address)`. If so, extracts the
-/// `originalAddress` and `originalRollupId` from the proxy info, simulates
-/// delivery on L1 to capture return data, and calls
-/// `syncrollups_initiateL2CrossChainCall` on the builder RPC.
-///
-/// Returns `Some(())` if a proxy call was detected and entries were queued.
-/// Returns `None` if the tx does not target a registered proxy.
-/// The caller AWAITS this before forwarding the tx to upstream.
-#[allow(clippy::too_many_arguments)]
-async fn queue_cross_chain_proxy_sync(
-    client: &reqwest::Client,
-    upstream_url: &str,
-    raw_tx_hex: &str,
-    cross_chain_manager_address: Address,
-    rollup_id: u64,
-    l1_rpc_url: &str,
-    rollups_address: Address,
-    builder_address: Address,
-    builder_private_key: Option<&str>,
-) -> Option<()> {
-    use alloy_consensus::transaction::TxEnvelope;
-    use alloy_rlp::Decodable;
-
-    let hex_str = raw_tx_hex.strip_prefix("0x").unwrap_or(raw_tx_hex);
-    let tx_bytes = hex::decode(hex_str).ok()?;
-    let envelope = TxEnvelope::decode(&mut tx_bytes.as_slice()).ok()?;
-
-    use alloy_consensus::Transaction;
-    let to_addr = envelope.to()?;
-    let value = envelope.value();
-    let input = envelope.input();
-
-    // Query authorizedProxies(to_addr) on the L2 CCM.
-    // authorizedProxies(address) selector = 0x360d95b6
-    // Returns (address originalAddress, uint64 originalRollupId)
-    let (original_address, original_rollup_id) =
-        detect_cross_chain_proxy_on_l2(client, upstream_url, to_addr, cross_chain_manager_address)
-            .await?;
-
-    use reth_primitives_traits::SignerRecoverable;
-    let sender = envelope.recover_signer().ok()?;
-
-    tracing::info!(
-        target: "based_rollup::proxy",
-        %sender,
-        proxy = %to_addr,
-        destination = %original_address,
-        dest_rollup_id = original_rollup_id,
-        value = %value,
-        calldata_len = input.len(),
-        "detected L2 CrossChainProxy call — queuing entries before forwarding tx"
-    );
-
-    // Simulate delivery on L1 to capture return data and detect return calls.
-    // For simple calls (EOA targets), this returns empty data.
-    // For contract targets, this captures the actual return data.
-    // For multi-call continuations, this also discovers L1→L2 return calls iteratively.
-    let (delivery_return_data, delivery_failed, return_calls) = simulate_l1_delivery(
-        client,
-        l1_rpc_url,
-        upstream_url,
-        cross_chain_manager_address,
-        rollups_address,
-        builder_address,
-        builder_private_key,
-        rollup_id,
-        sender,
-        original_address,
-        input,
-        value,
-    )
-    .await
-    .unwrap_or((vec![], false, vec![]));
-
-    // If return calls were detected (multi-call continuation pattern), use buildExecutionTable
-    // to create continuation entries atomically. The return calls are L1→L2 direction.
-    if !return_calls.is_empty() {
-        tracing::info!(
-            target: "based_rollup::proxy",
-            return_call_count = return_calls.len(),
-            "multi-call continuation pattern: routing through buildExecutionTable for continuation entries"
-        );
-
-        let single_call = DetectedL2InternalCall {
-            destination: original_address,
-            calldata: input.to_vec(),
-            value,
-            source_address: sender,
-            delivery_return_data: delivery_return_data.clone(),
-            delivery_failed,
-        };
-        return queue_l2_to_l1_multi_call_entries(
-            client,
-            upstream_url,
-            raw_tx_hex,
-            &[single_call],
-            &return_calls,
-            rollup_id,
-        )
-        .await;
-    }
-
-    // Simple case (no return calls) — queue via initiateL2CrossChainCall.
-    // rawL2Tx carries the held user transaction for driver injection.
-    let initiate_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "syncrollups_initiateL2CrossChainCall",
-        "params": [{
-            "destination": format!("{original_address}"),
-            "data": format!("0x{}", hex::encode(input)),
-            "value": format!("{value}"),
-            "sourceAddress": format!("{sender}"),
-            "deliveryReturnData": format!("0x{}", hex::encode(&delivery_return_data)),
-            "deliveryFailed": delivery_failed,
-            "rawL2Tx": raw_tx_hex
-        }],
-        "id": 99997
-    });
-
-    match client.post(upstream_url).json(&initiate_req).send().await {
-        Ok(resp) => {
-            if let Ok(body) = resp.json::<Value>().await {
-                if let Some(error) = body.get("error") {
-                    tracing::warn!(
-                        target: "based_rollup::proxy",
-                        %error,
-                        "cross-chain proxy entry queue failed"
-                    );
-                    return None;
-                }
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    "cross-chain proxy entries queued — tx will now be forwarded to mempool"
-                );
-                return Some(());
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "based_rollup::proxy",
-                %e,
-                "cross-chain proxy entry queue request failed"
-            );
-        }
-    }
-    None
 }
 
 /// Queue entries for an L2→L1 multi-call continuation pattern using `buildL2ToL1ExecutionTable`.
@@ -3695,385 +3466,6 @@ fn build_gas_estimate_response(request_json: &Value, gas: u64) -> String {
     .to_string()
 }
 
-/// Detect Bridge.bridgeEther(0) withdrawal and queue entries SYNCHRONOUSLY.
-///
-/// Returns `Some(())` if a withdrawal was detected and entries were queued.
-/// Returns `None` if the tx is not a withdrawal. The caller AWAITS this
-/// before forwarding the tx to upstream — ensures the builder has withdrawal
-/// entries loaded before the user's tx hits the mempool.
-async fn queue_withdrawal_sync(
-    client: &reqwest::Client,
-    upstream_url: &str,
-    raw_tx_hex: &str,
-    bridge_l2_address: alloy_primitives::Address,
-) -> Option<()> {
-    use alloy_consensus::transaction::TxEnvelope;
-    use alloy_primitives::U256;
-    use alloy_rlp::Decodable;
-
-    let hex = raw_tx_hex.strip_prefix("0x").unwrap_or(raw_tx_hex);
-    let tx_bytes = hex::decode(hex).ok()?;
-    let envelope = TxEnvelope::decode(&mut tx_bytes.as_slice()).ok()?;
-
-    use alloy_consensus::Transaction;
-    let to_addr = envelope.to()?;
-    let value = envelope.value();
-    let input = envelope.input();
-
-    if to_addr != bridge_l2_address {
-        return None;
-    }
-    if input.len() < 68 || input[..4] != BRIDGE_ETHER_SELECTOR {
-        return None;
-    }
-    let rollup_id = U256::from_be_slice(&input[4..36]);
-    if !rollup_id.is_zero() {
-        return None;
-    }
-    if value.is_zero() {
-        return None;
-    }
-
-    use reth_primitives_traits::SignerRecoverable;
-    let sender = envelope.recover_signer().ok()?;
-
-    tracing::info!(
-        target: "based_rollup::proxy",
-        %sender,
-        amount = %value,
-        "detected L2→L1 withdrawal — queuing entries before forwarding tx"
-    );
-
-    // Queue withdrawal entries SYNCHRONOUSLY (wait for RPC response).
-    // Pass raw_tx_hex as third param for hold-then-forward (driver injection).
-    let sender_hex = format!("{sender:?}");
-    let amount_hex = format!("{value:#x}");
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "syncrollups_initiateWithdrawal",
-        "params": [sender_hex, amount_hex, raw_tx_hex],
-        "id": 99998
-    });
-    match client.post(upstream_url).json(&req).send().await {
-        Ok(resp) => {
-            if let Ok(body) = resp.json::<Value>().await {
-                if let Some(error) = body.get("error") {
-                    tracing::warn!(
-                        target: "based_rollup::proxy",
-                        %error,
-                        "withdrawal queue failed"
-                    );
-                    return None;
-                }
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    "withdrawal entries queued — tx will now be forwarded to mempool"
-                );
-                return Some(());
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "based_rollup::proxy",
-                %e,
-                "withdrawal queue request failed"
-            );
-        }
-    }
-    None
-}
-
-/// bridgeTokens(address,uint256,uint256,address) selector = 0x33b15aad
-const BRIDGE_TOKENS_SELECTOR: [u8; 4] = [0x33, 0xb1, 0x5a, 0xad];
-
-/// Bridge.manager() selector = 0x481c6a75
-const MANAGER_SELECTOR: &str = "0x481c6a75";
-
-/// Detect if a transaction targets a Bridge contract on L2 with `bridgeTokens`
-/// targeting L1 (`rollupId=0`).
-///
-/// Checks `manager()` on the target address. If it returns the CCM address,
-/// the target is an L2 Bridge contract. Then parses the `bridgeTokens` selector
-/// and verifies `rollupId == 0`.
-///
-/// Only handles `bridgeTokens`. `bridgeEther(0)` is handled separately by the
-/// existing `queue_withdrawal_sync` path to avoid double-queuing entries.
-///
-/// Returns `Some(BridgeCallInfo)` if this is a `bridgeTokens` call targeting L1,
-/// `None` otherwise.
-async fn detect_bridge_call_on_l2(
-    client: &reqwest::Client,
-    upstream_url: &str,
-    to_addr: Address,
-    ccm_address: Address,
-    calldata: &[u8],
-) -> Option<BridgeCallInfo> {
-    // Must have at least selector + 4 ABI-encoded words
-    if calldata.len() < 4 {
-        return None;
-    }
-    let selector: [u8; 4] = calldata[..4].try_into().ok()?;
-
-    // Only handle bridgeTokens (bridgeEther handled by existing withdrawal path)
-    if selector != BRIDGE_TOKENS_SELECTOR {
-        return None;
-    }
-
-    // Check manager() == ccm_address to verify this is an L2 Bridge
-    let manager_hex = eth_call_view_l2(client, upstream_url, to_addr, MANAGER_SELECTOR).await?;
-    let manager_addr = parse_address_from_hex(&manager_hex)?;
-    if manager_addr != ccm_address {
-        return None;
-    }
-
-    // bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress)
-    // calldata: selector(4) + token(32) + amount(32) + rollupId(32) + destinationAddress(32)
-    if calldata.len() < 132 {
-        return None;
-    }
-
-    let rollup_id = U256::from_be_slice(&calldata[68..100]);
-    if !rollup_id.is_zero() {
-        return None; // Not targeting L1
-    }
-
-    // Query canonicalBridgeAddress on the bridge to determine L1 destination.
-    // The bridge creates a proxy for its own canonical address, not the user.
-    // canonicalBridgeAddress() selector = 0x5639006f
-    let canonical_selector = "0x5639006f";
-    let bridge_dest =
-        match eth_call_view_l2(client, upstream_url, to_addr, canonical_selector).await {
-            Some(hex) => {
-                let addr = parse_address_from_hex(&hex).unwrap_or(to_addr);
-                if addr.is_zero() { to_addr } else { addr }
-            }
-            None => to_addr,
-        };
-
-    tracing::info!(
-        target: "based_rollup::proxy",
-        bridge = %to_addr,
-        bridge_dest = %bridge_dest,
-        "detected bridgeTokens call on L2 targeting L1"
-    );
-
-    Some(BridgeCallInfo {
-        destination: bridge_dest,
-        calldata: calldata[4..].to_vec(),
-        source_address: to_addr, // Bridge is msg.sender to proxy, not the user
-    })
-}
-
-/// Extract the actual proxy calldata from a Bridge call's children in the trace.
-///
-/// Bridge.bridgeTokens() internally calls proxy.fallback(receiveTokens_calldata).
-/// The proxy forwards to CCM.executeCrossChainCall. We find the proxy child by
-/// checking if any of its sub-calls target the CCM address.
-///
-/// Returns the raw input bytes of the proxy call (= receiveTokens calldata).
-fn extract_proxy_calldata_from_bridge_children_l2(
-    bridge_node: &Value,
-    ccm_address: Address,
-) -> Option<Vec<u8>> {
-    let children = bridge_node.get("calls").and_then(|v| v.as_array())?;
-
-    for child in children {
-        let call_type = child.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if call_type == "CREATE" || call_type == "CREATE2" {
-            continue;
-        }
-
-        // Check if any grandchild targets CCM (indicates proxy → CCM forwarding)
-        let grandchildren = match child.get("calls").and_then(|v| v.as_array()) {
-            Some(gc) => gc,
-            None => continue,
-        };
-
-        let targets_ccm = grandchildren.iter().any(|gc| {
-            gc.get("to")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Address>().ok())
-                .map(|addr| addr == ccm_address)
-                .unwrap_or(false)
-        });
-
-        if !targets_ccm {
-            continue;
-        }
-
-        // This child is the proxy call — extract its input (receiveTokens calldata)
-        let input_str = child.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
-        let clean = input_str.strip_prefix("0x").unwrap_or(input_str);
-        if let Ok(bytes) = hex::decode(clean) {
-            tracing::info!(
-                target: "based_rollup::proxy",
-                trace_calldata_len = bytes.len(),
-                "extracted receiveTokens calldata from bridge trace child"
-            );
-            return Some(bytes);
-        }
-    }
-
-    None
-}
-
-/// Information about a detected Bridge call targeting L1.
-struct BridgeCallInfo {
-    /// Cross-chain destination address (canonicalBridgeAddress on L1).
-    destination: Address,
-    /// ABI-encoded arguments (selector stripped).
-    calldata: Vec<u8>,
-    /// The bridge contract address (source of the proxy call).
-    source_address: Address,
-}
-
-/// Detect a `Bridge.bridgeTokens` call on L2 targeting L1 and queue entries
-/// SYNCHRONOUSLY before forwarding the user's tx.
-///
-/// Only handles `bridgeTokens` (`bridgeEther(0)` is handled by
-/// `queue_withdrawal_sync`). Returns `Some(())` if detected and queued,
-/// `None` otherwise.
-#[allow(clippy::too_many_arguments)]
-async fn queue_bridge_call_sync(
-    client: &reqwest::Client,
-    upstream_url: &str,
-    raw_tx_hex: &str,
-    cross_chain_manager_address: Address,
-    rollup_id: u64,
-    l1_rpc_url: &str,
-    rollups_address: Address,
-    builder_address: Address,
-    builder_private_key: Option<&str>,
-) -> Option<()> {
-    use alloy_consensus::transaction::TxEnvelope;
-    use alloy_rlp::Decodable;
-
-    let hex_str = raw_tx_hex.strip_prefix("0x").unwrap_or(raw_tx_hex);
-    let tx_bytes = hex::decode(hex_str).ok()?;
-    let envelope = TxEnvelope::decode(&mut tx_bytes.as_slice()).ok()?;
-
-    use alloy_consensus::Transaction;
-    let to_addr = envelope.to()?;
-    let value = envelope.value();
-    let input = envelope.input();
-
-    let info = detect_bridge_call_on_l2(
-        client,
-        upstream_url,
-        to_addr,
-        cross_chain_manager_address,
-        input,
-    )
-    .await?;
-
-    use reth_primitives_traits::SignerRecoverable;
-    let sender = envelope.recover_signer().ok()?;
-
-    tracing::info!(
-        target: "based_rollup::proxy",
-        %sender,
-        bridge = %to_addr,
-        destination = %info.destination,
-        value = %value,
-        calldata_len = input.len(),
-        "detected L2 Bridge.bridgeTokens call — queuing entries before forwarding tx"
-    );
-
-    // Simulate delivery on L1 to capture return data and detect return calls.
-    let (delivery_return_data, delivery_failed, return_calls) = simulate_l1_delivery(
-        client,
-        l1_rpc_url,
-        upstream_url,
-        cross_chain_manager_address,
-        rollups_address,
-        builder_address,
-        builder_private_key,
-        rollup_id,
-        sender,
-        info.destination,
-        &info.calldata,
-        value,
-    )
-    .await
-    .unwrap_or((vec![], false, vec![]));
-
-    // If return calls were detected (multi-call continuation pattern), route through
-    // buildExecutionTable for continuation entries.
-    if !return_calls.is_empty() {
-        tracing::info!(
-            target: "based_rollup::proxy",
-            return_call_count = return_calls.len(),
-            "bridge call multi-call continuation pattern: routing through buildExecutionTable"
-        );
-        let single_call = DetectedL2InternalCall {
-            destination: info.destination,
-            calldata: info.calldata.clone(),
-            value,
-            source_address: info.source_address,
-            delivery_return_data: delivery_return_data.clone(),
-            delivery_failed,
-        };
-        return queue_l2_to_l1_multi_call_entries(
-            client,
-            upstream_url,
-            raw_tx_hex,
-            &[single_call],
-            &return_calls,
-            rollup_id,
-        )
-        .await;
-    }
-
-    // Queue entries via syncrollups_initiateL2CrossChainCall SYNCHRONOUSLY.
-    // sourceAddress is the bridge contract (not the user), because Bridge
-    // internally calls _getOrDeployProxy(sender=bridge, rollupId) which makes
-    // the bridge contract the msg.sender on the proxy call.
-    // rawL2Tx carries the held user transaction for driver injection.
-    let initiate_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "syncrollups_initiateL2CrossChainCall",
-        "params": [{
-            "destination": format!("{}", info.destination),
-            "data": format!("0x{}", hex::encode(&info.calldata)),
-            "value": format!("{value}"),
-            "sourceAddress": format!("{}", info.source_address),
-            "deliveryReturnData": format!("0x{}", hex::encode(&delivery_return_data)),
-            "deliveryFailed": delivery_failed,
-            "rawL2Tx": raw_tx_hex
-        }],
-        "id": 99994
-    });
-
-    match client.post(upstream_url).json(&initiate_req).send().await {
-        Ok(resp) => {
-            if let Ok(body) = resp.json::<Value>().await {
-                if let Some(error) = body.get("error") {
-                    tracing::warn!(
-                        target: "based_rollup::proxy",
-                        %error,
-                        "bridge call entry queue failed"
-                    );
-                    return None;
-                }
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    "bridge call entries queued — tx will now be forwarded to mempool"
-                );
-                return Some(());
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "based_rollup::proxy",
-                %e,
-                "bridge call entry queue request failed"
-            );
-        }
-    }
-    None
-}
-
-
 /// Information about an internal L2→L1 cross-chain call detected via trace.
 #[derive(Clone)]
 struct DetectedL2InternalCall {
@@ -4092,14 +3484,85 @@ struct DetectedL2InternalCall {
     delivery_failed: bool,
 }
 
+/// L2 proxy lookup: queries `authorizedProxies(address)` on the L2 CCM.
+///
+/// Implements `trace::ProxyLookup` for use with the generic `walk_trace_tree`.
+struct L2ProxyLookup<'a> {
+    client: &'a reqwest::Client,
+    upstream_url: &'a str,
+    ccm_address: Address,
+}
+
+impl super::trace::ProxyLookup for L2ProxyLookup<'_> {
+    fn lookup_proxy(
+        &self,
+        address: Address,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<super::trace::ProxyInfo>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let result = detect_cross_chain_proxy_on_l2(
+                self.client,
+                self.upstream_url,
+                address,
+                self.ccm_address,
+            )
+            .await;
+            result.map(|(addr, rid)| super::trace::ProxyInfo {
+                original_address: addr,
+                original_rollup_id: rid,
+            })
+        })
+    }
+}
+
+/// Walk an L2 trace using the generic `trace::walk_trace_tree` and convert results
+/// to `DetectedL2InternalCall` format used by the rest of this module.
+async fn walk_l2_trace_generic(
+    client: &reqwest::Client,
+    upstream_url: &str,
+    ccm_address: Address,
+    trace_node: &Value,
+    proxy_cache: &mut std::collections::HashMap<Address, Option<super::trace::ProxyInfo>>,
+) -> Vec<DetectedL2InternalCall> {
+    let lookup = L2ProxyLookup {
+        client,
+        upstream_url,
+        ccm_address,
+    };
+    let mut ephemeral_proxies = std::collections::HashMap::new();
+    let mut detected_calls = Vec::new();
+
+    super::trace::walk_trace_tree(
+        trace_node,
+        &[ccm_address],
+        &lookup,
+        proxy_cache,
+        &mut ephemeral_proxies,
+        &mut detected_calls,
+    )
+    .await;
+
+    // Convert trace::DetectedCall to DetectedL2InternalCall.
+    detected_calls
+        .into_iter()
+        .map(|c| DetectedL2InternalCall {
+            destination: c.destination,
+            calldata: c.calldata,
+            value: c.value,
+            source_address: c.source_address,
+            delivery_return_data: vec![],
+            delivery_failed: false,
+        })
+        .collect()
+}
+
 /// Trace a transaction on L2 using `debug_traceCall` with `callTracer` and detect
-/// internal calls to CrossChainProxy or Bridge contracts targeting L1.
+/// ALL cross-chain calls via protocol-level detection (executeCrossChainCall child
+/// pattern). No contract-specific selectors — works for bridgeEther, bridgeTokens,
+/// direct proxy calls, wrapper contracts, flash loans, and any future pattern.
 ///
-/// This is the slow path, invoked only when the top-level `to` is neither a
-/// proxy nor a bridge. It simulates the tx and walks the call tree recursively
-/// to find ALL internal L2→L1 cross-chain calls.
-///
-/// Returns `true` if internal cross-chain calls were found and queued.
+/// Returns `true` if cross-chain calls were found and queued.
 #[allow(clippy::too_many_arguments)]
 async fn trace_and_detect_l2_internal_calls(
     client: &reqwest::Client,
@@ -4166,7 +3629,7 @@ async fn trace_and_detect_l2_internal_calls(
     tracing::info!(
         target: "based_rollup::proxy",
         %to_addr, %sender,
-        "slow path: tracing L2 tx with debug_traceCall to detect internal cross-chain calls"
+        "tracing L2 tx with debug_traceCall to detect cross-chain calls"
     );
 
     // Build debug_traceCall request against L2 upstream.
@@ -4190,10 +3653,11 @@ async fn trace_and_detect_l2_internal_calls(
     let trace_resp = match client.post(upstream_url).json(&trace_req).send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::debug!(
+            tracing::error!(
                 target: "based_rollup::proxy",
                 %e,
-                "debug_traceCall failed on L2"
+                "cross-chain detection failed: debug_traceCall transport error on L2 — \
+                 tx forwarded without cross-chain entry queuing"
             );
             return false;
         }
@@ -4201,13 +3665,24 @@ async fn trace_and_detect_l2_internal_calls(
 
     let trace_body: Value = match trace_resp.json().await {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::error!(
+                target: "based_rollup::proxy",
+                %e,
+                "cross-chain detection failed: debug_traceCall response parse error — \
+                 tx forwarded without cross-chain entry queuing"
+            );
+            return false;
+        }
     };
 
     if trace_body.get("error").is_some() {
-        tracing::debug!(
+        let error = trace_body.get("error");
+        tracing::error!(
             target: "based_rollup::proxy",
-            "debug_traceCall returned error — forwarding tx without detection"
+            ?error,
+            "cross-chain detection failed: debug_traceCall returned RPC error — \
+             tx forwarded without cross-chain entry queuing"
         );
         return false;
     }
@@ -4217,54 +3692,21 @@ async fn trace_and_detect_l2_internal_calls(
         None => return false,
     };
 
-    // Walk the trace tree to find internal cross-chain calls.
-    let mut proxy_cache: std::collections::HashMap<Address, Option<(Address, u64)>> =
+    // Walk the trace tree using the generic protocol-level walker.
+    // Detection uses executeCrossChainCall child pattern — no contract-specific selectors.
+    let mut proxy_cache: std::collections::HashMap<Address, Option<super::trace::ProxyInfo>> =
         std::collections::HashMap::new();
-    let mut detected_calls: Vec<DetectedL2InternalCall> = Vec::new();
-
-    walk_trace_tree_l2(
+    let mut detected_calls = walk_l2_trace_generic(
         client,
         upstream_url,
         cross_chain_manager_address,
         trace_result,
         &mut proxy_cache,
-        &mut detected_calls,
     )
     .await;
 
     if detected_calls.is_empty() {
         return false;
-    }
-
-    // Deduplicate: when both a bridge call and its proxy child are in the trace,
-    // keep the proxy detection. A proxy detection has a selector that is NOT
-    // bridgeTokens or bridgeEther (it forwards the raw calldata).
-    if detected_calls.len() > 1 {
-        let mut proxy_destinations: std::collections::HashSet<Address> =
-            std::collections::HashSet::new();
-        // First pass: collect destinations from proxy detections.
-        for call in &detected_calls {
-            if call.calldata.len() >= 4 {
-                let sel: [u8; 4] = call.calldata[..4].try_into().unwrap_or([0; 4]);
-                if sel != BRIDGE_TOKENS_SELECTOR && sel != BRIDGE_ETHER_SELECTOR {
-                    proxy_destinations.insert(call.destination);
-                }
-            }
-        }
-        // Second pass: skip bridge detections for already-seen destinations.
-        let mut deduped: Vec<DetectedL2InternalCall> = Vec::new();
-        for call in detected_calls {
-            if call.calldata.len() >= 4 {
-                let sel: [u8; 4] = call.calldata[..4].try_into().unwrap_or([0; 4]);
-                if (sel == BRIDGE_TOKENS_SELECTOR || sel == BRIDGE_ETHER_SELECTOR)
-                    && proxy_destinations.contains(&call.destination)
-                {
-                    continue;
-                }
-            }
-            deduped.push(call);
-        }
-        detected_calls = deduped;
     }
 
     tracing::info!(
@@ -4449,44 +3891,15 @@ async fn trace_and_detect_l2_internal_calls(
                 "L2 traceCallMany: user tx trace status"
             );
 
-            // Step 6: Walk user tx trace for new calls.
-            let mut new_detected: Vec<DetectedL2InternalCall> = Vec::new();
-            walk_trace_tree_l2(
+            // Step 6: Walk user tx trace for new calls using generic walker.
+            let new_detected = walk_l2_trace_generic(
                 client,
                 upstream_url,
                 cross_chain_manager_address,
                 user_trace,
                 &mut proxy_cache,
-                &mut new_detected,
             )
             .await;
-
-            // Deduplicate new detections (same bridge vs proxy logic).
-            if new_detected.len() > 1 {
-                let mut proxy_dests: std::collections::HashSet<Address> =
-                    std::collections::HashSet::new();
-                for call in &new_detected {
-                    if call.calldata.len() >= 4 {
-                        let sel: [u8; 4] = call.calldata[..4].try_into().unwrap_or([0; 4]);
-                        if sel != BRIDGE_TOKENS_SELECTOR && sel != BRIDGE_ETHER_SELECTOR {
-                            proxy_dests.insert(call.destination);
-                        }
-                    }
-                }
-                let mut deduped: Vec<DetectedL2InternalCall> = Vec::new();
-                for call in new_detected {
-                    if call.calldata.len() >= 4 {
-                        let sel: [u8; 4] = call.calldata[..4].try_into().unwrap_or([0; 4]);
-                        if (sel == BRIDGE_TOKENS_SELECTOR || sel == BRIDGE_ETHER_SELECTOR)
-                            && proxy_dests.contains(&call.destination)
-                        {
-                            continue;
-                        }
-                    }
-                    deduped.push(call);
-                }
-                new_detected = deduped;
-            }
 
             // Step 7: Find truly new calls using count-based comparison.
             // A call is "new" only if new_detected has MORE of that
@@ -4976,13 +4389,17 @@ async fn trace_and_detect_l2_internal_calls(
                                         // trace with authorizedProxies queries instead of
                                         // matching ExecutionNotFound output heuristically.
                                         let mut discovered_in_phase_b = Vec::new();
+                                        // find_failed_proxy_calls_in_l2_trace uses its own
+                                        // cache type — separate from the trace::ProxyInfo cache.
+                                        let mut fpc_cache: std::collections::HashMap<Address, Option<(Address, u64)>> =
+                                            std::collections::HashMap::new();
                                         find_failed_proxy_calls_in_l2_trace(
                                             client,
                                             upstream_url,
                                             cross_chain_manager_address,
                                             trace,
                                             rollup_id,
-                                            &mut proxy_cache,
+                                            &mut fpc_cache,
                                             &mut discovered_in_phase_b,
                                         )
                                         .await;
@@ -5145,7 +4562,7 @@ async fn simulate_l2_return_call_delivery(
     );
 
     let mut all_detected: Vec<DetectedL2InternalCall> = Vec::new();
-    let mut proxy_cache: std::collections::HashMap<Address, Option<(Address, u64)>> =
+    let mut proxy_cache: std::collections::HashMap<Address, Option<super::trace::ProxyInfo>> =
         std::collections::HashMap::new();
 
     // loadExecutionTable requires the system address (onlySystemAddress modifier).
@@ -5233,13 +4650,12 @@ async fn simulate_l2_return_call_delivery(
         if let Ok(resp) = client.post(l2_rpc_url).json(&simple_trace_req).send().await {
             if let Ok(body) = resp.json::<Value>().await {
                 if let Some(trace) = body.get("result") {
-                    walk_trace_tree_l2(
+                    detected_for_call = walk_l2_trace_generic(
                         client,
                         l2_rpc_url,
                         ccm_address,
                         trace,
                         &mut proxy_cache,
-                        &mut detected_for_call,
                     )
                     .await;
                 }
@@ -5316,13 +4732,12 @@ async fn simulate_l2_return_call_delivery(
                             .and_then(|b| b.as_array())
                         {
                             if traces.len() >= 2 {
-                                walk_trace_tree_l2(
+                                detected_for_call = walk_l2_trace_generic(
                                     client,
                                     l2_rpc_url,
                                     ccm_address,
                                     &traces[1],
                                     &mut proxy_cache,
-                                    &mut detected_for_call,
                                 )
                                 .await;
                             }
@@ -5342,33 +4757,6 @@ async fn simulate_l2_return_call_delivery(
                 detected_for_call.len()
             );
 
-            // Deduplicate: prefer proxy detections over bridge detections for same destination.
-            if detected_for_call.len() > 1 {
-                let mut proxy_dests: std::collections::HashSet<Address> =
-                    std::collections::HashSet::new();
-                for call in &detected_for_call {
-                    if call.calldata.len() >= 4 {
-                        let sel: [u8; 4] = call.calldata[..4].try_into().unwrap_or([0; 4]);
-                        if sel != BRIDGE_TOKENS_SELECTOR && sel != BRIDGE_ETHER_SELECTOR {
-                            proxy_dests.insert(call.destination);
-                        }
-                    }
-                }
-                let mut deduped: Vec<DetectedL2InternalCall> = Vec::new();
-                for call in detected_for_call {
-                    if call.calldata.len() >= 4 {
-                        let sel: [u8; 4] = call.calldata[..4].try_into().unwrap_or([0; 4]);
-                        if (sel == BRIDGE_TOKENS_SELECTOR || sel == BRIDGE_ETHER_SELECTOR)
-                            && proxy_dests.contains(&call.destination)
-                        {
-                            continue;
-                        }
-                    }
-                    deduped.push(call);
-                }
-                detected_for_call = deduped;
-            }
-
             all_detected.extend(detected_for_call);
         }
     }
@@ -5383,120 +4771,6 @@ async fn simulate_l2_return_call_delivery(
     }
 
     all_detected
-}
-
-/// Walk a call trace tree recursively to find L2→L1 cross-chain calls.
-///
-/// Mirrors the L1 proxy's `walk_trace_tree()`. Detects:
-/// - Calls to CrossChainProxy addresses (via `CCM.authorizedProxies`)
-/// - Calls to Bridge with `bridgeTokens(rollupId=0)`
-///
-/// IMPORTANT: Do NOT skip failed calls — they show what WOULD execute after
-/// entries are loaded.
-async fn walk_trace_tree_l2(
-    client: &reqwest::Client,
-    upstream_url: &str,
-    ccm_address: Address,
-    node: &Value,
-    proxy_cache: &mut std::collections::HashMap<Address, Option<(Address, u64)>>,
-    detected_calls: &mut Vec<DetectedL2InternalCall>,
-) {
-    let mut should_recurse = true;
-
-    if let Some(to_str) = node.get("to").and_then(|v| v.as_str()) {
-        if let Ok(to_addr) = to_str.parse::<Address>() {
-            let call_from = node
-                .get("from")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Address>().ok())
-                .unwrap_or(Address::ZERO);
-
-            let input = node.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
-            let input_clean = input.strip_prefix("0x").unwrap_or(input);
-            let input_bytes = hex::decode(input_clean).unwrap_or_default();
-
-            let call_value = node
-                .get("value")
-                .and_then(|v| v.as_str())
-                .and_then(|s| U256::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok())
-                .unwrap_or(U256::ZERO);
-
-            // Check proxy cache first, then query on miss.
-            let proxy_info = match proxy_cache.get(&to_addr) {
-                Some(cached) => *cached,
-                None => {
-                    let result =
-                        detect_cross_chain_proxy_on_l2(client, upstream_url, to_addr, ccm_address)
-                            .await;
-                    proxy_cache.insert(to_addr, result);
-                    result
-                }
-            };
-
-            if let Some((destination, _rollup_id)) = proxy_info {
-                detected_calls.push(DetectedL2InternalCall {
-                    destination,
-                    calldata: input_bytes,
-                    value: call_value,
-                    source_address: call_from,
-                    delivery_return_data: vec![], // populated later by L1 simulation
-                    delivery_failed: false,       // populated later by L1 simulation
-                });
-                // Do NOT recurse into proxy children.
-                should_recurse = false;
-            } else if input_bytes.len() >= 4 {
-                // Not a proxy — check for Bridge.bridgeTokens(rollupId=0).
-                let selector: [u8; 4] = input_bytes[..4].try_into().unwrap_or([0; 4]);
-                if selector == BRIDGE_TOKENS_SELECTOR {
-                    if let Some(info) = detect_bridge_call_on_l2(
-                        client,
-                        upstream_url,
-                        to_addr,
-                        ccm_address,
-                        &input_bytes,
-                    )
-                    .await
-                    {
-                        // Bridge.bridgeTokens internally builds receiveTokens calldata
-                        // and calls the proxy with it. The proxy forwards receiveTokens
-                        // to CCM.executeCrossChainCall. We need the ACTUAL receiveTokens
-                        // calldata (not bridgeTokens params) for correct action hashes.
-                        // Extract it from the proxy child node in the trace.
-                        let actual_calldata =
-                            extract_proxy_calldata_from_bridge_children_l2(node, ccm_address)
-                                .unwrap_or(info.calldata);
-
-                        detected_calls.push(DetectedL2InternalCall {
-                            destination: info.destination,
-                            calldata: actual_calldata,
-                            value: call_value,
-                            source_address: info.source_address,
-                            delivery_return_data: vec![], // populated later by L1 simulation
-                            delivery_failed: false,       // populated later by L1 simulation
-                        });
-                        should_recurse = false;
-                    }
-                }
-            }
-        }
-    }
-
-    // Recurse into child calls (depth-first).
-    if should_recurse {
-        if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
-            for child in calls {
-                Box::pin(walk_trace_tree_l2(
-                    client,
-                    upstream_url,
-                    ccm_address,
-                    child,
-                    proxy_cache,
-                    detected_calls,
-                ))
-                .await;
-            }
-        }
-    }
 }
 
 // cors_response and error_response are in super::common (re-exported above).
