@@ -256,6 +256,9 @@ jobs:
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
           DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
+      - name: Wait for initial blocks
+        run: sleep 10
+
       - name: Extract rollup.env from Docker
         run: |
           docker compose -f deployments/testnet-eez/docker-compose.yml \
