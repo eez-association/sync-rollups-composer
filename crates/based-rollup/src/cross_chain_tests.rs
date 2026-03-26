@@ -2059,8 +2059,11 @@ fn test_decode_post_batch_calldata_roundtrip() {
     };
     let block_data =
         encode_block_calldata(&[1, 2], &[Bytes::from(vec![0xc0]), Bytes::from(vec![0xc1])]);
-    let calldata =
-        encode_post_batch_calldata(&[entry.clone()], block_data.clone(), Bytes::default());
+    let calldata = encode_post_batch_calldata(
+        std::slice::from_ref(&entry),
+        block_data.clone(),
+        Bytes::default(),
+    );
     let (decoded_entries, decoded_call_data) = decode_post_batch_calldata(&calldata).unwrap();
     assert_eq!(decoded_entries.len(), 1);
     assert_eq!(decoded_entries[0], entry);

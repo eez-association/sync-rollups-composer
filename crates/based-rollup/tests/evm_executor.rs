@@ -457,7 +457,7 @@ fn create_cross_chain_test_db() -> CacheDB<EmptyDB> {
         SYSTEM_ADDRESS,
         AccountInfo {
             balance: U256::from(1_000_000_000_000_000_000u128),
-            code_hash: keccak256(&[]),
+            code_hash: keccak256([]),
             nonce: 0,
             code: None,
             account_id: None,
@@ -552,7 +552,7 @@ fn test_cross_chain_incoming_call_executes_counter() {
     // Cross-chain entries are no longer loaded via system calls — they are
     // now handled through builder-signed transactions. Keep entries constructed
     // above for reference but do not load them into the EVM config.
-    let _entries = vec![result_entry, call_entry];
+    let _entries = [result_entry, call_entry];
 
     // ── Execute the block ──
     let l2_block_number = 1u64;
@@ -767,7 +767,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
         deployer,
         AccountInfo {
             balance: U256::from(10_000_000_000_000_000_000u128),
-            code_hash: keccak256(&[]),
+            code_hash: keccak256([]),
             nonce: 0,
             code: None,
             account_id: None,
@@ -925,7 +925,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
     let evm_config = RollupEvmConfig::new(chain_spec, config.clone());
 
     // Cross-chain entries are no longer loaded via system calls.
-    let _entries = vec![inner_entry, outer_result_entry, trigger_entry];
+    let _entries = [inner_entry, outer_result_entry, trigger_entry];
 
     let l2_block_number = 1u64;
     let header = Header {
@@ -1384,7 +1384,7 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
     ));
 
     // Cross-chain entries are no longer loaded via system calls.
-    let _entries = vec![
+    let _entries = [
         CrossChainExecutionEntry {
             state_deltas: vec![],
             action_hash: result_action_hash,

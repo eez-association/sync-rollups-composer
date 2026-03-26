@@ -88,23 +88,14 @@ if [ -z "${ROLLUPS_ADDRESS:-}" ]; then
   exit 1
 fi
 
-# Verify crosschain-tx-sender is running by checking counter.env exists.
-# We do NOT use its counter address for assertions — the tx-sender keeps
-# incrementing that counter in parallel, which would break exact delta checks.
-echo "Verifying crosschain-tx-sender is running (counter.env check)..."
-COUNTER_ENV_RAW=$(sudo docker exec testnet-eez-builder-1 \
-  cat /shared/counter.env 2>/dev/null || true)
-if [ -z "$COUNTER_ENV_RAW" ]; then
-  echo "ERROR: /shared/counter.env not found — has crosschain-tx-sender finished deploying?"
-  echo "       Start the 'sync' profile: docker compose ... --profile sync up -d"
-  exit 1
+# Check if crosschain-tx-sender's counter.env exists (optional — test deploys its own).
+COUNTER_ENV_RAW=$($DOCKER_COMPOSE_CMD exec -T builder cat /shared/counter.env 2>/dev/null || true)
+if [ -n "$COUNTER_ENV_RAW" ]; then
+  eval "$COUNTER_ENV_RAW"
+  echo "crosschain-tx-sender counter: ${COUNTER_ADDRESS:-unknown} (not used for assertions)"
+else
+  echo "counter.env not found (crosschain-tx-sender not running) — OK, test deploys its own Counter"
 fi
-eval "$COUNTER_ENV_RAW"
-if [ -z "${COUNTER_ADDRESS:-}" ]; then
-  echo "ERROR: COUNTER_ADDRESS not set in counter.env"
-  exit 1
-fi
-echo "crosschain-tx-sender counter: $COUNTER_ADDRESS (not used for assertions)"
 
 # ── Deploy dedicated Counter on L2 ──
 # We deploy a fresh Counter contract so assertions about exact increments are
@@ -363,7 +354,7 @@ if [ "$PEAK_REWIND_CYCLES" -gt 0 ] 2>/dev/null; then
     '[ "$REWINDS_AFTER" -eq 0 ] || [ "$HEALTHY" = "true" ]' \
     "rewinds_after=$REWINDS_AFTER healthy=$HEALTHY"
   # Check logs for rewind messages as confirmation
-  REWIND_LOG=$(sudo docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  REWIND_LOG=$($DOCKER_COMPOSE_CMD \
     logs builder --no-log-prefix --since 120s 2>&1 | grep -ic "rewind" || true)
   echo "  Rewind log entries (last 120s): $REWIND_LOG"
   assert "TEST2: Builder log confirms rewind cycle(s) occurred" '[ "$REWIND_LOG" -ge 1 ]' \
@@ -372,7 +363,7 @@ else
   echo "  NOTE: No rewinds observed — system is handling entries correctly."
   # Still check logs to confirm no unexpected error during this window.
   # Filter out known benign errors (connection retries, WS reconnects, etc.)
-  ERROR_LOG=$(sudo docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  ERROR_LOG=$($DOCKER_COMPOSE_CMD \
     logs builder --no-log-prefix --since 120s 2>&1 \
     | grep -i "panic\|fatal" \
     | grep -v -i "connection\|reconnect\|timeout\|retry" \

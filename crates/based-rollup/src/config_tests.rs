@@ -579,7 +579,7 @@ fn test_cross_chain_env_vars_parsed_via_cli_args() {
     // testing via try_parse_from exercises the same code path as
     // env = "ROLLUPS_ADDRESS" / "CROSS_CHAIN_MANAGER_ADDRESS" / "ROLLUP_ID".
     // We pass the three cross-chain fields as CLI flags.
-    let config = RollupConfig::try_parse_from(&[
+    let config = RollupConfig::try_parse_from([
         "test",
         "--rollups-address",
         "0x1111111111111111111111111111111111111111",

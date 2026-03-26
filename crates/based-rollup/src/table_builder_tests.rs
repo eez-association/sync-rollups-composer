@@ -69,7 +69,7 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
         l2_delivery_failed: false,
     };
 
-    let result = build_continuation_entries(&[call_a.clone()], l2_id);
+    let result = build_continuation_entries(std::slice::from_ref(&call_a), l2_id);
 
     // L2: 1 terminal entry (RESULT(L2,void) hash → RESULT(L2,void))
     assert_eq!(
