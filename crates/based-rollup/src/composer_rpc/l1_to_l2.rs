@@ -29,6 +29,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
+// Shared helpers from the common module.
+use super::common::{
+    cors_response, error_response, eth_call_view, extract_methods,
+    find_failed_proxy_calls_in_l2_trace, get_l1_block_context, get_verification_key,
+    parse_address_from_abi_return,
+};
+
 /// The MAINNET_ROLLUP_ID — L1 source rollup is always 0.
 const MAINNET_ROLLUP_ID: u64 = 0;
 
@@ -733,7 +740,7 @@ async fn queue_independent_calls_l1_to_l2(
 
     // Return the tx hash computed from the raw L1 tx (same as queue_single_cross_chain_call).
     let tx_hash = compute_tx_hash_from_raw(raw_tx)
-        .unwrap_or_else(|_| "0x".to_string());
+        .unwrap_or_else(|| "0x".to_string());
 
     Ok(Some(tx_hash))
 }
@@ -942,7 +949,7 @@ async fn simulate_l1_to_l2_call_on_l2(
             let rollup_id = 1u64; // L2 rollup ID (same as used elsewhere in l1_proxy)
             let mut proxy_cache: HashMap<Address, Option<(Address, u64)>> = HashMap::new();
             let mut discovered = Vec::new();
-            crate::composer_rpc::l2_to_l1::find_failed_proxy_calls_in_l2_trace(
+            find_failed_proxy_calls_in_l2_trace(
                 client,
                 l2_rpc_url,
                 cross_chain_manager_address,
@@ -2552,19 +2559,16 @@ async fn detect_cross_chain_proxy(
     // ABI return: (address originalAddress, uint64 originalRollupId)
     let calldata = format!("0x360d95b6{:0>64}", hex::encode(address.as_slice()));
 
-    let result = eth_call_view(client, l1_rpc_url, rollups_address, &calldata).await;
-
-    let hex_data = match result {
-        Ok(hex) => hex,
-        Err(_) => return Ok(None),
+    let hex_data = match eth_call_view(client, l1_rpc_url, rollups_address, &calldata).await {
+        Some(hex) => hex,
+        None => return Ok(None),
     };
 
-    let destination = parse_address_from_return(&hex_data)?;
-
-    // If originalAddress is zero, the proxy isn't registered
-    if destination.is_zero() {
-        return Ok(None);
-    }
+    // If originalAddress is zero or invalid, the proxy isn't registered
+    let destination = match parse_address_from_abi_return(&hex_data) {
+        Some(addr) => addr,
+        None => return Ok(None),
+    };
 
     // Second 32 bytes = originalRollupId (uint64 ABI-encoded as uint256)
     let hex_clean = hex_data.strip_prefix("0x").unwrap_or(&hex_data);
@@ -2617,19 +2621,21 @@ async fn detect_bridge_call(
     }
 
     // Check if to_addr.manager() returns the Rollups address
-    let manager_result = eth_call_view(client, l1_rpc_url, to_addr, MANAGER_SELECTOR).await;
-    let manager_hex = match manager_result {
-        Ok(hex) => hex,
-        Err(e) => {
+    let manager_hex = match eth_call_view(client, l1_rpc_url, to_addr, MANAGER_SELECTOR).await {
+        Some(hex) => hex,
+        None => {
             tracing::debug!(
                 target: "based_rollup::l1_proxy",
-                %e, %to_addr,
+                %to_addr,
                 "manager() call failed — not a bridge"
             );
             return Ok(None); // No manager() method — not a bridge
         }
     };
-    let manager_addr = parse_address_from_return(&manager_hex)?;
+    let manager_addr = match parse_address_from_abi_return(&manager_hex) {
+        Some(addr) => addr,
+        None => return Ok(None), // Invalid or zero manager → not our bridge
+    };
     if manager_addr != rollups_address {
         tracing::debug!(
             target: "based_rollup::l1_proxy",
@@ -2685,12 +2691,11 @@ async fn detect_bridge_call(
         // Query canonicalBridgeAddress (or use bridge address if not set)
         let selector = hex::encode(&IBridgeView::canonicalBridgeAddressCall::SELECTOR);
         let bridge_addr =
-            match eth_call_view(client, l1_rpc_url, to_addr, &format!("0x{selector}")).await {
-                Ok(hex) => {
-                    let addr = parse_address_from_return(&hex)?;
-                    if addr.is_zero() { to_addr } else { addr }
-                }
-                Err(_) => to_addr,
+            match eth_call_view(client, l1_rpc_url, to_addr, &format!("0x{selector}")).await
+                .and_then(|hex| parse_address_from_abi_return(&hex))
+            {
+                Some(addr) => addr,
+                None => to_addr,
             };
 
         tracing::info!(
@@ -2863,42 +2868,14 @@ fn decode_raw_tx_for_trace(raw_tx: &str) -> eyre::Result<Value> {
     Ok(obj)
 }
 
-/// Make a read-only `eth_call` to a contract and return the hex result.
-async fn eth_call_view(
-    client: &reqwest::Client,
-    rpc_url: &str,
-    to: Address,
-    data: &str,
-) -> eyre::Result<String> {
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "eth_call",
-        "params": [{"to": format!("{to}"), "data": data}, "latest"],
-        "id": 99996
-    });
+// eth_call_view is in super::common (imported above).
 
-    let resp = client
-        .post(rpc_url)
-        .json(&req)
-        .send()
-        .await?
-        .json::<Value>()
-        .await?;
-
-    if let Some(error) = resp.get("error") {
-        return Err(eyre::eyre!("eth_call failed: {error}"));
-    }
-
-    resp.get("result")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| eyre::eyre!("eth_call returned no result"))
-}
-
-/// Parse an address from a 32-byte ABI-encoded return value.
+/// Thin wrapper for backward compatibility (used by tests via `use super::*`).
+/// Returns `eyre::Result` and does NOT reject the zero address.
+#[cfg(test)]
 fn parse_address_from_return(hex_str: &str) -> eyre::Result<Address> {
-    let hex = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex_decode(hex).ok_or_else(|| eyre::eyre!("invalid hex in eth_call return"))?;
+    let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex_decode(clean).ok_or_else(|| eyre::eyre!("invalid hex in eth_call return"))?;
     if bytes.len() < 32 {
         return Err(eyre::eyre!("return data too short for address"));
     }
@@ -2939,64 +2916,7 @@ fn u256_from_be_bytes(bytes: &[u8]) -> u64 {
     val
 }
 
-/// Extract (method, params) pairs from a JSON-RPC request (single or batch).
-fn extract_methods(json: &Value) -> Vec<(String, Option<&Vec<Value>>)> {
-    let mut result = Vec::new();
-    match json {
-        Value::Object(obj) => {
-            if let Some(Value::String(method)) = obj.get("method") {
-                let params = obj.get("params").and_then(|p| p.as_array());
-                result.push((method.clone(), params));
-            }
-        }
-        Value::Array(arr) => {
-            for item in arr {
-                if let Value::Object(obj) = item {
-                    if let Some(Value::String(method)) = obj.get("method") {
-                        let params = obj.get("params").and_then(|p| p.as_array());
-                        result.push((method.clone(), params));
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    result
-}
-
-/// Add CORS headers to a response.
-fn cors_response(mut resp: Response<Full<HyperBytes>>) -> Response<Full<HyperBytes>> {
-    let headers = resp.headers_mut();
-    headers.insert(
-        "Access-Control-Allow-Origin",
-        "*".parse().expect("valid header"),
-    );
-    headers.insert(
-        "Access-Control-Allow-Methods",
-        "POST, OPTIONS".parse().expect("valid header"),
-    );
-    headers.insert(
-        "Access-Control-Allow-Headers",
-        "Content-Type".parse().expect("valid header"),
-    );
-    resp
-}
-
-/// Build a JSON-RPC error response.
-fn error_response(status: StatusCode, message: &str) -> Response<Full<HyperBytes>> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "error": { "code": -32603, "message": message },
-        "id": null
-    });
-    cors_response(
-        Response::builder()
-            .status(status)
-            .header("Content-Type", "application/json")
-            .body(Full::new(HyperBytes::from(body.to_string())))
-            .expect("valid response"),
-    )
-}
+// extract_methods, cors_response, error_response are in super::common (imported above).
 
 /// Extract the effective gas price from a raw signed transaction.
 /// For EIP-1559 txs, uses `max_fee_per_gas` (the worst-case ordering price).
@@ -3024,103 +2944,10 @@ fn extract_gas_price_from_raw_tx(raw_tx: &str) -> eyre::Result<u128> {
     Ok(gas_price)
 }
 
-/// Compute the tx hash from a raw signed transaction hex string.
-fn compute_tx_hash_from_raw(raw_tx: &str) -> eyre::Result<String> {
-    let raw_hex = raw_tx.strip_prefix("0x").unwrap_or(raw_tx);
-    let raw_bytes =
-        hex_decode(raw_hex).ok_or_else(|| eyre::eyre!("invalid hex in raw transaction"))?;
+// compute_tx_hash is in super::common. Local alias for the old name.
+use super::common::compute_tx_hash as compute_tx_hash_from_raw;
 
-    use alloy_consensus::transaction::TxEnvelope;
-    use alloy_rlp::Decodable;
-
-    let tx_envelope = TxEnvelope::decode(&mut raw_bytes.as_slice())
-        .map_err(|e| eyre::eyre!("failed to decode transaction: {e}"))?;
-
-    Ok(format!("{}", tx_envelope.tx_hash()))
-}
-
-/// Get the latest L1 block number, hash, and parent hash for proof computation.
-///
-/// Returns `(block_number, block_hash, parent_hash)`.
-/// For real `postBatch`, use `(number + 1, hash)` as `(target_block, parent_hash)`.
-/// For `traceCallMany` at "latest", use `(number, parent_hash)` since the trace
-/// executes at the current block where `block.number = number` and
-/// `blockhash(block.number - 1) = parent_hash`.
-async fn get_l1_block_context(
-    client: &reqwest::Client,
-    l1_rpc_url: &str,
-) -> eyre::Result<(u64, alloy_primitives::B256, alloy_primitives::B256)> {
-    let req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "eth_getBlockByNumber",
-        "params": ["latest", false],
-        "id": 99997
-    });
-
-    let resp = client
-        .post(l1_rpc_url)
-        .json(&req)
-        .send()
-        .await?
-        .json::<Value>()
-        .await?;
-
-    let block = resp
-        .get("result")
-        .ok_or_else(|| eyre::eyre!("no result from eth_getBlockByNumber"))?;
-
-    let number_hex = block
-        .get("number")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no block number"))?;
-    let number = u64::from_str_radix(number_hex.strip_prefix("0x").unwrap_or(number_hex), 16)
-        .map_err(|e| eyre::eyre!("invalid block number: {e}"))?;
-
-    let hash_hex = block
-        .get("hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no block hash"))?;
-    let hash = hash_hex
-        .parse::<alloy_primitives::B256>()
-        .map_err(|e| eyre::eyre!("invalid block hash: {e}"))?;
-
-    let parent_hash_hex = block
-        .get("parentHash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no parent hash"))?;
-    let parent_hash = parent_hash_hex
-        .parse::<alloy_primitives::B256>()
-        .map_err(|e| eyre::eyre!("invalid parent hash: {e}"))?;
-
-    Ok((number, hash, parent_hash))
-}
-
-/// Query the verification key for a rollup from the Rollups contract.
-async fn get_verification_key(
-    client: &reqwest::Client,
-    l1_rpc_url: &str,
-    rollups_address: Address,
-    rollup_id: u64,
-) -> eyre::Result<alloy_primitives::B256> {
-    // rollups(uint256) — ABI encode: selector + uint256(rollup_id)
-    // Selector = keccak256("rollups(uint256)")[:4]
-    let selector = &alloy_primitives::keccak256(b"rollups(uint256)")[..4];
-    let calldata = format!("0x{}{:0>64x}", hex::encode(selector), rollup_id);
-
-    let result_hex = eth_call_view(client, l1_rpc_url, rollups_address, &calldata).await?;
-
-    // rollups() returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)
-    // VK is at offset 32..64 (word 1, after address at word 0)
-    let hex_clean = result_hex.strip_prefix("0x").unwrap_or(&result_hex);
-    if hex_clean.len() < 128 {
-        return Err(eyre::eyre!("rollups() return too short for VK"));
-    }
-    let vk_hex = &hex_clean[64..128];
-    let vk_str = format!("0x{vk_hex}");
-    vk_str
-        .parse::<alloy_primitives::B256>()
-        .map_err(|e| eyre::eyre!("invalid VK: {e}"))
-}
+// get_l1_block_context and get_verification_key are in super::common (imported above).
 
 // Use hex crate for encoding (already in dependency tree via alloy)
 mod hex {
