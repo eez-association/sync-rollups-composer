@@ -190,7 +190,7 @@ For each `BatchPosted` event:
 4a. For consumed deferred entries, reconstruct L2-format entry pairs using the CALL actions from `ExecutionConsumed` events (see §4e)
 5. The **last** immediate entry's `StateDelta.newState` is the batch final state root
 6. The final state root is assigned to the **last** block in the batch; intermediate blocks get `B256::ZERO` (recomputed locally by executing the block)
-7. Deferred entries (filtered by §4e) are assigned to the **first** block in the batch — even if that block is a gap-fill empty block
+7. Deferred entries (filtered by §4e) are assigned to the **first submitted** block in the batch (not gap-fill empty blocks, which have no transactions to consume entries)
 
 ### 4c. L1 context
 

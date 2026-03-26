@@ -253,6 +253,13 @@ impl DerivationPipeline {
         let mut local_derived_l2_block = self.last_derived_l2_block;
         let mut local_l1_info = self.last_l1_info.clone();
 
+        // Shared consumed-entry counter across ALL batches in this derivation window.
+        // MUST be shared (not rebuilt per-batch) because the same actionHash can appear
+        // in multiple batches. On L1, entries are consumed FIFO across batches, so
+        // the remaining count must decrement across batches in order.
+        let mut remaining: std::collections::HashMap<B256, usize> =
+            consumed_map.iter().map(|(k, v)| (*k, v.len())).collect();
+
         for log in logs {
             let l1_block = match log.block_number {
                 Some(n) => n,
@@ -333,13 +340,6 @@ impl DerivationPipeline {
             let mut batch_final_state_root = B256::ZERO;
             let mut deferred_entries: Vec<CrossChainExecutionEntry> = Vec::new();
             let mut has_unconsumed_entries = false;
-
-            // Build occurrence-aware remaining counter from consumed_map.
-            // Each actionHash maps to how many times it was consumed on L1.
-            // Duplicate-call patterns (e.g., CallTwice) produce multiple
-            // ExecutionConsumed events with the same actionHash.
-            let mut remaining: std::collections::HashMap<B256, usize> =
-                consumed_map.iter().map(|(k, v)| (*k, v.len())).collect();
 
             for entry in &entries {
                 if entry.action_hash == B256::ZERO {
@@ -579,11 +579,11 @@ impl DerivationPipeline {
                     let mut unconsumed_deposit_count = 0usize;
                     let mut unconsumed_withdrawal_pair_count = 0usize;
                     {
-                        // Build a separate remaining counter for §4f unconsumed counting.
-                        // This is independent of the classification loop's `remaining`
-                        // because we're re-walking the original entry list.
+                        // Snapshot the shared remaining counter for §4f unconsumed counting.
+                        // Uses the same shared counter that was decremented by previous
+                        // batches' entries, ensuring correct cross-batch FIFO accounting.
                         let mut remaining_for_filter: std::collections::HashMap<B256, usize> =
-                            consumed_map.iter().map(|(k, v)| (*k, v.len())).collect();
+                            remaining.clone();
 
                         let mut idx = 0;
                         while idx < deferred.len() {
