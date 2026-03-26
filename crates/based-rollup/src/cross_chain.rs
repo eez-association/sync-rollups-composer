@@ -1808,7 +1808,7 @@ pub fn bridge_creation_bytecode() -> Vec<u8> {
         let path = std::path::Path::new("contracts/out/Bridge.sol/Bridge.json");
         let bc = load_bytecode_from_artifact(path);
         if bc.is_empty() {
-            let alt = std::path::Path::new("contracts/sync-rollups/out/Bridge.sol/Bridge.json");
+            let alt = std::path::Path::new("contracts/sync-rollups-protocol/out/Bridge.sol/Bridge.json");
             load_bytecode_from_artifact(alt)
         } else {
             bc

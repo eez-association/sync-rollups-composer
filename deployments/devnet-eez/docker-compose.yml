@@ -205,7 +205,7 @@ services:
           --token "$$FLASH_TOKEN_ADDRESS" \
           --wrapped-token "$$WRAPPED_TOKEN_L2" \
           --l2-rollup-id 1 \
-          --contracts-dir /app/contracts/sync-rollups
+          --contracts-dir /app/contracts/sync-rollups-protocol
     volumes:
       - ../../contracts:/app/contracts
       - ../shared/scripts:/app/scripts

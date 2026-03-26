@@ -90,7 +90,7 @@ if [ "${DEPLOY_FLASH_LOAN:-false}" = "true" ] && \
     echo "=== Deploying Flash Loan Contracts on L2 ==="
     L2_DEPLOY_KEY="0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
     DEV5_ADDR="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
-    cd "$CONTRACTS_DIR/sync-rollups"
+    cd "$CONTRACTS_DIR/sync-rollups-protocol"
 
     DEV5_NONCE=$(cast nonce --rpc-url "$L2_RPC" "$DEV5_ADDR" 2>&1)
     echo "dev#5 L2 nonce: $DEV5_NONCE"

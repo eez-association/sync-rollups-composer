@@ -1,6 +1,6 @@
 /**
  * FlashLoanBridgeExecutor creation bytecode and ABI encoder.
- * Source: contracts/sync-rollups/out/FlashLoanBridgeExecutor.sol/FlashLoanBridgeExecutor.json
+ * Source: contracts/sync-rollups-protocol/out/FlashLoanBridgeExecutor.sol/FlashLoanBridgeExecutor.json
  */
 
 /** Raw creation bytecode (no 0x prefix) */

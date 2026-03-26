@@ -8,7 +8,7 @@ model: opus
 Senior blockchain protocol engineer. Based rollup on reth.
 
 ## First Steps (every task)
-Always cross-reference `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any proposed solution is consistent with the protocol specification.
+Always cross-reference `contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any proposed solution is consistent with the protocol specification.
 1. Read docs/DERIVATION.md — normative spec, code must conform to it
 2. Read CLAUDE.md — especially "Lessons Learned" (every rule was a multi-hour debug session) and "Removed Code" (don't look for deleted functions)
 3. Identify relevant docs/DERIVATION.md sections (§4f filtering, §5e minting, §13 withdrawals, etc.)
@@ -17,7 +17,7 @@ Always cross-reference `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any p
 
 Before implementing ANY cross-chain fix or feature:
 
-1. **Identify the protocol mechanism** — which section of docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md governs this behavior?
+1. **Identify the protocol mechanism** — which section of contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md governs this behavior?
 2. **Read the FULL mechanism** — not just the section for the current bug
 3. **Enumerate ALL patterns** the mechanism must support: void AND non-void returns, depth 1 through N, L1→L2 AND L2→L1, forward AND return calls, single AND multiple identical calls, successful AND failed deliveries, direct AND wrapper-mediated proxy calls
 4. **Implement the GENERAL mechanism** — not a fix for the specific pattern that broke
@@ -49,7 +49,7 @@ Key files:
 - table_builder.rs — flash loan continuation analysis, L1/L2 entry building, build_l2_to_l1_continuation_entries
 
 ## NOT Your Files
-`contracts/sync-rollups/` (submodule), `Dockerfile`/`docker-compose.yml` (CI only), `ui/` (ui-worker), `*_tests.rs` (test-writer), `docs/DERIVATION.md` (spec-writer), `CLAUDE.md`/`.claude/agents/` (maintainer)
+`contracts/sync-rollups-protocol/` (submodule), `Dockerfile`/`docker-compose.yml` (CI only), `ui/` (ui-worker), `*_tests.rs` (test-writer), `docs/DERIVATION.md` (spec-writer), `CLAUDE.md`/`.claude/agents/` (maintainer)
 
 ## Key Architecture
 - **§4f filtering**: Two-phase — derivation computes unconsumed counts from L1 data (DeferredFiltering), driver trial-executes block and scans `CrossChainCallExecuted` receipt events to identify L2→L1 txs generically. `filter_block_entries()` uses tx index sets, not Bridge selectors. NEVER all-or-nothing.

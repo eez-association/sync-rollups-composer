@@ -27,7 +27,7 @@ export FOUNDRY_DISABLE_NIGHTLY_WARNING=1
 SCRIPT="script/flash-loan-reverse/DeployReverseFlashLoan.s.sol"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
-CONTRACTS_DIR="${CONTRACTS_DIR:-$(cd "$(dirname "$0")/../contracts/sync-rollups" && pwd)}"
+CONTRACTS_DIR="${CONTRACTS_DIR:-$(cd "$(dirname "$0")/../contracts/sync-rollups-protocol" && pwd)}"
 L1_ROLLUP_ID=0
 
 while [[ $# -gt 0 ]]; do

@@ -155,9 +155,9 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
       - name: Compile contracts
         run: |
-          rm -rf contracts/sync-rollups/lib/openzeppelin-contracts/fv/harnesses
-          cd contracts/sync-rollups && forge build --skip "fv/*"
-          cd ../.. && cd contracts && forge build --skip "fv/*" --skip "sync-rollups/visualizator/*"
+          rm -rf contracts/sync-rollups-protocol/lib/openzeppelin-contracts/fv/harnesses
+          cd contracts/sync-rollups-protocol && forge build --skip "fv/*"
+          cd ../.. && cd contracts && forge build --skip "fv/*" --skip "sync-rollups-protocol/visualizator/*"
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run integration tests
@@ -189,9 +189,9 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
       - name: Compile contracts
         run: |
-          rm -rf contracts/sync-rollups/lib/openzeppelin-contracts/fv/harnesses
-          cd contracts/sync-rollups && forge build --skip "fv/*"
-          cd ../.. && cd contracts && forge build --skip "fv/*" --skip "sync-rollups/visualizator/*"
+          rm -rf contracts/sync-rollups-protocol/lib/openzeppelin-contracts/fv/harnesses
+          cd contracts/sync-rollups-protocol && forge build --skip "fv/*"
+          cd ../.. && cd contracts && forge build --skip "fv/*" --skip "sync-rollups-protocol/visualizator/*"
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run E2E tests

@@ -688,7 +688,7 @@ struct DetectedInternalCall {
     call_success: bool,
     /// Return data from simulating this call on L2 (via `debug_traceCallMany`).
     /// Used for the RESULT action hash — if the L2 target returns non-void data,
-    /// the RESULT hash must include it (docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
+    /// the RESULT hash must include it (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
     /// Empty when the call returns void or when simulation was not performed.
     return_data: Vec<u8>,
 }
@@ -697,7 +697,7 @@ struct DetectedInternalCall {
 ///
 /// For each detected L1->L2 cross-chain call, the L2 target contract may return
 /// non-void data. The RESULT action hash includes this data (per
-/// docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2), so we must simulate the call on L2 to
+/// contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2), so we must simulate the call on L2 to
 /// predict the correct return bytes.
 ///
 /// The simulation runs as `debug_traceCallMany` from the L2 proxy address
@@ -1613,7 +1613,7 @@ async fn trace_and_detect_internal_calls(
 
     // Enrich detected calls with L2 return data by simulating each L1→L2 call
     // on L2. The RESULT action hash includes the exact return bytes from the
-    // target contract (docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
+    // target contract (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
     if !cross_chain_manager_address.is_zero() {
         for call in &mut detected_calls {
             let (ret_data, success) = simulate_l1_to_l2_call_on_l2(

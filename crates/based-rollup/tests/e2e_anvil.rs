@@ -90,11 +90,11 @@ async fn deploy_rollups(rpc_url: &str) -> (Address, u64) {
     // The artifact is emitted under the test file's output directory.
     let verifier_artifact_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/Rollups.t.sol/MockZKVerifier.json"
+        "/../../contracts/sync-rollups-protocol/out/Rollups.t.sol/MockZKVerifier.json"
     );
     let verifier_artifact: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(verifier_artifact_path).expect(
-            "MockZKVerifier artifact not found — run forge build in contracts/sync-rollups",
+            "MockZKVerifier artifact not found — run forge build in contracts/sync-rollups-protocol",
         ))
         .unwrap();
     let verifier_hex = verifier_artifact["bytecode"]["object"]
@@ -116,11 +116,11 @@ async fn deploy_rollups(rpc_url: &str) -> (Address, u64) {
     // 2. Deploy Rollups(address _zkVerifier, uint256 startingRollupId=1)
     let rollups_artifact_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/Rollups.sol/Rollups.json"
+        "/../../contracts/sync-rollups-protocol/out/Rollups.sol/Rollups.json"
     );
     let rollups_artifact: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(rollups_artifact_path)
-            .expect("Rollups artifact not found — run forge build in contracts/sync-rollups"),
+            .expect("Rollups artifact not found — run forge build in contracts/sync-rollups-protocol"),
     )
     .unwrap();
     let rollups_hex = rollups_artifact["bytecode"]["object"]
@@ -4248,11 +4248,11 @@ async fn deploy_rollups_contracts(rpc_url: &str) -> (Address, Address) {
     // MockZKVerifier is defined inline in Rollups.t.sol (no standalone .sol file).
     let verifier_artifact_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/Rollups.t.sol/MockZKVerifier.json"
+        "/../../contracts/sync-rollups-protocol/out/Rollups.t.sol/MockZKVerifier.json"
     );
     let verifier_artifact: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(verifier_artifact_path).expect(
-            "MockZKVerifier artifact not found — run forge build in contracts/sync-rollups",
+            "MockZKVerifier artifact not found — run forge build in contracts/sync-rollups-protocol",
         ))
         .unwrap();
     let verifier_hex = verifier_artifact["bytecode"]["object"]
@@ -4274,11 +4274,11 @@ async fn deploy_rollups_contracts(rpc_url: &str) -> (Address, Address) {
     // Deploy Rollups(address _zkVerifier, uint256 startingRollupId)
     let rollups_artifact_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/Rollups.sol/Rollups.json"
+        "/../../contracts/sync-rollups-protocol/out/Rollups.sol/Rollups.json"
     );
     let rollups_artifact: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(rollups_artifact_path)
-            .expect("Rollups artifact not found — run forge build in contracts/sync-rollups"),
+            .expect("Rollups artifact not found — run forge build in contracts/sync-rollups-protocol"),
     )
     .unwrap();
     let rollups_hex = rollups_artifact["bytecode"]["object"]
@@ -5974,7 +5974,7 @@ fn load_deployed_bytecode(artifact_path: &str) -> Bytes {
 fn load_ccm_from_genesis() -> Bytes {
     let artifact_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/CrossChainManagerL2.sol/CrossChainManagerL2.json"
+        "/../../contracts/sync-rollups-protocol/out/CrossChainManagerL2.sol/CrossChainManagerL2.json"
     );
     load_deployed_bytecode(artifact_path)
 }
@@ -6172,7 +6172,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     // Counter contract
     let counter_artifact = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/CounterContracts.sol/Counter.json"
+        "/../../contracts/sync-rollups-protocol/out/CounterContracts.sol/Counter.json"
     );
     let counter_code = load_deployed_bytecode(counter_artifact);
     db.insert_account_info(

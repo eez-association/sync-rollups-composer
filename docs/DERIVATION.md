@@ -969,7 +969,7 @@ The rationale: for L2-to-L1 children, the L1 proxy is `proxy(L2_source, our_roll
 
 **Continuation entry routing (issue #245)**: The driver routes L1 deferred entries from `QueuedWithdrawal` to one of two queues: `pending_withdrawal_l1_entries` (pair-based, for simple L2-to-L1 calls) or `pending_continuation_l1_entries` (5-entry structure, for continuation patterns). The routing condition is `trigger_source.is_none()`: withdrawals queued via `initiateL2CrossChainCall` set `trigger_source: None`; continuations queued via `buildL2ToL1ExecutionTable` set `trigger_source: Some(source_address)`.
 
-**Delivery return data in RESULT hashes (issues #245, #246)**: The `_processCallAtScope` function (docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md line 497) builds a RESULT action with `data: returnData` from `executeOnBehalf`. When the delivery function returns non-empty data (e.g., `Logger.execute` returns `abi.encode(bytes(...))`), the RESULT hash must include that data — not `result_void`. Four sites in `build_l2_to_l1_continuation_entries` construct delivery RESULT entries:
+**Delivery return data in RESULT hashes (issues #245, #246)**: The `_processCallAtScope` function (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md line 497) builds a RESULT action with `data: returnData` from `executeOnBehalf`. When the delivery function returns non-empty data (e.g., `Logger.execute` returns `abi.encode(bytes(...))`), the RESULT hash must include that data — not `result_void`. Four sites in `build_l2_to_l1_continuation_entries` construct delivery RESULT entries:
 
 1. **Root call delivery result** (first call, `root_pos == 0`): uses `l2_call.delivery_return_data`
 2. **Scope resolution** (first call with children): uses `l2_call.delivery_return_data`

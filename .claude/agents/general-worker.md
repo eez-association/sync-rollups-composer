@@ -13,7 +13,7 @@ Read CLAUDE.md for Docker rules and dev workflow. Read docs/DERIVATION.md when a
 `deployments/shared/scripts/*.sh`, `deployments/*/docker-compose*.yml`, `deployments/shared/Dockerfile*`, `scripts/e2e/*.sh`, `scripts/tools/*.sh`, `README.md`, `deployments/*/README.md`
 
 ## NOT Your Files
-`crates/based-rollup/src/*.rs` (core-worker), `ui/` (ui-worker), `docs/DERIVATION.md` (spec-writer), `contracts/sync-rollups/` (submodule)
+`crates/based-rollup/src/*.rs` (core-worker), `ui/` (ui-worker), `docs/DERIVATION.md` (spec-writer), `contracts/sync-rollups-protocol/` (submodule)
 
 ## External Repository Analysis
 1. Clone to `/tmp/` — NEVER inside the project

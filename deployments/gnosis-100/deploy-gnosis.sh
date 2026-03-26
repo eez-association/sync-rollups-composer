@@ -18,7 +18,7 @@
 #   - forge + cast (Foundry) installed
 #   - Deployer account funded with at least 0.5 xDAI on Gnosis Chain / Chiado
 #   - Builder account funded with xDAI for ongoing postBatch submissions
-#   - contracts/sync-rollups submodule initialized (git submodule update --init)
+#   - contracts/sync-rollups-protocol submodule initialized (git submodule update --init)
 #
 # Environment overrides:
 #   CONTRACTS_DIR    — path to contracts/ directory (default: ../contracts relative to script)
@@ -90,8 +90,8 @@ fi
 # ── Build contracts ───────────────────────────────────────────────────
 
 echo ""
-echo "Building sync-rollups contracts..."
-cd "$CONTRACTS_DIR/sync-rollups"
+echo "Building sync-rollups-protocol contracts..."
+cd "$CONTRACTS_DIR/sync-rollups-protocol"
 forge build --skip test
 
 # ── Helper: extract bytecode.object from forge JSON artifacts ─────────
@@ -229,7 +229,7 @@ DEPLOY_TIMESTAMP=$(cast block --rpc-url "$GNOSIS_RPC" "$DEPLOY_BLOCK" --field ti
 # CRITICAL: Read from out/ JSON artifacts, NOT forge inspect.
 # forge inspect can produce different bytecodes than forge build artifacts.
 # CREATE2 address determinism depends on identical bytecodes across L1 and L2.
-# See CLAUDE.md: "ALL bytecodes MUST come from contracts/sync-rollups/out/"
+# See CLAUDE.md: "ALL bytecodes MUST come from contracts/sync-rollups-protocol/out/"
 
 echo ""
 echo "Extracting L2 contract bytecodes from build artifacts..."
@@ -237,8 +237,8 @@ cd "$CONTRACTS_DIR"
 forge build --skip test --skip script --skip "visualizat*"
 
 L2_CONTEXT_BYTECODE=$(_bc "$CONTRACTS_DIR/out/L2Context.sol/L2Context.json")
-CCM_BYTECODE=$(_bc "$CONTRACTS_DIR/sync-rollups/out/CrossChainManagerL2.sol/CrossChainManagerL2.json")
-BRIDGE_BYTECODE=$(_bc "$CONTRACTS_DIR/sync-rollups/out/Bridge.sol/Bridge.json")
+CCM_BYTECODE=$(_bc "$CONTRACTS_DIR/sync-rollups-protocol/out/CrossChainManagerL2.sol/CrossChainManagerL2.json")
+BRIDGE_BYTECODE=$(_bc "$CONTRACTS_DIR/sync-rollups-protocol/out/Bridge.sol/Bridge.json")
 
 if [ "$L2_CONTEXT_BYTECODE" = "null" ] || [ -z "$L2_CONTEXT_BYTECODE" ]; then
     echo "ERROR: Failed to extract L2Context bytecode"

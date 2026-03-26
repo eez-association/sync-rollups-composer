@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "../sync-rollups/src/IZKVerifier.sol";
+import "../sync-rollups-protocol/src/IZKVerifier.sol";
 
 /// @notice Mock ZK verifier that accepts all proofs (development only).
 contract MockZKVerifier is IZKVerifier {

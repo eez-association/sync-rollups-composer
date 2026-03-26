@@ -30,7 +30,7 @@ All commands in this guide should be run from the **repo root** unless otherwise
 ```bash
 # Build everything
 git submodule update --init
-cd contracts/sync-rollups && forge build --skip test && cd ../..
+cd contracts/sync-rollups-protocol && forge build --skip test && cd ../..
 cargo build --release
 docker build -f deployments/shared/Dockerfile --target runtime -t based-rollup:local .
 ```
@@ -102,7 +102,7 @@ deployments/gnosis-100/deploy.sh \
 The script performs these steps:
 1. Validates chain ID = 100
 2. Checks deployer balance (warns if < 0.1 xDAI)
-3. Builds contracts from `contracts/sync-rollups`
+3. Builds contracts from `contracts/sync-rollups-protocol`
 4. Deploys **tmpECDSAVerifier** (constructor args: `owner`, `signer`)
 5. Deploys **Rollups.sol** (constructor args: verifier address, numRollups=1)
 6. Computes genesis state root via `based-rollup genesis-state-root`

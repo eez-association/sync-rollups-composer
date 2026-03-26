@@ -26,8 +26,8 @@ services:
       - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
       - ./genesis-l2.json:/etc/based-rollup/genesis.json
       - ../../contracts/out:/app/contracts/out
-      - ../../contracts/sync-rollups/out:/app/contracts/sync-rollups/out
-      - ../../contracts/sync-rollups/cache:/app/contracts/sync-rollups/cache
+      - ../../contracts/sync-rollups-protocol/out:/app/contracts/sync-rollups-protocol/out
+      - ../../contracts/sync-rollups-protocol/cache:/app/contracts/sync-rollups-protocol/cache
 
   deploy-l2:
     build:
@@ -38,8 +38,8 @@ services:
     environment:
       DEPLOY_FLASH_LOAN: "true"
     volumes:
-      - ../../contracts/sync-rollups/out:/app/contracts/sync-rollups/out
-      - ../../contracts/sync-rollups/cache:/app/contracts/sync-rollups/cache
+      - ../../contracts/sync-rollups-protocol/out:/app/contracts/sync-rollups-protocol/out
+      - ../../contracts/sync-rollups-protocol/cache:/app/contracts/sync-rollups-protocol/cache
 
   builder:
     build:

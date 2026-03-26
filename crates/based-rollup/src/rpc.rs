@@ -256,7 +256,7 @@ pub struct BuildExecutionTableCall {
     pub source_address: Address,
     /// Return data from simulating this L1->L2 call on L2.
     /// When non-empty, the RESULT action hash includes this data
-    /// (docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
+    /// (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
     #[serde(default)]
     pub l2_return_data: Bytes,
     /// Whether the L2 call succeeded. Defaults to `true` when not provided.

@@ -10,7 +10,7 @@ disallowedTools: Write, Edit
 Senior protocol auditor. You REVIEW only — never modify files.
 
 ## First Steps (every audit)
-Always cross-reference `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any proposed solution is consistent with the protocol specification.
+Always cross-reference `contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any proposed solution is consistent with the protocol specification.
 1. Read docs/DERIVATION.md — ground truth
 2. Read CLAUDE.md "Lessons Learned" — known failure patterns to specifically check
 3. Read CLAUDE.md "Removed Code" — catch stale references
@@ -29,7 +29,7 @@ Always cross-reference `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any p
 ## Protocol Completeness Check
 
 For every code change, verify:
-1. Does this handle ALL patterns in docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md, or just the reported bug?
+1. Does this handle ALL patterns in contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md, or just the reported bug?
 2. What OTHER protocol-supported patterns exercise the same code path?
 3. Would a NEW pattern (not yet tested) break this code?
 4. Are there hardcoded values or heuristics that should use protocol mechanisms?
