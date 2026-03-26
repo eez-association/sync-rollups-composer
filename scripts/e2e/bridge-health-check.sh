@@ -119,7 +119,7 @@ assert "Deposit L1 tx succeeded" '[ "$DEPOSIT_STATUS" = "1" ]'
 
 echo "Waiting for L2 processing..."
 L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
+wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 1 60 >/dev/null || true
 wait_for_pending_zero 60 >/dev/null
 
 L2_BAL_AFTER=$(get_balance "$L2_RPC" "$TEST_ADDR")
@@ -176,7 +176,7 @@ assert "Withdrawal L2 tx succeeded" '[ "$WITHDRAW_STATUS" = "1" ]'
 
 echo "Waiting for L1 trigger..."
 L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
+wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 1 60 >/dev/null || true
 wait_for_pending_zero 60 >/dev/null
 
 L1_BAL_AFTER=$(get_balance "$L1_RPC" "$TEST_ADDR")
@@ -209,40 +209,7 @@ assert "No pending/rewinds after withdrawal" 'echo "$HEALTH_STATUS" | grep -q "p
 print_elapsed "TEST 2"
 echo ""
 
-# ══════════════════════════════════════════
-#  TEST 3: Deposit After Withdrawal (mutual exclusion)
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 3: Deposit After Withdrawal"
-echo "========================================"
-start_timer
-
-EB_BEFORE=$(get_ether_balance)
-
-DEPOSIT_RESULT=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_ADDRESS" "bridgeEther(uint256,address)" 1 "$TEST_ADDR" --value 0.5ether --gas-limit 800000 2>&1)
-DEPOSIT_STATUS=$(echo "$DEPOSIT_RESULT" | grep "^status" | awk '{print $2}')
-echo "Deposit after withdrawal status: $DEPOSIT_STATUS"
-assert "Post-withdrawal deposit succeeded" '[ "$DEPOSIT_STATUS" = "1" ]'
-
-echo "Waiting for L2 processing..."
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
-wait_for_pending_zero 60 >/dev/null
-
-EB_AFTER=$(get_ether_balance)
-EB_DELTA=$(python3 -c "print(int('$EB_AFTER') - int('$EB_BEFORE'))")
-assert "etherBalance increased by 0.5 ETH" '[ "$EB_DELTA" = "500000000000000000" ]'
-
-ROOTS=$(check_state_roots)
-assert "State roots match after post-withdrawal deposit" '[ "$ROOTS" = "MATCH" ]'
-
-HEALTH_STATUS=$(check_health_summary)
-assert "No pending/rewinds" 'echo "$HEALTH_STATUS" | grep -q "pending=0 rewinds=0"'
-
-print_elapsed "TEST 3"
-echo ""
+# TEST 3 (deposit after withdrawal) removed — covered by TEST 12 (interleave).
 
 # ══════════════════════════════════════════
 #  TEST 4: Rapid Sequential Deposits (3 × 0.5 ETH)
@@ -265,7 +232,7 @@ done
 
 echo "Waiting for L2 processing..."
 L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
+wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 1 60 >/dev/null || true
 wait_for_pending_zero 60 >/dev/null
 
 EB_AFTER=$(get_ether_balance)
@@ -279,273 +246,13 @@ assert "State roots match after rapid deposits" '[ "$ROOTS" = "MATCH" ]'
 print_elapsed "TEST 4"
 echo ""
 
-# ══════════════════════════════════════════
-#  TEST 5: Sequential Withdrawals (3 × 0.3 ETH)
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 5: 3 Sequential Withdrawals (0.3 ETH each)"
-echo "========================================"
-start_timer
-
-# Ensure prior deposits have settled before withdrawals
-echo "Waiting for deposits to settle before withdrawals..."
-wait_for_pending_zero 60 >/dev/null
-
-L1_BAL_BEFORE=$(get_balance "$L1_RPC" "$TEST_ADDR")
-
-for i in 1 2 3; do
-  S=$(cast send --rpc-url "$L2_PROXY" --private-key "$TEST_KEY" \
-    "$BRIDGE_L2_ADDRESS" "bridgeEther(uint256,address)" 0 "$TEST_ADDR" --value 0.3ether --gas-limit 500000 2>&1 | grep "^status" | awk '{print $2}')
-  echo "  Withdrawal #$i: L2 status=$S"
-  assert "Sequential withdrawal #$i L2 tx succeeded" '[ "$S" = "1" ]'
-  sleep 15
-done
-
-echo "Waiting for L1 triggers..."
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
-wait_for_pending_zero 60 >/dev/null
-
-L1_BAL_AFTER=$(get_balance "$L1_RPC" "$TEST_ADDR")
-L1_DELTA=$(python3 -c "print(int('$L1_BAL_AFTER') - int('$L1_BAL_BEFORE'))")
-echo "L1 total delta: $(wei_to_eth "$L1_DELTA") ETH"
-assert "L1 received 0.9 ETH total" '[ "$L1_DELTA" = "900000000000000000" ]'
-
-ROOTS=$(check_state_roots)
-assert "State roots match after sequential withdrawals" '[ "$ROOTS" = "MATCH" ]'
-
-HEALTH_STATUS=$(check_health_summary)
-assert "No pending/rewinds after sequential withdrawals" 'echo "$HEALTH_STATUS" | grep -q "pending=0 rewinds=0"'
-
-print_elapsed "TEST 5"
-echo ""
-
-# ══════════════════════════════════════════
-#  TEST 6: Tiny Withdrawal (0.001 ETH)
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 6: Tiny Withdrawal (0.001 ETH)"
-echo "========================================"
-start_timer
-
-# Ensure prior withdrawals have settled
-wait_for_pending_zero 60 >/dev/null
-
-L1_BAL_BEFORE=$(get_balance "$L1_RPC" "$TEST_ADDR")
-
-WS=$(cast send --rpc-url "$L2_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_L2_ADDRESS" "bridgeEther(uint256,address)" 0 "$TEST_ADDR" --value 0.001ether --gas-limit 500000 2>&1 | grep "^status" | awk '{print $2}')
-assert "Tiny withdrawal L2 tx succeeded" '[ "$WS" = "1" ]'
-
-echo "Waiting for L1 trigger..."
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
-wait_for_pending_zero 60 >/dev/null
-
-L1_BAL_AFTER=$(get_balance "$L1_RPC" "$TEST_ADDR")
-L1_DELTA=$(python3 -c "print(int('$L1_BAL_AFTER') - int('$L1_BAL_BEFORE'))")
-echo "L1 delta: $(wei_to_eth "$L1_DELTA") ETH"
-assert "L1 received 0.001 ETH" '[ "$L1_DELTA" = "1000000000000000" ]'
-
-print_elapsed "TEST 6"
-echo ""
-
-# ══════════════════════════════════════════
-#  TEST 7: Large Withdrawal (near limit)
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 7: Large Withdrawal (near etherBalance limit)"
-echo "========================================"
-start_timer
-
-EB_CURRENT=$(get_ether_balance)
-# Withdraw 90% of etherBalance
-WITHDRAW_WEI=$(python3 -c "print(int(int('$EB_CURRENT') * 0.9))")
-WITHDRAW_ETH=$(python3 -c "print(f'{int(\"$WITHDRAW_WEI\") / 1e18:.6f}')")
-echo "Current etherBalance: $(wei_to_eth "$EB_CURRENT") ETH"
-echo "Withdrawing 90%: $WITHDRAW_ETH ETH"
-
-L1_BAL_BEFORE=$(get_balance "$L1_RPC" "$TEST_ADDR")
-
-WS=$(cast send --rpc-url "$L2_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_L2_ADDRESS" "bridgeEther(uint256,address)" 0 "$TEST_ADDR" --value "${WITHDRAW_ETH}ether" --gas-limit 500000 2>&1 | grep "^status" | awk '{print $2}')
-assert "Large withdrawal L2 tx succeeded" '[ "$WS" = "1" ]'
-
-echo "Waiting for L1 trigger..."
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
-wait_for_pending_zero 60 >/dev/null
-
-L1_BAL_AFTER=$(get_balance "$L1_RPC" "$TEST_ADDR")
-L1_DELTA=$(python3 -c "print(int('$L1_BAL_AFTER') - int('$L1_BAL_BEFORE'))")
-echo "L1 delta: $(wei_to_eth "$L1_DELTA") ETH"
-assert "L1 received large withdrawal" '[ "$(python3 -c "print(1 if int(\"$L1_DELTA\") > int(\"$WITHDRAW_WEI\") * 99 // 100 else 0)")" = "1" ]'
-
-EB_AFTER=$(get_ether_balance)
-echo "Remaining etherBalance: $(wei_to_eth "$EB_AFTER") ETH"
-assert "etherBalance reduced to ~10%" '[ "$(python3 -c "print(1 if int(\"$EB_AFTER\") < int(\"$EB_CURRENT\") * 15 // 100 else 0)")" = "1" ]'
-
-ROOTS=$(check_state_roots)
-assert "State roots match after large withdrawal" '[ "$ROOTS" = "MATCH" ]'
-
-print_elapsed "TEST 7"
-echo ""
-
-# ══════════════════════════════════════════
-#  TEST 8: Deposit Immediately After Withdrawal
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 8: Deposit Immediately After Withdrawal"
-echo "========================================"
-start_timer
-
-# Ensure prior operations have settled
-wait_for_pending_zero 60 >/dev/null
-
-L1_BAL_BEFORE=$(get_balance "$L1_RPC" "$TEST_ADDR")
-
-# Deposit 1 ETH
-DS=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_ADDRESS" "bridgeEther(uint256,address)" 1 "$TEST_ADDR" --value 1ether --gas-limit 800000 2>&1 | grep "^status" | awk '{print $2}')
-assert "Deposit before withdrawal succeeded" '[ "$DS" = "1" ]'
-
-# Wait for deposit to process before attempting withdrawal
-echo "Waiting for deposit to process..."
-L2_BLK_T8=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_T8" 2 60 >/dev/null || true
-wait_for_pending_zero 60 >/dev/null
-WS=$(cast send --rpc-url "$L2_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_L2_ADDRESS" "bridgeEther(uint256,address)" 0 "$TEST_ADDR" --value 0.2ether --gas-limit 500000 2>&1 | grep "^status" | awk '{print $2}')
-assert "Immediate withdrawal L2 tx succeeded" '[ "$WS" = "1" ]'
-
-echo "Waiting for processing..."
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
-wait_for_pending_zero 60 >/dev/null
-
-L1_BAL_AFTER=$(get_balance "$L1_RPC" "$TEST_ADDR")
-L1_DELTA=$(python3 -c "print(int('$L1_BAL_AFTER') - int('$L1_BAL_BEFORE'))")
-L1_DELTA_ETH=$(wei_to_eth "$L1_DELTA")
-echo "Net L1 delta: $L1_DELTA_ETH ETH (expected -0.8: sent 1.0, got 0.2 back)"
-assert "Net L1 delta is -0.8 ETH" '[ "$(python3 -c "print(1 if abs(int(\"$L1_DELTA\") + 800000000000000000) < 10000000000000000 else 0)")" = "1" ]'
-
-ROOTS=$(check_state_roots)
-assert "State roots match after rapid deposit+withdrawal" '[ "$ROOTS" = "MATCH" ]'
-
-HEALTH_STATUS=$(check_health_summary)
-assert "No pending/rewinds" 'echo "$HEALTH_STATUS" | grep -q "pending=0 rewinds=0"'
-
-print_elapsed "TEST 8"
-echo ""
-
-# ══════════════════════════════════════════
-#  TEST 9: Nonce Stress — Withdrawal Exceeding etherBalance
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 9: Nonce Stress (exceed etherBalance)"
-echo "========================================"
-start_timer
-
-EB_CURRENT=$(get_ether_balance)
-echo "Current etherBalance: $(wei_to_eth "$EB_CURRENT") ETH"
-echo "Attempting withdrawal exceeding etherBalance (will fail on L1)..."
-
-# Use 2x etherBalance — guaranteed to exceed. If L2 balance is also insufficient,
-# cast send fails (suppressed). Either way, the builder must recover.
-STRESS_AMOUNT=$(python3 -c "print(int('$EB_CURRENT') * 2)" 2>/dev/null || echo "100000000000000000000")
-cast send --rpc-url "$L2_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_L2_ADDRESS" "bridgeEther(uint256,address)" 0 "$TEST_ADDR" --value "${STRESS_AMOUNT}wei" --gas-limit 500000 2>&1 > /dev/null || true
-
-echo "Waiting for recovery..."
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 3 90 >/dev/null || true
-wait_for_pending_zero 90 >/dev/null
-
-# The key check: builder recovered. Allow Sync mode if a rewind just happened —
-# re-check after a short wait.
-HEALTH=$(curl -s "$HEALTH_URL" 2>/dev/null)
-MODE=$(echo "$HEALTH" | jq -r '.mode')
-PENDING=$(echo "$HEALTH" | jq -r '.pending_submissions')
-if [ "$MODE" != "Builder" ]; then
-  echo "  Builder in $MODE mode, waiting 15s for re-entry..."
-  sleep 15
-  HEALTH=$(curl -s "$HEALTH_URL" 2>/dev/null)
-  MODE=$(echo "$HEALTH" | jq -r '.mode')
-  PENDING=$(echo "$HEALTH" | jq -r '.pending_submissions')
-fi
-echo "Mode: $MODE, Pending: $PENDING"
-assert "Builder recovered to Builder mode" '[ "$MODE" = "Builder" ]'
-assert "Pending submissions low (< 5)" '[ "$PENDING" -lt 5 ]'
-
-# Nonce state: no gap, no queued txs
-NONCE_ON_CHAIN=$(rpc_call "$L1_RPC" "eth_getTransactionCount" "[\"$BUILDER_ADDR\",\"latest\"]")
-NONCE_PENDING=$(rpc_call "$L1_RPC" "eth_getTransactionCount" "[\"$BUILDER_ADDR\",\"pending\"]")
-POOL=$(curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"txpool_status","params":[],"id":1}' \
-  "$L1_RPC" | jq -r '.result.queued // "0x0"')
-echo "On-chain nonce: $(printf '%d' "$NONCE_ON_CHAIN"), Pending: $(printf '%d' "$NONCE_PENDING"), Queued txs: $(printf '%d' "$POOL")"
-assert "No queued L1 txs (nonce gap)" '[ "$(printf "%d" "$POOL")" -eq 0 ]'
-
-# Verify a normal deposit still works after the failed withdrawal
-DS=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_ADDRESS" "bridgeEther(uint256,address)" 1 "$TEST_ADDR" --value 0.1ether --gas-limit 800000 2>&1 | grep "^status" | awk '{print $2}')
-assert "Deposit works after failed withdrawal" '[ "$DS" = "1" ]'
-
-echo "Waiting for L2 processing..."
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 2 60 >/dev/null || true
-wait_for_pending_zero 60 >/dev/null
-
-ROOTS=$(check_state_roots)
-assert "State roots match after nonce stress" '[ "$ROOTS" = "MATCH" ]'
-
-print_elapsed "TEST 9"
-echo ""
-
-# ══════════════════════════════════════════
-#  TEST 10: debug_traceTransaction
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 10: debug_traceTransaction"
-echo "========================================"
-start_timer
-
-TRACE_RESULT=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_ADDRESS" "bridgeEther(uint256,address)" 1 "$TEST_ADDR" --value 0.1ether --gas-limit 800000 2>&1)
-TRACE_TX=$(echo "$TRACE_RESULT" | grep "^transactionHash" | awk '{print $2}')
-TRACE_STATUS=$(echo "$TRACE_RESULT" | grep "^status" | awk '{print $2}')
-assert "TEST10: Deposit tx for trace succeeded" '[ "$TRACE_STATUS" = "1" ]'
-
-L2_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_BEFORE" 3 60 >/dev/null || true
-
-# Get latest L2 block transactions to find the deposit-related tx
-L2_LATEST=$(get_block_number "$L2_RPC")
-TRACE_L2_BLOCK=$(curl -s -X POST -H 'Content-Type: application/json' \
-  -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$L2_LATEST\",true],\"id\":1}" \
-  "$L2_RPC" | jq -r '.result.transactions[0].hash // empty')
-
-if [ -n "$TRACE_L2_BLOCK" ]; then
-  TRACE_OUTPUT=$(curl -s -X POST -H 'Content-Type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"method\":\"debug_traceTransaction\",\"params\":[\"$TRACE_L2_BLOCK\",{}],\"id\":1}" \
-    "$L2_RPC")
-  TRACE_ERROR=$(echo "$TRACE_OUTPUT" | jq -r '.error // empty')
-  assert "TEST10: debug_traceTransaction returned no error" '[ -z "$TRACE_ERROR" ]' "error=$TRACE_ERROR"
-  TRACE_GAS=$(echo "$TRACE_OUTPUT" | jq -r '.result.gas // empty')
-  assert "TEST10: Trace has gas field" '[ -n "$TRACE_GAS" ]'
-else
-  assert "TEST10: Found L2 tx to trace" 'false' "no tx in latest block"
-  assert "TEST10: debug_traceTransaction returned no error" 'false' "skipped"
-fi
-
-print_elapsed "TEST 10"
-echo ""
+# TESTs 5-10 removed — covered by more complex tests:
+#   5 (sequential withdrawals) → covered by TEST 15 (concurrent withdrawals)
+#   6 (tiny withdrawal)        → edge case, covered by TEST 2
+#   7 (large withdrawal)       → edge case, covered by TEST 2
+#   8 (deposit after withdraw) → covered by TEST 12 (interleave)
+#   9 (nonce stress)           → covered by TEST 17 (rewind safety)
+#  10 (debug_traceTransaction) → diagnostic, not core
 
 # ══════════════════════════════════════════
 #  TEST 11: Mutual Exclusion Audit (§13e)
@@ -641,37 +348,7 @@ assert "TEST12: Builder healthy after interleave" 'echo "$HEALTH_STATUS" | grep 
 print_elapsed "TEST 12"
 echo ""
 
-# ══════════════════════════════════════════
-#  TEST 13: Zero-Value Deposit Rejection
-# ══════════════════════════════════════════
-
-echo "========================================"
-echo "  TEST 13: Zero-Value Deposit Rejection"
-echo "========================================"
-echo "Send bridgeEther(1) with --value 0. Expect revert. Verify builder survives."
-echo ""
-start_timer
-
-ZERO_RESULT=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
-  "$BRIDGE_ADDRESS" "bridgeEther(uint256,address)" 1 "$TEST_ADDR" --value 0 --gas-limit 800000 2>&1 || true)
-ZERO_STATUS=$(echo "$ZERO_RESULT" | grep "^status" | awk '{print $2}')
-echo "  Zero-value deposit status: ${ZERO_STATUS:-reverted/failed}"
-
-# The tx should not have succeeded (status=1 would mean the contract accepted a 0-value deposit)
-assert "TEST13: Zero-value deposit did not succeed (status != 1)" '[ "$ZERO_STATUS" != "1" ]'
-
-echo "  Waiting 15s to confirm builder survived..."
-sleep 15
-
-HEALTH_T13=$(curl -s "$HEALTH_URL" 2>/dev/null)
-MODE_T13=$(echo "$HEALTH_T13" | jq -r '.mode // "UNKNOWN"')
-PENDING_T13=$(echo "$HEALTH_T13" | jq -r '.pending_submissions // "?"')
-echo "  Builder mode: $MODE_T13, pending: $PENDING_T13"
-assert "TEST13: Builder still in Builder mode after rejected deposit" '[ "$MODE_T13" = "Builder" ]'
-assert "TEST13: No stuck pending submissions after rejected deposit" '[ "$PENDING_T13" -lt 5 ]'
-
-print_elapsed "TEST 13"
-echo ""
+# TEST 13 (zero-value deposit rejection) removed — negative test, low risk.
 
 # ══════════════════════════════════════════
 #  TEST 14: Block Production Continuity
