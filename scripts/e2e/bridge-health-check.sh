@@ -707,7 +707,7 @@ echo "Step 2: Deploying contracts at same CREATE address on both chains..."
 
 # Deploy RevertOnReceive on L1 (deployer nonce 0)
 T18_L1_DEPLOY=$(cast send --rpc-url "$L1_RPC" --private-key "$T18_DEPLOYER_KEY" \
-  --create "$T18_REVERT_BYTECODE" --gas-limit 500000 2>&1)
+  --gas-limit 500000 --create "$T18_REVERT_BYTECODE" 2>&1)
 T18_L1_DEPLOY_STATUS=$(echo "$T18_L1_DEPLOY" | grep "^status" | awk '{print $2}')
 T18_L1_DEPLOY_ADDR=$(echo "$T18_L1_DEPLOY" | grep "^contractAddress" | awk '{print $2}')
 echo "  L1 contract deployed at: $T18_L1_DEPLOY_ADDR (status: $T18_L1_DEPLOY_STATUS)"
@@ -715,7 +715,7 @@ assert "TEST18: RevertOnReceive deployed on L1" '[ "$T18_L1_DEPLOY_STATUS" = "1"
 
 # Deploy WithdrawalSender on L2 (deployer nonce 0)
 T18_L2_DEPLOY=$(cast send --rpc-url "$L2_RPC" --private-key "$T18_DEPLOYER_KEY" \
-  --create "$T18_SENDER_BYTECODE" --gas-limit 500000 2>&1)
+  --gas-limit 500000 --create "$T18_SENDER_BYTECODE" 2>&1)
 T18_L2_DEPLOY_STATUS=$(echo "$T18_L2_DEPLOY" | grep "^status" | awk '{print $2}')
 T18_L2_DEPLOY_ADDR=$(echo "$T18_L2_DEPLOY" | grep "^contractAddress" | awk '{print $2}')
 echo "  L2 contract deployed at: $T18_L2_DEPLOY_ADDR (status: $T18_L2_DEPLOY_STATUS)"
