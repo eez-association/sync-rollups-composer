@@ -1,5 +1,11 @@
 use super::*;
 
+// Bridge selectors for legacy tests — the main detection code no longer uses
+// contract-specific selectors (replaced by generic trace::walk_trace_tree), but
+// these tests validate ABI parsing and are still useful.
+const BRIDGE_ETHER_SELECTOR: [u8; 4] = [0xf4, 0x02, 0xd9, 0xf3];
+const BRIDGE_TOKENS_SELECTOR: [u8; 4] = [0x33, 0xb1, 0x5a, 0xad];
+
 #[test]
 fn test_extract_methods_single() {
     let json: Value = serde_json::json!({
