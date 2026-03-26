@@ -15,6 +15,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ── Phase 1: parallel, no dependencies ──────────────────────────
@@ -286,6 +287,21 @@ jobs:
         run: bash scripts/e2e/test-multi-call-cross-chain.sh
         env:
           SHARED_DIR: /tmp
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
+
+      - name: Run depth-2 generic E2E test
+        run: bash scripts/e2e/test-depth2-generic.sh
+        env:
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
+
+      - name: Run L2→L1 return data E2E test
+        run: bash scripts/e2e/test-l2-to-l1-return-data.sh
+        env:
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
+
+      - name: Run cross-chain atomicity E2E test
+        run: bash scripts/e2e/test-cross-chain-atomicity.sh
+        env:
           DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
       - name: Collect logs on failure
