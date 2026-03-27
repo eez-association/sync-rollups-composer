@@ -829,14 +829,39 @@ pub fn build_l2_to_l1_call_entries(
     // Nested format: [trigger CALL entry, delivery RESULT entry]
     // The trigger CALL's nextAction is the delivery CALL (enters newScope).
     // The delivery RESULT's nextAction is a terminal RESULT (exits scope).
+    // Ether accounting: the delivery CALL sends ETH via the proxy.
+    // _processCallAtScope tracks _etherDelta -= value DURING execution.
+    // _applyStateDeltas checks totalEtherDelta == _etherDelta at consumption time.
+    //
+    // Entry[0] (L2TX trigger → delivery CALL) is consumed BEFORE the CALL executes.
+    //   At consumption: _etherDelta = 0 (no ETH sent yet) → ether_delta must be 0.
+    //
+    // Entry[1] (scope resolution RESULT) is consumed AFTER the CALL executes.
+    //   At consumption: _etherDelta = -value (ETH was sent) → ether_delta must be -value.
+    let delivery_ether_delta = if value.is_zero() {
+        I256::ZERO
+    } else {
+        -I256::try_from(value).unwrap_or(I256::ZERO)
+    };
+
     let l1_deferred_entries = vec![
         CrossChainExecutionEntry {
-            state_deltas: vec![], // filled later by attach_chained_state_deltas
+            state_deltas: vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
+                ether_delta: I256::ZERO, // consumed BEFORE ETH sent
+            }],
             action_hash: l1_trigger_hash,
             next_action: l1_delivery_action,
         },
         CrossChainExecutionEntry {
-            state_deltas: vec![], // filled later: etherDelta = -amount
+            state_deltas: vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
+                ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
+            }],
             action_hash: l1_delivery_result_hash,
             next_action: l1_delivery_result,
         },

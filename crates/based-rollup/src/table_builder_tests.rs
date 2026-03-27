@@ -749,10 +749,21 @@ fn test_l2_to_l1_depth2_entry_generation() {
         );
     }
     for (i, e) in result.l1_entries.iter().enumerate() {
-        assert!(
-            e.state_deltas.is_empty(),
-            "L1[{i}] state_deltas must be empty"
-        );
+        // L1 entries may have placeholder state deltas with ether_delta
+        // (e.g., withdrawal trigger entries with negative ether_delta).
+        // The currentState/newState are placeholders (B256::ZERO) filled by the driver.
+        for delta in &e.state_deltas {
+            assert_eq!(
+                delta.current_state,
+                alloy_primitives::B256::ZERO,
+                "L1[{i}] state_deltas.currentState must be placeholder ZERO"
+            );
+            assert_eq!(
+                delta.new_state,
+                alloy_primitives::B256::ZERO,
+                "L1[{i}] state_deltas.newState must be placeholder ZERO"
+            );
+        }
     }
 }
 

@@ -1485,14 +1485,32 @@ pub fn build_l2_to_l1_continuation_entries(
                 scope: vec![],
             };
 
+            // The delivery CALL sends ETH via the proxy (action.value).
+            // Rollups.sol tracks this as _etherDelta -= value in _processCallAtScope.
+            // The stateDelta must reflect this: negative ether_delta for ETH leaving
+            // the rollup. Without this, _applyStateDeltas fails with EtherDeltaMismatch.
+            let delivery_ether_delta = if delivery.value.is_zero() {
+                alloy_primitives::I256::ZERO
+            } else {
+                -alloy_primitives::I256::try_from(delivery.value)
+                    .unwrap_or(alloy_primitives::I256::ZERO)
+            };
+
             tracing::info!(
                 target: "based_rollup::table_builder",
-                "L1 Entry {} (trigger→delivery): hash={} delivery_dest={} data_len={}",
-                root_pos, trigger_hash, delivery.destination, trigger.data.len()
+                "L1 Entry {} (trigger→delivery): hash={} delivery_dest={} data_len={} ether_delta={}",
+                root_pos, trigger_hash, delivery.destination, trigger.data.len(), delivery_ether_delta
             );
 
+            // Trigger entry: consumed BEFORE the delivery CALL executes.
+            // At consumption: _etherDelta = 0 → ether_delta must be 0.
             l1_entries.push(CrossChainExecutionEntry {
-                state_deltas: empty_deltas.clone(),
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: our_rollup_id,
+                    current_state: alloy_primitives::B256::ZERO,
+                    new_state: alloy_primitives::B256::ZERO,
+                    ether_delta: alloy_primitives::I256::ZERO,
+                }],
                 action_hash: trigger_hash,
                 next_action: delivery,
             });
@@ -1556,8 +1574,15 @@ pub fn build_l2_to_l1_continuation_entries(
                         scope: vec![],
                     }
                 };
+            // Scope resolution: consumed AFTER the delivery CALL executes.
+            // At consumption: _etherDelta = -value (ETH was sent) → ether_delta must be -value.
             l1_entries.push(CrossChainExecutionEntry {
-                state_deltas: empty_deltas.clone(),
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: our_rollup_id,
+                    current_state: alloy_primitives::B256::ZERO,
+                    new_state: alloy_primitives::B256::ZERO,
+                    ether_delta: delivery_ether_delta,
+                }],
                 action_hash: delivery_result_hash,
                 next_action: l1_delivery_exit,
             });
