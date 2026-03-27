@@ -194,10 +194,10 @@ assert "L2 burned ~0.5 ETH" '[ "$(python3 -c "print(1 if int(\"$L2_DELTA\") < -4
 assert "etherBalance decreased by 0.5 ETH" '[ "$EB_DELTA" = "-500000000000000000" ]'
 
 # Verify proxy detection happened
-PROXY_LOG=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix --since 60s 2>&1 | grep -c "detected L2.*withdrawal" || true)
+PROXY_LOG=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix --since 60s 2>&1 | grep -c "detected internal L2" || true)
 assert "Proxy detected withdrawal" '[ "$PROXY_LOG" -ge 1 ]'
 
-TRIGGER_LOG=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix --since 60s 2>&1 | grep -c "sent withdrawal trigger" || true)
+TRIGGER_LOG=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix --since 60s 2>&1 | grep -c "withdrawal trigger" || true)
 assert "Trigger tx sent" '[ "$TRIGGER_LOG" -ge 1 ]'
 
 ROOTS=$(check_state_roots)
