@@ -1541,6 +1541,27 @@ async fn trace_and_detect_internal_calls(
                         cont.l1_entries
                     };
 
+                    // Clear state deltas for simulation-only entries.
+                    // build_continuation_entries produces entries with placeholder
+                    // currentState=0x0 / newState=0x0 (to be filled by the driver
+                    // with real intermediate roots before the actual postBatch).
+                    // In the traceCallMany discovery loop, these entries are used
+                    // directly — Rollups.sol._findAndApplyExecution checks
+                    // `rollups[delta.rollupId].stateRoot != delta.currentState`
+                    // and rejects entries whose currentState doesn't match the
+                    // on-chain state. With placeholder 0x0, the check ALWAYS fails
+                    // and ExecutionNotFound is returned, preventing the user tx
+                    // from succeeding and hiding subsequent cross-chain calls.
+                    //
+                    // Fix: clear state_deltas so _findAndApplyExecution's
+                    // allMatch stays true (no deltas to check → unconditional match).
+                    // This is safe because the simulation only cares about
+                    // entry consumption (actionHash matching), not state transitions.
+                    let mut entries = entries;
+                    for e in &mut entries {
+                        e.state_deltas.clear();
+                    }
+
                     // Log entry details
                     for (i, e) in entries.iter().enumerate() {
                         tracing::info!(
