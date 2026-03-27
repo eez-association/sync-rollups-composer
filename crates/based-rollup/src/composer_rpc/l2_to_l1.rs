@@ -1669,72 +1669,53 @@ async fn simulate_l1_delivery(
             );
             withdrawal_entries.l1_deferred_entries
         } else {
-            // Continuation case: build entries for outer L2→L1 call PLUS simple
-            // entries for each inner return call. The inner entries ensure the
-            // simulation produces the same return data as the real execution
-            // (where inner calls consume entries with result_void). Issue #245.
-            let withdrawal_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+            // Continuation case: use the SAME table builder functions as the real
+            // batch (build_l2_to_l1_continuation_entries) to ensure identical entry
+            // ordering. Manual construction produced [L2TX, scope_RESULT, child...]
+            // while the real batch produces [trigger, child..., scope_RESULT], causing
+            // swap-and-pop to consume entries in wrong order during simulation.
+            let root_call = crate::table_builder::L2DetectedCall {
                 destination,
-                data.to_vec(),
+                data: data.to_vec(),
                 value,
-                _trigger_user,
+                source_address: _trigger_user,
+                delivery_return_data: final_return_data.clone(),
+                delivery_failed: final_delivery_failed,
+            };
+
+            let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
+                all_return_calls
+                    .iter()
+                    .map(|rc| crate::table_builder::L2ReturnCall {
+                        destination: rc.destination,
+                        data: rc.data.clone(),
+                        value: rc.value,
+                        source_address: rc.source_address,
+                        parent_call_index: rc.parent_call_index,
+                        l2_return_data: rc.l2_return_data.clone(),
+                        l2_delivery_failed: rc.l2_delivery_failed,
+                    })
+                    .collect();
+
+            let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+                &[root_call],
+                &return_calls_for_builder,
                 rollup_id,
-                rlp_encoded_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger
-                final_return_data.clone(),
-                final_delivery_failed,
             );
-            let mut combined = withdrawal_entries.l1_deferred_entries;
+            let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
+                &analyzed,
+                alloy_primitives::U256::from(rollup_id),
+                rlp_encoded_tx,
+            );
 
-            // Add a simple CALL→RESULT entry for each return call.
-            // During simulation, the inner executeCrossChainCall on L1 will find
-            // this entry and return the RESULT data. The data comes from L2
-            // trace enrichment (#246): enrich_return_calls_via_l2_trace() captures
-            // the actual return data from the return call's execution on L2, so
-            // the L1 delivery function (e.g., Logger) receives the correct inner
-            // return value instead of empty bytes.
-            let rollup_id_u256 = alloy_primitives::U256::from(rollup_id);
-            for rc in &all_return_calls {
-                let inner_action = crate::cross_chain::CrossChainAction {
-                    action_type: crate::cross_chain::CrossChainActionType::Call,
-                    rollup_id: rollup_id_u256,
-                    destination: rc.destination,
-                    value: rc.value,
-                    data: rc.data.clone(),
-                    failed: false,
-                    source_address: rc.source_address,
-                    source_rollup: alloy_primitives::U256::ZERO,
-                    scope: vec![],
-                };
-                let inner_hash = crate::table_builder::compute_action_hash(&inner_action);
-                let result_action = crate::cross_chain::CrossChainAction {
-                    action_type: crate::cross_chain::CrossChainActionType::Result,
-                    rollup_id: alloy_primitives::U256::ZERO,
-                    destination: Address::ZERO,
-                    value: alloy_primitives::U256::ZERO,
-                    data: rc.l2_return_data.clone(),
-                    failed: rc.l2_delivery_failed,
-                    source_address: Address::ZERO,
-                    source_rollup: alloy_primitives::U256::ZERO,
-                    scope: vec![],
-                };
-                combined.push(crate::cross_chain::CrossChainExecutionEntry {
-                    state_deltas: vec![],
-                    action_hash: inner_hash,
-                    next_action: result_action,
-                });
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    dest = %rc.destination,
-                    source = %rc.source_address,
-                    data_len = rc.data.len(),
-                    l2_return_data_len = rc.l2_return_data.len(),
-                    l2_failed = rc.l2_delivery_failed,
-                    hash = %inner_hash,
-                    "added inner return call entry to simulation bundle"
-                );
-            }
+            tracing::info!(
+                target: "based_rollup::proxy",
+                l1_entry_count = continuation.l1_entries.len(),
+                return_call_count = all_return_calls.len(),
+                "built simulation entries via table builder (same path as real batch)"
+            );
 
-            combined
+            continuation.l1_entries
         };
 
         if entries.is_empty() {
@@ -2143,8 +2124,21 @@ async fn simulate_l1_delivery(
                 iteration,
                 total_return_calls = all_return_calls.len(),
                 return_data_len = final_return_data.len(),
+                delivery_hex = %format!("0x{}", hex::encode(&final_return_data)),
                 "L1 delivery simulation converged — no new return calls, return data stable"
             );
+            // Log each return call's l2_return_data for hash comparison
+            for (ri, rc) in all_return_calls.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    ri,
+                    dest = %rc.destination,
+                    l2_return_data_hex = %format!("0x{}", hex::encode(&rc.l2_return_data)),
+                    l2_return_data_len = rc.l2_return_data.len(),
+                    l2_delivery_failed = rc.l2_delivery_failed,
+                    "return call l2_return_data at convergence"
+                );
+            }
             break;
         }
         if truly_new.is_empty() && return_data_changed {
@@ -2625,69 +2619,56 @@ async fn simulate_l1_combined_delivery(
                 );
                 withdrawal_entries.l1_deferred_entries
             } else {
-                // Continuation case: build entries for this call + its return calls.
-                let mut l1_detected: Vec<crate::table_builder::L1DetectedCall> = Vec::new();
-                for rc in &my_return_calls {
-                    l1_detected.push(crate::table_builder::L1DetectedCall {
-                        destination: rc.destination,
-                        data: rc.data.clone(),
-                        value: rc.value,
-                        source_address: rc.source_address,
-                        l2_return_data: rc.l2_return_data.clone(),
-                        call_success: !rc.l2_delivery_failed,
-                        parent_call_index: None,
-                        target_rollup_id: None,
-                    });
-                }
+                // Continuation case: use the SAME table builder functions as the
+                // real batch to ensure identical entry ordering (same fix as
+                // simulate_l1_delivery).
+                let root_call = crate::table_builder::L2DetectedCall {
+                    destination: call.destination,
+                    data: call.calldata.to_vec(),
+                    value: call.value,
+                    source_address: call.source_address,
+                    delivery_return_data: per_call_return_data[i].clone(),
+                    delivery_failed: per_call_delivery_failed[i],
+                };
 
-                if l1_detected.len() >= 2 {
-                    let analyzed =
-                        crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
-                    if !analyzed.is_empty() {
-                        let cont = crate::table_builder::build_continuation_entries(
-                            &analyzed,
-                            alloy_primitives::U256::from(rollup_id),
-                        );
-                        let withdrawal_entries = crate::cross_chain::build_l2_to_l1_call_entries(
-                            call.destination,
-                            call.calldata.to_vec(),
-                            call.value,
-                            call.source_address,
-                            rollup_id,
-                            rlp_encoded_tx.to_vec(),
-                            per_call_return_data[i].clone(),
-                            per_call_delivery_failed[i],
-                        );
-                        let mut call_entries = withdrawal_entries.l1_deferred_entries;
-                        call_entries.extend(cont.l1_entries);
-                        call_entries
-                    } else {
-                        let withdrawal_entries = crate::cross_chain::build_l2_to_l1_call_entries(
-                            call.destination,
-                            call.calldata.to_vec(),
-                            call.value,
-                            call.source_address,
-                            rollup_id,
-                            rlp_encoded_tx.to_vec(),
-                            per_call_return_data[i].clone(),
-                            per_call_delivery_failed[i],
-                        );
-                        withdrawal_entries.l1_deferred_entries
-                    }
-                } else {
-                    // Single return call — simple entries.
-                    let withdrawal_entries = crate::cross_chain::build_l2_to_l1_call_entries(
-                        call.destination,
-                        call.calldata.to_vec(),
-                        call.value,
-                        call.source_address,
-                        rollup_id,
-                        rlp_encoded_tx.to_vec(),
-                        per_call_return_data[i].clone(),
-                        per_call_delivery_failed[i],
-                    );
-                    withdrawal_entries.l1_deferred_entries
-                }
+                let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
+                    my_return_calls
+                        .iter()
+                        .map(|rc| crate::table_builder::L2ReturnCall {
+                            destination: rc.destination,
+                            data: rc.data.clone(),
+                            value: rc.value,
+                            source_address: rc.source_address,
+                            // parent_call_index in DetectedReturnCall refers to the
+                            // combined simulation's call index. For the table builder,
+                            // we're building entries for a single root call, so set to
+                            // None (defaults to last L2→L1 call, which is the only one).
+                            parent_call_index: None,
+                            l2_return_data: rc.l2_return_data.clone(),
+                            l2_delivery_failed: rc.l2_delivery_failed,
+                        })
+                        .collect();
+
+                let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+                    &[root_call],
+                    &return_calls_for_builder,
+                    rollup_id,
+                );
+                let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
+                    &analyzed,
+                    alloy_primitives::U256::from(rollup_id),
+                    rlp_encoded_tx,
+                );
+
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    call_idx = i,
+                    l1_entry_count = continuation.l1_entries.len(),
+                    return_call_count = my_return_calls.len(),
+                    "built combined simulation entries via table builder"
+                );
+
+                continuation.l1_entries
             };
 
             combined_entries.extend(entries);

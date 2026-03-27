@@ -1357,7 +1357,7 @@ where
                     // L1 deferred entries → stashed for flush_to_l1 (legacy path).
                     // Multi-call continuations use the continuation path instead of the
                     // withdrawal path, because their 5-entry structure is not pair-based
-                    // and would panic in attach_unified_chained_state_deltas.
+
                     //
                     // Detect continuation by L1 entry count: simple withdrawals produce
                     // exactly 2 L1 entries (L2TX trigger + RESULT); continuations produce
@@ -1685,108 +1685,35 @@ where
                             num_withdrawals,
                             "computed unified intermediate state roots"
                         );
-                        // Attach chained state deltas to deposit entries
-                        if num_deposits > 0 && clean != built.state_root {
-                            let total = self.pending_cross_chain_entries.len();
-                            let start = total.saturating_sub(block_rpc_count);
-                            crate::cross_chain::attach_unified_chained_state_deltas(
-                                &mut self.pending_cross_chain_entries[start..],
-                                &mut self.pending_withdrawal_l1_entries,
-                                &roots,
-                                self.config.rollup_id,
-                                num_deposits,
-                            );
-                        } else if num_withdrawals > 0 {
-                            // Withdrawals only — still use unified attach
-                            crate::cross_chain::attach_unified_chained_state_deltas(
-                                &mut [],
-                                &mut self.pending_withdrawal_l1_entries,
-                                &roots,
-                                self.config.rollup_id,
-                                0,
-                            );
-                        }
-                        // Attach state deltas to continuation L1 entries (multi-call patterns).
-                        // Continuation entries represent a multi-call pattern where
-                        // the L2 state change happens in one atomic step. Use the
-                        // clean/speculative pattern directly:
-                        //   Entry 0: StateDelta(clean_root, speculative_root) — full L2 change
-                        //   Entries 1..N: StateDelta(speculative_root, speculative_root) — identity
-                        //     (no L2 change, just L1 scope navigation)
-                        if !self.pending_continuation_l1_entries.is_empty() {
-                            let rollup_id_u256 =
-                                alloy_primitives::U256::from(self.config.rollup_id);
-                            let n = self.pending_continuation_l1_entries.len();
-                            let clean_root = roots[0];
-                            let speculative_root = *roots.last().unwrap_or(&clean_root);
-
-                            // The FIRST trigger entry (the one consumed first by
-                            // executeCrossChainCall) needs currentState=clean because
-                            // the on-chain state at trigger time equals the clean root
-                            // (after the immediate entry applies the block delta).
-                            // All other entries need currentState=speculative (the
-                            // state after the first trigger's delta is applied).
-                            //
-                            // After reorder_for_swap_and_pop, the first trigger entry
-                            // may NOT be at index 0 (RESULT group entries may be first).
-                            // Find the first TRIGGER entry — identified by its nextAction
-                            // being a CALL (triggers point to delivery CALLs), not a RESULT
-                            // (RESULT entries point to terminal RESULTs).
-                            // This replaces the old result_void_hash comparison which failed
-                            // for non-void RESULT entries (#254 item 4).
-                            let first_trigger_idx = self
-                                .pending_continuation_l1_entries
-                                .iter()
-                                .position(|e| {
-                                    e.next_action.action_type
-                                        == crate::cross_chain::CrossChainActionType::Call
-                                })
-                                .unwrap_or(0);
-
-                            for (i, entry) in
-                                self.pending_continuation_l1_entries.iter_mut().enumerate()
-                            {
-                                let (curr, next) = if i == first_trigger_idx {
-                                    (clean_root, speculative_root)
-                                } else {
-                                    (speculative_root, speculative_root)
-                                };
-                                // Preserve ether_delta from entry construction
-                                // (set by build_continuation_entries from the call's value).
-                                // Only replace currentState/newState with actual roots.
-                                let existing_ether_delta = entry
-                                    .state_deltas
-                                    .first()
-                                    .map(|d| d.ether_delta)
-                                    .unwrap_or(alloy_primitives::I256::ZERO);
-                                entry.state_deltas =
-                                    vec![crate::cross_chain::CrossChainStateDelta {
-                                        rollup_id: rollup_id_u256,
-                                        current_state: curr,
-                                        new_state: next,
-                                        ether_delta: existing_ether_delta,
-                                    }];
-                            }
-                            info!(
-                                target: "based_rollup::driver",
-                                count = n,
-                                clean = %clean_root,
-                                speculative = %speculative_root,
-                                "attached state deltas to continuation L1 entries (clean/speculative pattern)"
-                            );
-                        }
+                        // Legacy attachment skipped: attach_generic_state_deltas
+                        // (below) handles all entry types via the unified queue.
+                        // The legacy attach_unified_chained_state_deltas expects
+                        // D+W+1 roots but compute_intermediate_roots now returns
+                        // T+1 roots (trigger-based, not type-based).
+                        // Legacy continuation attachment skipped: attach_generic_state_deltas
+                        // handles all entry types via the unified queue.
                         intermediate_roots = roots;
                         clean
                     }
                     Err(err) => {
-                        warn!(
+                        error!(
                             target: "based_rollup::driver",
                             l2_block = next_l2_block,
                             %err,
-                            "failed to compute unified intermediate state roots — \
-                             falling back to speculative"
+                            "failed to compute intermediate state roots — \
+                             discarding cross-chain entries for this block to prevent \
+                             corrupt state root in IMMEDIATE entry"
                         );
-                        built.state_root
+                        // Clear entries to prevent submitting with wrong state deltas.
+                        // Entries will be re-queued on the next builder cycle.
+                        self.pending_l1_entries.clear();
+                        self.pending_l1_group_starts.clear();
+                        self.pending_l1_trigger_metadata.clear();
+                        self.pending_cross_chain_entries.clear();
+                        self.pending_continuation_l1_entries.clear();
+                        self.pending_withdrawal_l1_entries.clear();
+                        self.pending_withdrawal_metadata.clear();
+                        built.state_root // No entries → speculative IS clean
                     }
                 }
             } else {

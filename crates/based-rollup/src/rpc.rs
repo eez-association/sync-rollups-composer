@@ -964,6 +964,30 @@ where
             })
             .collect();
 
+        // Log hex of return call data for hash comparison debugging
+        for (ri, rc) in return_calls.iter().enumerate() {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                ri,
+                dest = %rc.destination,
+                l2_return_data_hex = %format!("0x{}", hex::encode(&rc.l2_return_data)),
+                l2_return_data_len = rc.l2_return_data.len(),
+                l2_delivery_failed = rc.l2_delivery_failed,
+                "RPC received return call l2_return_data"
+            );
+        }
+        for (ci, c) in l2_calls.iter().enumerate() {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                ci,
+                dest = %c.destination,
+                delivery_return_data_hex = %format!("0x{}", hex::encode(&c.delivery_return_data)),
+                delivery_return_data_len = c.delivery_return_data.len(),
+                delivery_failed = c.delivery_failed,
+                "RPC received L2 call delivery_return_data"
+            );
+        }
+
         // Analyze calls to discover the continuation structure.
         let detected =
             analyze_l2_to_l1_continuation_calls(&l2_calls, &return_calls, self.config.rollup_id);
