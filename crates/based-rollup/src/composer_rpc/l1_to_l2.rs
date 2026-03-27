@@ -632,6 +632,50 @@ fn extract_return_data_from_trace(trace: &Value) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// Extract the REAL return data from the inner destination call inside an
+/// `executeIncomingCrossChainCall` trace that reverted at `_consumeExecution`.
+///
+/// The trace structure is:
+/// ```text
+/// executeIncomingCrossChainCall (REVERTS — _consumeExecution fails)
+///   └─ _processCallAtScope
+///        ├─ CREATE2 proxy (optional, if proxy didn't exist)
+///        └─ sourceProxy.executeOnBehalf(destination, data)
+///             └─ destination.call(data) ← THIS is the inner call with real return data
+/// ```
+///
+/// We walk the trace depth-first looking for a call TO the destination address
+/// that has no error (succeeded). Its `output` is the real return data.
+fn extract_inner_destination_return_data(
+    trace: &Value,
+    destination: Address,
+) -> Option<Vec<u8>> {
+    let dest_hex_lower = format!("{destination}").to_lowercase();
+
+    fn walk(node: &Value, target: &str) -> Option<Vec<u8>> {
+        // Check if this node targets our destination and succeeded
+        if let Some(to) = node.get("to").and_then(|v| v.as_str()) {
+            if to.to_lowercase() == target && node.get("error").is_none() {
+                let output = node.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+                let data = hex::decode(output.strip_prefix("0x").unwrap_or(output))
+                    .unwrap_or_default();
+                return Some(data);
+            }
+        }
+        // Recurse into children
+        if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+            for child in calls {
+                if let Some(result) = walk(child, target) {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
+    walk(trace, &dest_hex_lower)
+}
+
 /// Simulate an L1->L2 call on L2 to capture the actual return data.
 ///
 /// Uses a single simulation path: `SYSTEM_ADDRESS -> CCM.executeIncomingCrossChainCall(...)`.
@@ -817,7 +861,10 @@ async fn simulate_l1_to_l2_call_on_l2(
                     child_calls = retry_children.len(),
                     "non-leaf L2 call succeeded after loadExecutionTable retry"
                 );
-                return (retry_data, true, retry_children);
+                // Use inner destination return data (raw), not top-level ABI-wrapped output
+                let retry_inner = extract_inner_destination_return_data(&retry_trace, destination)
+                    .unwrap_or(retry_data);
+                return (retry_inner, true, retry_children);
             }
 
             tracing::info!(
@@ -834,28 +881,99 @@ async fn simulate_l1_to_l2_call_on_l2(
         return (return_data, false, children);
     }
 
-    // No children — the initial simulation reverts because there's no RESULT
-    // entry in the table (expected: executeIncomingCrossChainCall → _processCallAtScope
-    // → destination.call succeeds → _consumeExecution(RESULT hash) → ExecutionNotFound).
-    // The REAL execution with entries loaded succeeds, so we default to success=true
-    // with the return data captured from the L1 iterative traceCallMany (which does
-    // load entries). The return_data from this L2 sim is the revert data, not useful.
+    // The initial simulation reverts because _consumeExecution(RESULT hash) fails
+    // (no entry loaded). BUT the destination call DID execute inside the trace:
+    //   executeIncomingCrossChainCall → _processCallAtScope → proxy.executeOnBehalf(dest, data)
+    //   → destination.call(data) → SUCCEEDS with returnData
+    //   → _consumeExecution(hash(RESULT{data=returnData})) → REVERTS (no entry)
     //
-    // If the simulation DID succeed (rare — would mean no RESULT consumption needed),
-    // use the actual return data.
-    let effective_success = success || !success; // always true for simple calls
-    let effective_return_data = if success { return_data } else { vec![] };
+    // Extract the REAL return data from the inner destination call in the trace,
+    // then do a second simulation with the correct RESULT entry loaded.
+    let inner_return_data = if !success {
+        extract_inner_destination_return_data(&trace, destination)
+            .unwrap_or_default()
+    } else {
+        return_data.clone()
+    };
+    let inner_success = if !success {
+        // If we found inner return data, the destination call succeeded
+        !inner_return_data.is_empty() || data.is_empty() // empty calldata = ETH transfer = always success with empty return
+    } else {
+        success
+    };
 
     tracing::info!(
         target: "based_rollup::l1_proxy",
         dest = %destination,
         source = %source_address,
         sim_reverted = !success,
-        effective_success,
-        "L2 call simulation complete (no children, defaulting to success)"
+        inner_return_data_len = inner_return_data.len(),
+        inner_success,
+        "extracted return data from inner destination call"
     );
 
-    (effective_return_data, effective_success, children)
+    // Build RESULT entry with the real return data from Run 1
+    let result_action = crate::cross_chain::CrossChainAction {
+        action_type: crate::cross_chain::CrossChainActionType::Result,
+        rollup_id: U256::from(rollup_id),
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: inner_return_data.clone(),
+        failed: !inner_success,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let result_hash = crate::table_builder::compute_action_hash(&result_action);
+    let result_entry = crate::cross_chain::CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash: result_hash,
+        next_action: result_action.clone(),
+    };
+
+    // Run 2: retry with the RESULT entry loaded — should NOT revert
+    if let Some((retry_trace, retry_success)) = run_l2_sim_bundle(
+        client,
+        l2_rpc_url,
+        &sys_addr_hex,
+        &ccm_hex,
+        &[result_entry],
+        exec_calldata.as_ref(),
+        value,
+    )
+    .await
+    {
+        let retry_data = extract_return_data_from_trace(&retry_trace);
+        let retry_children = walk_l2_simulation_trace(
+            client,
+            l2_rpc_url,
+            cross_chain_manager_address,
+            &retry_trace,
+            rollup_id,
+        )
+        .await;
+
+        tracing::info!(
+            target: "based_rollup::l1_proxy",
+            dest = %destination,
+            retry_success,
+            return_data_len = retry_data.len(),
+            child_count = retry_children.len(),
+            "L2 simulation Run 2 (with RESULT entry) complete"
+        );
+
+        if retry_success {
+            // Use the INNER destination return data from the retry trace,
+            // not the top-level output (which is ABI-wrapped by executeIncomingCrossChainCall).
+            // The RESULT entry hash uses the raw destination return data.
+            let retry_inner = extract_inner_destination_return_data(&retry_trace, destination)
+                .unwrap_or(retry_data);
+            return (retry_inner, true, retry_children);
+        }
+    }
+
+    // Run 2 failed — use the inner return data from Run 1
+    (inner_return_data, inner_success, children)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
