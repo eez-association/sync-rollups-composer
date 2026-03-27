@@ -663,6 +663,36 @@ fn extract_return_data_from_trace(trace: &Value) -> Vec<u8> {
 ///
 /// We walk the trace depth-first looking for a call TO the destination address
 /// that has no error (succeeded). Its `output` is the real return data.
+/// Check if the inner destination call succeeded in the trace.
+///
+/// Walks the trace tree looking for a call to `destination`. Returns `true`
+/// if found and the node has no `"error"` field — meaning the call itself
+/// succeeded even though the outer simulation may have reverted.
+///
+/// This correctly handles void functions (empty return data) which succeed
+/// but would be misclassified by a `!return_data.is_empty()` heuristic.
+fn destination_call_succeeded_in_trace(trace: &Value, destination: Address) -> bool {
+    let dest_hex_lower = format!("{destination}").to_lowercase();
+
+    fn walk(node: &Value, target: &str) -> Option<bool> {
+        if let Some(to) = node.get("to").and_then(|v| v.as_str()) {
+            if to.to_lowercase() == target {
+                return Some(node.get("error").is_none());
+            }
+        }
+        if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+            for child in calls {
+                if let Some(result) = walk(child, target) {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
+    walk(trace, &dest_hex_lower).unwrap_or(false)
+}
+
 fn extract_inner_destination_return_data(
     trace: &Value,
     destination: Address,
@@ -906,17 +936,19 @@ async fn simulate_l1_to_l2_call_on_l2(
     //
     // Extract the REAL return data from the inner destination call in the trace,
     // then do a second simulation with the correct RESULT entry loaded.
-    let inner_return_data = if !success {
-        extract_inner_destination_return_data(&trace, destination)
-            .unwrap_or_default()
+    let (inner_return_data, inner_success) = if !success {
+        // The outer simulation reverted (expected: no RESULT entry in Run 1).
+        // Extract the REAL return data from the inner destination call.
+        // Also check the trace node for an "error" field to determine success.
+        let extracted = extract_inner_destination_return_data(&trace, destination);
+        let inner_data = extracted.unwrap_or_default();
+        // Check if the destination call itself succeeded (no "error" in its trace node).
+        // A void function returns empty data but succeeds — the old heuristic
+        // `!inner_data.is_empty()` misclassified void functions as failed.
+        let inner_ok = destination_call_succeeded_in_trace(&trace, destination);
+        (inner_data, inner_ok)
     } else {
-        return_data.clone()
-    };
-    let inner_success = if !success {
-        // If we found inner return data, the destination call succeeded
-        !inner_return_data.is_empty() || data.is_empty() // empty calldata = ETH transfer = always success with empty return
-    } else {
-        success
+        (return_data.clone(), success)
     };
 
     tracing::info!(
