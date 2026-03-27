@@ -68,7 +68,7 @@ pub struct DerivedBlock {
 /// full block, identify trigger txs via `ExecutionConsumed` events from the CCM,
 /// compute consumed trigger prefix using the L1 consumed map, and filter to keep
 /// only consumed triggers. This is fully protocol-generic — no dependency on
-/// entry type classification (`is_withdrawal_entry`, `is_ccm_execute_remote_call`, etc.).
+/// entry type classification.
 #[derive(Debug, Clone)]
 pub struct DeferredFiltering {
     /// L1 consumed map snapshot: actionHash → remaining consumption count.
