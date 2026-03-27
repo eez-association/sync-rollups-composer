@@ -474,16 +474,24 @@ pub fn build_continuation_entries(
                 let child_result_hash = compute_action_hash(&child_result);
 
                 // Terminal next_action: the RESULT data propagated to the L1 caller.
-                // Use l2_return_data from the parent L1→L2 call when available.
+                // For depth-2 patterns (L1→L2→L1), the child's delivery_return_data
+                // carries the actual return from the L1 execution (e.g., Counter.increment()
+                // returns uint256(1)). This is what _processCallAtScope builds as
+                // RESULT(data=returnData) after calling executeOnBehalf.
+                // The resolution entry's nextAction must match this RESULT.
+                //
+                // rollupId: Rollups.sol._processCallAtScope uses action.rollupId
+                // (the CALL's target rollup) for the RESULT. For L2→L1 children,
+                // this is child_target_rollup (0/MAINNET).
                 let resolution_terminal =
-                    if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
+                    if !child.delivery_return_data.is_empty() || child.l2_delivery_failed {
                         CrossChainAction {
                             action_type: CrossChainActionType::Result,
-                            rollup_id: our_rollup_id,
+                            rollup_id: child_target_rollup,
                             destination: Address::ZERO,
                             value: U256::ZERO,
-                            data: detected.l2_return_data.clone(),
-                            failed: detected.l2_delivery_failed,
+                            data: child.delivery_return_data.clone(),
+                            failed: child.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: U256::ZERO,
                             scope: vec![],
@@ -529,6 +537,16 @@ pub struct L1DetectedCall {
     /// Whether the L2 call succeeded. Defaults to `true`.
     #[serde(default = "default_call_success")]
     pub call_success: bool,
+    /// Index of the parent L1→L2 call whose L2 execution triggers this child.
+    /// `None` for root-level L1→L2 calls; `Some(i)` for L2→L1 child calls
+    /// (the L1→L2→L1 pattern) discovered inside call[i]'s L2 simulation.
+    #[serde(default)]
+    pub parent_call_index: Option<usize>,
+    /// Target rollup ID. `None` means L1→L2 (targets our L2 rollup).
+    /// `Some(0)` means L2→L1 (targets L1/mainnet). Used to distinguish
+    /// L1→L2 continuation calls from L2→L1 child calls.
+    #[serde(default)]
+    pub target_rollup_id: Option<u64>,
 }
 
 /// Serde default for `call_success` — defaults to `true` (success).
@@ -536,17 +554,20 @@ fn default_call_success() -> bool {
     true
 }
 
-/// Map detected L1→L2 calls into `DetectedCall` entries for continuation entry building.
+/// Map detected calls into `DetectedCall` entries for continuation entry building.
 ///
-/// This is a pure mapper: each `L1DetectedCall` becomes a `DetectedCall` with direction
-/// L1→L2 and no children. Child discovery (L2→L1 return calls) comes from the simulation's
-/// iterative `debug_traceCallMany` loop -- not from analytical ABI decoding.
+/// Handles both L1→L2 calls and L2→L1 child calls (the L1→L2→L1 nested pattern).
+/// L2→L1 children are identified by `target_rollup_id == Some(0)` and `parent_call_index.is_some()`.
 ///
-/// Handles any number of calls: 1 call produces a simple CALL+RESULT pair,
+/// For pure L1→L2 calls: 1 call produces a simple CALL+RESULT pair,
 /// 2+ calls produce a continuation chain.
 ///
+/// For L1→L2 calls with L2→L1 children: the parent gets a CALL→CALL(scope=[0]) entry
+/// instead of CALL→RESULT, and the child gets its own resolution entry.
+///
 /// # Arguments
-/// * `calls` - L1→L2 calls detected by the L1 proxy (in execution order)
+/// * `calls` - Detected calls from the L1 proxy (in execution order). May include
+///   both L1→L2 calls and L2→L1 children.
 /// * `our_rollup_id` - The L2 rollup ID
 pub fn analyze_continuation_calls(
     calls: &[L1DetectedCall],
@@ -555,31 +576,68 @@ pub fn analyze_continuation_calls(
     let our_rollup = U256::from(our_rollup_id);
     let mainnet_rollup = U256::ZERO;
 
+    // Count L1→L2 calls (for is_continuation tracking).
+    let mut l1_to_l2_count = 0usize;
+
     calls
         .iter()
         .enumerate()
         .map(|(i, call)| {
-            let call_action = CrossChainAction {
-                action_type: CrossChainActionType::Call,
-                rollup_id: our_rollup,
-                destination: call.destination,
-                value: call.value,
-                data: call.data.clone(),
-                failed: false,
-                source_address: call.source_address,
-                source_rollup: mainnet_rollup,
-                scope: vec![],
-            };
+            let is_l2_to_l1_child =
+                call.target_rollup_id == Some(0) && call.parent_call_index.is_some();
 
-            DetectedCall {
-                direction: CallDirection::L1ToL2,
-                call_action,
-                parent_call_index: None,
-                is_continuation: i > 0,
-                depth: 0,
-                delivery_return_data: vec![],
-                l2_return_data: call.l2_return_data.clone(),
-                l2_delivery_failed: !call.call_success,
+            if is_l2_to_l1_child {
+                // L2→L1 child: targets L1 (rollup 0), source is on L2
+                let call_action = CrossChainAction {
+                    action_type: CrossChainActionType::Call,
+                    rollup_id: mainnet_rollup, // target = L1
+                    destination: call.destination,
+                    value: call.value,
+                    data: call.data.clone(),
+                    failed: false,
+                    source_address: call.source_address,
+                    source_rollup: our_rollup, // source = our L2 rollup
+                    scope: vec![],
+                };
+
+                DetectedCall {
+                    direction: CallDirection::L2ToL1,
+                    call_action,
+                    parent_call_index: call.parent_call_index,
+                    is_continuation: false,
+                    depth: 1,
+                    delivery_return_data: call.l2_return_data.clone(),
+                    l2_return_data: vec![],
+                    l2_delivery_failed: !call.call_success,
+                }
+            } else {
+                // L1→L2 call (root-level or continuation)
+                let call_action = CrossChainAction {
+                    action_type: CrossChainActionType::Call,
+                    rollup_id: our_rollup,
+                    destination: call.destination,
+                    value: call.value,
+                    data: call.data.clone(),
+                    failed: false,
+                    source_address: call.source_address,
+                    source_rollup: mainnet_rollup,
+                    scope: vec![],
+                };
+
+                let is_continuation = l1_to_l2_count > 0;
+                l1_to_l2_count += 1;
+                let _ = i; // suppress unused warning
+
+                DetectedCall {
+                    direction: CallDirection::L1ToL2,
+                    call_action,
+                    parent_call_index: None,
+                    is_continuation,
+                    depth: 0,
+                    delivery_return_data: vec![],
+                    l2_return_data: call.l2_return_data.clone(),
+                    l2_delivery_failed: !call.call_success,
+                }
             }
         })
         .collect()

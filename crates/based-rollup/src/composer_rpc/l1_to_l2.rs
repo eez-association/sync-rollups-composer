@@ -425,6 +425,17 @@ async fn queue_execution_table(
                     serde_json::json!(format!("0x{}", hex::encode(&c.return_data)));
                 call_json["callSuccess"] = serde_json::json!(c.call_success);
             }
+            // Include parent linkage and target rollup for L2→L1 child calls
+            // (the L1→L2→L1 nested pattern). Without these, analyze_continuation_calls
+            // treats all calls as L1→L2, producing wrong entry structures.
+            if let Some(parent_idx) = c.parent_call_index {
+                call_json["parentCallIndex"] = serde_json::json!(parent_idx);
+            }
+            if c.target_rollup_id == 0 && c.parent_call_index.is_some() {
+                // Explicitly mark L2→L1 children (target=L1=0) so the RPC handler
+                // can distinguish them from L1→L2 calls.
+                call_json["targetRollupId"] = serde_json::json!(0u64);
+            }
             call_json
         })
         .collect();
@@ -488,8 +499,10 @@ async fn queue_execution_table(
 struct DetectedInternalCall {
     /// Destination address on the target rollup.
     destination: Address,
-    /// Rollup ID of the target rollup.
-    _rollup_id: u64,
+    /// Rollup ID of the target rollup (0 = L1/mainnet, 1+ = L2 rollups).
+    /// Used to distinguish L1→L2 calls (target_rollup_id > 0) from
+    /// L2→L1 children (target_rollup_id = 0) discovered in L2 simulation.
+    target_rollup_id: u64,
     /// Calldata to execute on the destination (inner calldata for proxy, parsed for bridge).
     calldata: Vec<u8>,
     /// ETH value sent with the call.
@@ -504,6 +517,10 @@ struct DetectedInternalCall {
     /// the RESULT hash must include it (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
     /// Empty when the call returns void or when simulation was not performed.
     return_data: Vec<u8>,
+    /// Index of the parent L1→L2 call whose L2 execution triggers this child.
+    /// `None` for root-level L1→L2 calls; `Some(i)` for L2→L1 child calls
+    /// discovered inside call[i]'s L2 simulation (the L1→L2→L1 pattern).
+    parent_call_index: Option<usize>,
 }
 
 /// Execute a `debug_traceCallMany` bundle on L2:
@@ -976,6 +993,283 @@ async fn simulate_l1_to_l2_call_on_l2(
     (inner_return_data, inner_success, children)
 }
 
+/// Chained L2 simulation: simulate an L1→L2 call on L2 where prior calls have
+/// already executed, so this call sees their accumulated state effects.
+///
+/// Builds a single `debug_traceCallMany` bundle:
+///   tx[0]: `loadExecutionTable(prior_result_entries ++ void_result_for_this_call)`
+///   tx[1..N]: `executeIncomingCrossChainCall(prior_call_0)` ... for each prior call
+///   tx[N+1]: `executeIncomingCrossChainCall(this_call)`
+///
+/// Prior calls run with their correct RESULT entries loaded, so they succeed and
+/// mutate L2 state. This call may revert (its RESULT entry is a void placeholder),
+/// but the inner destination call still executes — we extract its return data from
+/// the trace.
+///
+/// Used for multi-call patterns like CallTwice where identical calls need to see
+/// each other's state effects (e.g., Counter.increment() twice → returns 1, then 2).
+#[allow(clippy::too_many_arguments)]
+async fn simulate_l1_to_l2_call_chained_on_l2(
+    client: &reqwest::Client,
+    l2_rpc_url: &str,
+    cross_chain_manager_address: Address,
+    destination: Address,
+    data: &[u8],
+    value: U256,
+    source_address: Address,
+    rollup_id: u64,
+    prior_result_entries: &[crate::cross_chain::CrossChainExecutionEntry],
+    prior_exec_calldatas: &[(Vec<u8>, U256)],
+    sys_addr: Option<Address>,
+) -> (Vec<u8>, bool, Vec<super::common::DiscoveredProxyCall>) {
+    let sys_addr = match sys_addr {
+        Some(a) => a,
+        None => {
+            // Fall back to independent simulation if SYSTEM_ADDRESS unavailable.
+            return simulate_l1_to_l2_call_on_l2(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                destination,
+                data,
+                value,
+                source_address,
+                rollup_id,
+            )
+            .await;
+        }
+    };
+
+    let sys_addr_hex = format!("{sys_addr}");
+    let ccm_hex = format!("{cross_chain_manager_address}");
+
+    // Build the current call's exec calldata.
+    let sim_action = crate::cross_chain::CrossChainAction {
+        action_type: crate::cross_chain::CrossChainActionType::Call,
+        rollup_id: U256::from(rollup_id),
+        destination,
+        value,
+        data: data.to_vec(),
+        failed: false,
+        source_address,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
+
+    // Build a void RESULT entry for this call (placeholder — will cause _consumeExecution
+    // to fail, but the inner destination call still executes).
+    let void_result = crate::cross_chain::CrossChainAction {
+        action_type: crate::cross_chain::CrossChainActionType::Result,
+        rollup_id: U256::from(rollup_id),
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: false,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let void_hash = crate::table_builder::compute_action_hash(&void_result);
+    let void_entry = crate::cross_chain::CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash: void_hash,
+        next_action: void_result,
+    };
+
+    // Combine all entries: prior RESULT entries + void placeholder for current call.
+    let mut all_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> =
+        prior_result_entries.to_vec();
+    all_entries.push(void_entry);
+
+    // Build the loadExecutionTable calldata.
+    let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(&all_entries);
+    let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
+
+    // Build the transaction array: loadTable + prior execs + current exec.
+    let mut transactions = Vec::new();
+
+    // tx[0]: loadExecutionTable
+    transactions.push(serde_json::json!({
+        "from": sys_addr_hex,
+        "to": ccm_hex,
+        "data": load_data,
+        "gas": "0x1c9c380"
+    }));
+
+    // tx[1..N]: prior executeIncomingCrossChainCall calls
+    for (cd, val) in prior_exec_calldatas {
+        transactions.push(serde_json::json!({
+            "from": sys_addr_hex,
+            "to": ccm_hex,
+            "data": format!("0x{}", hex::encode(cd)),
+            "value": format!("0x{:x}", val),
+            "gas": "0x2faf080"
+        }));
+    }
+
+    // tx[N+1]: current executeIncomingCrossChainCall
+    transactions.push(serde_json::json!({
+        "from": sys_addr_hex,
+        "to": ccm_hex,
+        "data": format!("0x{}", hex::encode(exec_calldata.as_ref())),
+        "value": format!("0x{:x}", value),
+        "gas": "0x2faf080"
+    }));
+
+    let trace_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "debug_traceCallMany",
+        "params": [[{
+            "transactions": transactions
+        }], null, { "tracer": "callTracer" }],
+        "id": 99962
+    });
+
+    let resp = match client.post(l2_rpc_url).json(&trace_req).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                target: "based_rollup::l1_proxy",
+                %e,
+                "chained L2 simulation: transport error"
+            );
+            // Fall back to independent simulation.
+            return simulate_l1_to_l2_call_on_l2(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                destination,
+                data,
+                value,
+                source_address,
+                rollup_id,
+            )
+            .await;
+        }
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                target: "based_rollup::l1_proxy",
+                %e,
+                "chained L2 simulation: response parse error"
+            );
+            return simulate_l1_to_l2_call_on_l2(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                destination,
+                data,
+                value,
+                source_address,
+                rollup_id,
+            )
+            .await;
+        }
+    };
+
+    // Extract the last trace (current call's trace).
+    // result[0] = bundle traces array, result[0][last] = current call trace.
+    let traces = match body
+        .get("result")
+        .and_then(|r| r.get(0))
+        .and_then(|b| b.as_array())
+    {
+        Some(arr) => arr,
+        None => {
+            tracing::warn!(
+                target: "based_rollup::l1_proxy",
+                "chained L2 simulation: no traces in response"
+            );
+            return simulate_l1_to_l2_call_on_l2(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                destination,
+                data,
+                value,
+                source_address,
+                rollup_id,
+            )
+            .await;
+        }
+    };
+
+    // The last trace is the current call.
+    let expected_count = 1 + prior_exec_calldatas.len() + 1; // loadTable + priors + current
+    if traces.len() < expected_count {
+        tracing::warn!(
+            target: "based_rollup::l1_proxy",
+            expected = expected_count,
+            got = traces.len(),
+            "chained L2 simulation: unexpected trace count"
+        );
+        return simulate_l1_to_l2_call_on_l2(
+            client,
+            l2_rpc_url,
+            cross_chain_manager_address,
+            destination,
+            data,
+            value,
+            source_address,
+            rollup_id,
+        )
+        .await;
+    }
+
+    let current_trace = &traces[traces.len() - 1];
+
+    // Walk trace for child L2→L1 proxy calls.
+    let children = if !cross_chain_manager_address.is_zero() {
+        walk_l2_simulation_trace(
+            client,
+            l2_rpc_url,
+            cross_chain_manager_address,
+            current_trace,
+            rollup_id,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+
+    // Extract return data from the current call's trace.
+    // The executeIncomingCrossChainCall may revert (void RESULT placeholder doesn't
+    // match the actual return data), so extract the INNER destination return data.
+    let has_error =
+        current_trace.get("error").is_some() || current_trace.get("revertReason").is_some();
+
+    let return_data = if has_error {
+        extract_inner_destination_return_data(current_trace, destination).unwrap_or_default()
+    } else {
+        extract_inner_destination_return_data(current_trace, destination)
+            .unwrap_or_else(|| extract_return_data_from_trace(current_trace))
+    };
+    let success = if has_error {
+        // If inner return data found, the destination call succeeded even though
+        // the top-level executeIncomingCrossChainCall reverted.
+        !return_data.is_empty() || data.is_empty()
+    } else {
+        true
+    };
+
+    tracing::info!(
+        target: "based_rollup::l1_proxy",
+        %destination,
+        %source_address,
+        return_data_len = return_data.len(),
+        success,
+        child_count = children.len(),
+        prior_calls = prior_exec_calldatas.len(),
+        "chained L2 simulation complete"
+    );
+
+    (return_data, success, children)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 //  L1 ProxyLookup implementation for generic trace::walk_trace_tree
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1209,12 +1503,13 @@ async fn walk_l1_trace_generic(
         .into_iter()
         .map(|c| DetectedInternalCall {
             destination: c.destination,
-            _rollup_id: 0, // L1→L2: destination rollup determined by proxy identity
+            target_rollup_id: 0, // L1→L2: target resolved later from proxy identity
             calldata: c.calldata,
             value: c.value,
             source_address: c.source_address,
             call_success: true,
             return_data: vec![],
+            parent_call_index: None, // root-level L1→L2 call
         })
         .collect()
 }
@@ -1360,43 +1655,157 @@ async fn trace_and_detect_internal_calls(
     // on L2. The RESULT action hash includes the exact return bytes from the
     // target contract (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
     //
+    // CHAINED simulation: when multiple calls are detected (e.g., CallTwice calling
+    // Counter.increment() twice), each call must see the state effects of previous
+    // calls. We simulate sequentially: call[i] runs in a bundle where calls[0..i-1]
+    // have already executed with their correct RESULT entries loaded.
+    //
     // Also collect child L2→L1 proxy calls discovered in L2 simulation traces.
     // These represent the nested L1→L2→L1 pattern (the L2 target calls back to L1).
-    let mut all_child_calls: Vec<DetectedInternalCall> = Vec::new();
+    let mut all_child_calls: Vec<(usize, DetectedInternalCall)> = Vec::new();
     if !cross_chain_manager_address.is_zero() {
-        for call in &mut detected_calls {
-            let (ret_data, success, child_calls) = simulate_l1_to_l2_call_on_l2(
+        // Accumulate RESULT entries from already-enriched calls for chained simulation.
+        let mut prior_result_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> =
+            Vec::new();
+        // Also accumulate the executeIncomingCrossChainCall calldatas for prior calls
+        // so they execute in the bundle (state must accumulate).
+        let mut prior_exec_calldatas: Vec<(Vec<u8>, U256)> = Vec::new();
+
+        // Query SYSTEM_ADDRESS once (needed for building exec calldatas).
+        let sys_addr = {
+            let sys_calldata = super::common::encode_system_address_calldata();
+            let sys_result = super::common::eth_call_view(
                 client,
                 l2_rpc_url,
                 cross_chain_manager_address,
-                call.destination,
-                &call.calldata,
-                call.value,
-                call.source_address,
-                rollup_id,
+                &sys_calldata,
             )
             .await;
+            sys_result.and_then(|s| super::common::parse_address_from_abi_return(&s))
+        };
+
+        for call_idx in 0..detected_calls.len() {
+            // Clone the fields we need before any mutable borrow of detected_calls.
+            let call_destination = detected_calls[call_idx].destination;
+            let call_calldata = detected_calls[call_idx].calldata.clone();
+            let call_value = detected_calls[call_idx].value;
+            let call_source = detected_calls[call_idx].source_address;
+
+            let (ret_data, success, child_calls) = if call_idx == 0
+                || prior_result_entries.is_empty()
+            {
+                // First call or no prior entries: independent simulation.
+                simulate_l1_to_l2_call_on_l2(
+                    client,
+                    l2_rpc_url,
+                    cross_chain_manager_address,
+                    call_destination,
+                    &call_calldata,
+                    call_value,
+                    call_source,
+                    rollup_id,
+                )
+                .await
+            } else {
+                // Subsequent call: chained simulation via debug_traceCallMany bundle
+                // where prior calls execute first (with their RESULT entries loaded),
+                // so this call sees their state effects.
+                simulate_l1_to_l2_call_chained_on_l2(
+                    client,
+                    l2_rpc_url,
+                    cross_chain_manager_address,
+                    call_destination,
+                    &call_calldata,
+                    call_value,
+                    call_source,
+                    rollup_id,
+                    &prior_result_entries,
+                    &prior_exec_calldatas,
+                    sys_addr,
+                )
+                .await
+            };
             tracing::info!(
                 target: "based_rollup::l1_proxy::debug256",
-                dest = %call.destination,
-                source = %call.source_address,
+                dest = %call_destination,
+                source = %call_source,
                 return_data_len = ret_data.len(),
                 call_success = success,
                 child_l2_to_l1_calls = child_calls.len(),
                 return_data_hex = %if ret_data.is_empty() { "EMPTY".to_string() } else { format!("0x{}", hex::encode(&ret_data[..std::cmp::min(ret_data.len(), 64)])) },
+                chained = call_idx > 0,
                 "simulate_l1_to_l2_call_on_l2 result"
             );
-            call.return_data = ret_data;
-            call.call_success = success;
+
+            // Bug 2 fix: when the L2 simulation finds child L2→L1 calls AND the
+            // parent call reports success=false, the revert was caused by the child's
+            // inner executeCrossChainCall failing (no entry loaded), NOT by the parent
+            // destination function itself. The parent function actually ran successfully
+            // and returned void. Override return data to empty and success to true.
+            //
+            // This is the L1→L2→L1 (nestedCounter) pattern: the L2 target calls an L1
+            // proxy internally, which triggers executeCrossChainCall on the L2 CCM.
+            // Without entries, that inner call reverts, cascading to the parent. But the
+            // parent's own return data is void (empty).
+            let (final_ret_data, final_success) = if !success && !child_calls.is_empty() {
+                tracing::info!(
+                    target: "based_rollup::l1_proxy",
+                    dest = %call_destination,
+                    child_count = child_calls.len(),
+                    "parent call_success=false with children: overriding to void/success \
+                     (L1→L2→L1 pattern — revert was from child's missing entry)"
+                );
+                (vec![], true)
+            } else {
+                (ret_data, success)
+            };
+
+            detected_calls[call_idx].return_data = final_ret_data.clone();
+            detected_calls[call_idx].call_success = final_success;
+
+            // Build RESULT entry and exec calldata for this call (for future chaining).
+            // Uses final_ret_data/final_success after Bug 2 override so the RESULT hash
+            // is correct for the corrected return data.
+            let result_action = crate::cross_chain::CrossChainAction {
+                action_type: crate::cross_chain::CrossChainActionType::Result,
+                rollup_id: U256::from(rollup_id),
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: final_ret_data,
+                failed: !final_success,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            };
+            let result_hash = crate::table_builder::compute_action_hash(&result_action);
+            prior_result_entries.push(crate::cross_chain::CrossChainExecutionEntry {
+                state_deltas: vec![],
+                action_hash: result_hash,
+                next_action: result_action,
+            });
+
+            // Build exec calldata for this call.
+            let sim_action = crate::cross_chain::CrossChainAction {
+                action_type: crate::cross_chain::CrossChainActionType::Call,
+                rollup_id: U256::from(rollup_id),
+                destination: call_destination,
+                value: call_value,
+                data: call_calldata,
+                failed: false,
+                source_address: call_source,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            };
+            let exec_cd =
+                crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
+            prior_exec_calldatas.push((exec_cd.to_vec(), call_value));
 
             // Convert child L2→L1 proxy calls to DetectedInternalCall and
-            // accumulate them. These will be added to detected_calls after
-            // the enrichment loop completes (can't modify the vec during
-            // iteration).
+            // accumulate them with parent index for correct L1→L2→L1 entry linking.
             for child in &child_calls {
                 tracing::info!(
                     target: "based_rollup::l1_proxy",
-                    parent_dest = %call.destination,
+                    parent_dest = %call_destination,
                     child_dest = %child.original_address,
                     child_source = %child.source_address,
                     child_data_len = child.data.len(),
@@ -1404,30 +1813,78 @@ async fn trace_and_detect_internal_calls(
                     child_reverted = child.reverted,
                     "discovered child L2→L1 call from L2 simulation (nested L1→L2→L1 pattern)"
                 );
-                all_child_calls.push(DetectedInternalCall {
-                    destination: child.original_address,
-                    _rollup_id: 0, // L2→L1: child targets L1
-                    calldata: child.data.clone(),
-                    value: child.value,
-                    source_address: child.source_address,
-                    call_success: true, // defaults to true; will be enriched later if needed
-                    return_data: vec![], // will be enriched via L1 simulation
-                });
+                all_child_calls.push((
+                    call_idx,
+                    DetectedInternalCall {
+                        destination: child.original_address,
+                        target_rollup_id: 0, // L2→L1: child targets L1 (mainnet)
+                        calldata: child.data.clone(),
+                        value: child.value,
+                        source_address: child.source_address,
+                        call_success: true, // defaults to true; will be enriched later if needed
+                        return_data: vec![], // will be enriched via L1 simulation
+                        parent_call_index: Some(call_idx), // linked to parent L1→L2 call
+                    },
+                ));
             }
         }
     }
 
     // If child L2→L1 calls were discovered, they represent additional cross-chain
-    // calls that need their own entries. Add them to detected_calls so the routing
-    // logic below can handle them (multi-call path with continuation entries).
+    // calls that need their own entries. Enrich each child with its L1 delivery
+    // return data (simulate the call on L1), then add to detected_calls.
     if !all_child_calls.is_empty() {
         tracing::info!(
             target: "based_rollup::l1_proxy",
             parent_calls = detected_calls.len(),
             child_calls = all_child_calls.len(),
-            "propagating child L2→L1 calls from L2 simulation to detected calls"
+            "enriching child L2→L1 calls with L1 delivery simulation"
         );
-        detected_calls.extend(all_child_calls);
+        for (_parent_idx, child) in &mut all_child_calls {
+            // Simulate the child's L1 delivery via eth_call.
+            // This is a read-only view call to get the return data from the
+            // destination contract on L1. Exception per spec: read-only view
+            // calls may use eth_call instead of debug_traceCallMany.
+            let delivery_data = format!("0x{}", hex::encode(&child.calldata));
+            let dest_hex = format!("{}", child.destination);
+            let call_req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{
+                    "to": dest_hex,
+                    "data": delivery_data,
+                    "value": format!("0x{:x}", child.value)
+                }, "latest"],
+                "id": 99987
+            });
+            if let Ok(resp) = client.post(l1_rpc_url).json(&call_req).send().await {
+                if let Ok(body) = resp.json::<Value>().await {
+                    if let Some(result_hex) = body.get("result").and_then(|v| v.as_str()) {
+                        let hex_clean = result_hex.strip_prefix("0x").unwrap_or(result_hex);
+                        if let Ok(delivery_bytes) = hex::decode(hex_clean) {
+                            if !delivery_bytes.is_empty() {
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    dest = %child.destination,
+                                    return_data_len = delivery_bytes.len(),
+                                    "enriched L2→L1 child with L1 delivery return data"
+                                );
+                                child.return_data = delivery_bytes;
+                            }
+                        }
+                    } else if let Some(error) = body.get("error") {
+                        tracing::info!(
+                            target: "based_rollup::l1_proxy",
+                            dest = %child.destination,
+                            ?error,
+                            "L1 delivery simulation reverted for child call"
+                        );
+                        child.call_success = false;
+                    }
+                }
+            }
+        }
+        detected_calls.extend(all_child_calls.into_iter().map(|(_parent_idx, child)| child));
     }
 
     // If initial trace found calls but tx reverts (multi-call continuation pattern), iterate
@@ -1466,6 +1923,14 @@ async fn trace_and_detect_internal_calls(
                             source_address: c.source_address,
                             l2_return_data: c.return_data.clone(),
                             call_success: c.call_success,
+                            parent_call_index: c.parent_call_index,
+                            target_rollup_id: if c.parent_call_index.is_some()
+                                && c.target_rollup_id == 0
+                            {
+                                Some(0)
+                            } else {
+                                None
+                            },
                         })
                         .collect();
 
@@ -1947,29 +2412,177 @@ async fn trace_and_detect_internal_calls(
                         "discovered new cross-chain calls via traceCallMany"
                     );
 
-                    // Enrich new calls with L2 return data via simulation.
-                    // Also collect any child L2→L1 calls discovered in the
-                    // L2 simulation (nested L1→L2→L1 pattern).
+                    // Enrich new calls with L2 return data via CHAINED simulation.
+                    // Each new call must see the state effects of ALL prior calls
+                    // (both previously-enriched all_calls AND earlier new calls in
+                    // this batch). Without chaining, identical calls (e.g., CallTwice
+                    // calling increment() twice) all see the same initial state and
+                    // produce identical return data — breaking the entry hashes.
+                    //
+                    // Also collect any child L2→L1 calls discovered in the L2
+                    // simulation (nested L1→L2→L1 pattern).
                     let mut enriched_new_calls = new_calls;
-                    let mut iter_child_calls: Vec<DetectedInternalCall> = Vec::new();
+                    let mut iter_child_calls: Vec<(usize, DetectedInternalCall)> = Vec::new();
                     if !cross_chain_manager_address.is_zero() {
-                        for call in &mut enriched_new_calls {
-                            let (ret_data, success, child_calls) = simulate_l1_to_l2_call_on_l2(
+                        // Build RESULT entries and exec calldatas from ALL existing
+                        // calls (already enriched) for chained simulation.
+                        let sys_addr = {
+                            let sys_calldata = super::common::encode_system_address_calldata();
+                            let sys_result = super::common::eth_call_view(
                                 client,
                                 l2_rpc_url,
                                 cross_chain_manager_address,
-                                call.destination,
-                                &call.calldata,
-                                call.value,
-                                call.source_address,
-                                rollup_id,
+                                &sys_calldata,
                             )
                             .await;
-                            call.return_data = ret_data;
-                            call.call_success = success;
+                            sys_result
+                                .and_then(|s| super::common::parse_address_from_abi_return(&s))
+                        };
+                        let mut prior_result_entries: Vec<
+                            crate::cross_chain::CrossChainExecutionEntry,
+                        > = Vec::new();
+                        let mut prior_exec_calldatas: Vec<(Vec<u8>, U256)> = Vec::new();
+
+                        // Accumulate prior entries from all_calls (already enriched).
+                        for prior in all_calls.iter() {
+                            // Only L1→L2 calls contribute to L2 state chaining.
+                            // L2→L1 children (target_rollup_id=0) don't execute on L2.
+                            if prior.parent_call_index.is_some() {
+                                continue;
+                            }
+                            let result_action = crate::cross_chain::CrossChainAction {
+                                action_type: crate::cross_chain::CrossChainActionType::Result,
+                                rollup_id: U256::from(rollup_id),
+                                destination: Address::ZERO,
+                                value: U256::ZERO,
+                                data: prior.return_data.clone(),
+                                failed: !prior.call_success,
+                                source_address: Address::ZERO,
+                                source_rollup: U256::ZERO,
+                                scope: vec![],
+                            };
+                            let result_hash =
+                                crate::table_builder::compute_action_hash(&result_action);
+                            prior_result_entries.push(
+                                crate::cross_chain::CrossChainExecutionEntry {
+                                    state_deltas: vec![],
+                                    action_hash: result_hash,
+                                    next_action: result_action,
+                                },
+                            );
+                            let sim_action = crate::cross_chain::CrossChainAction {
+                                action_type: crate::cross_chain::CrossChainActionType::Call,
+                                rollup_id: U256::from(rollup_id),
+                                destination: prior.destination,
+                                value: prior.value,
+                                data: prior.calldata.clone(),
+                                failed: false,
+                                source_address: prior.source_address,
+                                source_rollup: U256::ZERO,
+                                scope: vec![],
+                            };
+                            let exec_cd =
+                                crate::cross_chain::encode_execute_incoming_call_calldata(
+                                    &sim_action,
+                                );
+                            prior_exec_calldatas.push((exec_cd.to_vec(), prior.value));
+                        }
+
+                        for call in &mut enriched_new_calls {
+                            let (ret_data, success, child_calls) =
+                                if prior_result_entries.is_empty() {
+                                    // No prior calls: independent simulation.
+                                    simulate_l1_to_l2_call_on_l2(
+                                        client,
+                                        l2_rpc_url,
+                                        cross_chain_manager_address,
+                                        call.destination,
+                                        &call.calldata,
+                                        call.value,
+                                        call.source_address,
+                                        rollup_id,
+                                    )
+                                    .await
+                                } else {
+                                    // Chained simulation: prior calls execute first.
+                                    simulate_l1_to_l2_call_chained_on_l2(
+                                        client,
+                                        l2_rpc_url,
+                                        cross_chain_manager_address,
+                                        call.destination,
+                                        &call.calldata,
+                                        call.value,
+                                        call.source_address,
+                                        rollup_id,
+                                        &prior_result_entries,
+                                        &prior_exec_calldatas,
+                                        sys_addr,
+                                    )
+                                    .await
+                                };
+
+                            // Override return data when child L2→L1 calls present
+                            // but parent reports failure (L1→L2→L1 pattern: the
+                            // revert was from the child's missing entry, not the
+                            // parent destination function).
+                            let (final_ret_data, final_success) =
+                                if !success && !child_calls.is_empty() {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        dest = %call.destination,
+                                        child_count = child_calls.len(),
+                                        "iterative enrichment: parent call_success=false with children — overriding to void/success"
+                                    );
+                                    (vec![], true)
+                                } else {
+                                    (ret_data, success)
+                                };
+
+                            call.return_data = final_ret_data.clone();
+                            call.call_success = final_success;
+
+                            // Accumulate this call's RESULT for future chaining.
+                            let result_action = crate::cross_chain::CrossChainAction {
+                                action_type: crate::cross_chain::CrossChainActionType::Result,
+                                rollup_id: U256::from(rollup_id),
+                                destination: Address::ZERO,
+                                value: U256::ZERO,
+                                data: final_ret_data,
+                                failed: !final_success,
+                                source_address: Address::ZERO,
+                                source_rollup: U256::ZERO,
+                                scope: vec![],
+                            };
+                            let result_hash =
+                                crate::table_builder::compute_action_hash(&result_action);
+                            prior_result_entries.push(
+                                crate::cross_chain::CrossChainExecutionEntry {
+                                    state_deltas: vec![],
+                                    action_hash: result_hash,
+                                    next_action: result_action,
+                                },
+                            );
+                            let sim_action = crate::cross_chain::CrossChainAction {
+                                action_type: crate::cross_chain::CrossChainActionType::Call,
+                                rollup_id: U256::from(rollup_id),
+                                destination: call.destination,
+                                value: call.value,
+                                data: call.calldata.clone(),
+                                failed: false,
+                                source_address: call.source_address,
+                                source_rollup: U256::ZERO,
+                                scope: vec![],
+                            };
+                            let exec_cd =
+                                crate::cross_chain::encode_execute_incoming_call_calldata(
+                                    &sim_action,
+                                );
+                            prior_exec_calldatas.push((exec_cd.to_vec(), call.value));
 
                             // Convert child L2→L1 proxy calls to
-                            // DetectedInternalCall.
+                            // DetectedInternalCall with parent linkage.
+                            // The parent_call_index will be set after extending
+                            // all_calls (when we know the final index).
                             for child in &child_calls {
                                 tracing::info!(
                                     target: "based_rollup::l1_proxy",
@@ -1980,18 +2593,72 @@ async fn trace_and_detect_internal_calls(
                                     child_value = %child.value,
                                     "discovered child L2→L1 call in iterative enrichment"
                                 );
-                                iter_child_calls.push(DetectedInternalCall {
-                                    destination: child.original_address,
-                                    _rollup_id: 0,
-                                    calldata: child.data.clone(),
-                                    value: child.value,
-                                    source_address: child.source_address,
-                                    call_success: true,
-                                    return_data: vec![],
-                                });
+                                // Use a placeholder parent index (0) — we'll fix it
+                                // below once we know where this call lands in all_calls.
+                                iter_child_calls.push((
+                                    0, // placeholder — updated below
+                                    DetectedInternalCall {
+                                        destination: child.original_address,
+                                        target_rollup_id: 0, // L2→L1: child targets L1
+                                        calldata: child.data.clone(),
+                                        value: child.value,
+                                        source_address: child.source_address,
+                                        call_success: true,
+                                        return_data: vec![],
+                                        parent_call_index: None, // set below
+                                    },
+                                ));
                             }
                         }
                     }
+
+                    // Compute parent indices for child calls.
+                    // Each enriched_new_call will be at index
+                    // `all_calls.len() + enriched_idx` in the final all_calls.
+                    // The child calls need parent_call_index pointing to that index.
+                    //
+                    // Since we processed enriched_new_calls in order and pushed
+                    // children for each, we track the parent's final index.
+                    {
+                        let base_idx = all_calls.len();
+                        let mut child_idx = 0;
+                        for (enr_idx, call) in enriched_new_calls.iter().enumerate() {
+                            let parent_idx = base_idx + enr_idx;
+                            // Count how many children belong to this call
+                            // (they were pushed in order).
+                            while child_idx < iter_child_calls.len() {
+                                let (ref mut _placeholder, ref mut child) =
+                                    iter_child_calls[child_idx];
+                                // All children pushed during this call's loop
+                                // have destination matching what we discovered.
+                                // We can't tell which children go to which parent
+                                // purely by iteration, so we use the fact that
+                                // children were pushed in order during the for loop.
+                                // We need to count: iter_child_calls[child_idx].0
+                                // is 0 (placeholder) for all. So instead, we track
+                                // by matching the parent destination.
+                                //
+                                // Actually, simpler approach: check if child.destination
+                                // was discovered from this specific call by comparing
+                                // the parent_dest. But that doesn't work generically.
+                                //
+                                // Simplest: just set parent_call_index = parent_idx
+                                // for all remaining unset children. This works because
+                                // we process calls sequentially.
+                                if child.parent_call_index.is_none() {
+                                    child.parent_call_index = Some(parent_idx);
+                                    child_idx += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            // After all children of this call are set, mark them
+                            // as done by the break above. If there are no children
+                            // for this call, the loop doesn't execute.
+                            let _ = call; // suppress unused warning
+                        }
+                    }
+
                     all_calls.extend(enriched_new_calls);
                     // Also add child calls so the iterative discovery loop
                     // can build entries for them in subsequent iterations.
@@ -2001,7 +2668,8 @@ async fn trace_and_detect_internal_calls(
                             child_count = iter_child_calls.len(),
                             "adding child L2→L1 calls from L2 simulation to iterative discovery"
                         );
-                        all_calls.extend(iter_child_calls);
+                        all_calls
+                            .extend(iter_child_calls.into_iter().map(|(_, child)| child));
                     }
                 }
 

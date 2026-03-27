@@ -1920,9 +1920,78 @@ async fn simulate_l1_delivery(
                 target: "based_rollup::proxy",
                 error = error_msg,
                 iteration,
-                "postBatch reverted in L1 delivery simulation"
+                "postBatch reverted in L1 delivery simulation — \
+                 falling back to standalone delivery trace"
             );
-            // On first iteration, return empty. On subsequent, return what we have.
+
+            // Bug 3 fix: when postBatch reverts (e.g., proof signature doesn't match
+            // because the L1 block advanced between context fetch and simulation),
+            // fall back to a standalone delivery trace. This runs destination.call(data)
+            // directly on L1 to capture the correct return data without needing a
+            // valid postBatch proof. The return data is state-independent for simple
+            // L2→L1 patterns (e.g., Counter.increment() returns the new counter value).
+            let standalone_req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "debug_traceCallMany",
+                "params": [
+                    [
+                        {
+                            "transactions": [
+                                {
+                                    "from": builder_addr_hex,
+                                    "to": format!("{destination}"),
+                                    "data": format!("0x{}", hex::encode(data)),
+                                    "value": format!("0x{:x}", value),
+                                    "gas": "0x1c9c380"
+                                }
+                            ]
+                        }
+                    ],
+                    null,
+                    { "tracer": "callTracer" }
+                ],
+                "id": 99959
+            });
+            if let Ok(resp) = client.post(l1_rpc_url).json(&standalone_req).send().await {
+                if let Ok(body) = resp.json::<Value>().await {
+                    if let Some(trace_result) = body
+                        .get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                        .and_then(|a| a.first())
+                    {
+                        let has_trace_error = trace_result.get("error").is_some()
+                            || trace_result.get("revertReason").is_some();
+                        if !has_trace_error {
+                            if let Some(output_hex) =
+                                trace_result.get("output").and_then(|v| v.as_str())
+                            {
+                                let hex_clean =
+                                    output_hex.strip_prefix("0x").unwrap_or(output_hex);
+                                let trace_data = hex::decode(hex_clean).unwrap_or_default();
+                                if !trace_data.is_empty() {
+                                    tracing::info!(
+                                        target: "based_rollup::proxy",
+                                        data_len = trace_data.len(),
+                                        "captured delivery return data via standalone fallback \
+                                         after postBatch revert"
+                                    );
+                                    return Some((trace_data, false, vec![]));
+                                }
+                            }
+                        } else {
+                            tracing::info!(
+                                target: "based_rollup::proxy",
+                                "standalone fallback delivery trace also reverted — \
+                                 delivery target may not have code or reverted"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Standalone fallback failed too. On first iteration, return empty.
+            // On subsequent, return what we have.
             if iteration == 1 {
                 return Some((vec![], false, vec![]));
             }
@@ -2566,6 +2635,8 @@ async fn simulate_l1_combined_delivery(
                         source_address: rc.source_address,
                         l2_return_data: rc.l2_return_data.clone(),
                         call_success: !rc.l2_delivery_failed,
+                        parent_call_index: None,
+                        target_rollup_id: None,
                     });
                 }
 

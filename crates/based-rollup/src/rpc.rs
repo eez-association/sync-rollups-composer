@@ -256,6 +256,16 @@ pub struct BuildExecutionTableCall {
     /// Whether the L2 call succeeded. Defaults to `true` when not provided.
     #[serde(default = "default_true")]
     pub call_success: bool,
+    /// Index of the parent call whose L2 execution triggers this child.
+    /// `None` for root-level L1→L2 calls; `Some(i)` for L2→L1 child calls
+    /// discovered inside call[i]'s L2 simulation (the L1→L2→L1 pattern).
+    #[serde(default)]
+    pub parent_call_index: Option<usize>,
+    /// Target rollup ID. 0 = L1 (mainnet). For L2→L1 children, this is 0
+    /// (they target L1). Not set for normal L1→L2 calls (defaults to None,
+    /// meaning the target is our L2 rollup).
+    #[serde(default)]
+    pub target_rollup_id: Option<u64>,
 }
 
 /// Result of building a multi-call execution table.
@@ -789,6 +799,8 @@ where
                 source_address: c.source_address,
                 l2_return_data: c.l2_return_data.to_vec(),
                 call_success: c.call_success,
+                parent_call_index: c.parent_call_index,
+                target_rollup_id: c.target_rollup_id,
             })
             .collect();
 
