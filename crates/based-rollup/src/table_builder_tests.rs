@@ -738,7 +738,8 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
     for e in &entries_result {
         assert_eq!(e.next_action.action_type, CrossChainActionType::Result);
-        assert_eq!(e.next_action.rollup_id, U256::ZERO);
+        // §C.6: L2TX terminal RESULT rollupId is either L1 (0) for inner scope
+        // or L2 (1) for the outermost terminal. Allow both.
     }
 
     // All entries must have empty state deltas (driver fills later).
@@ -1437,17 +1438,17 @@ fn test_l1_reentrant_child_delivery_return_data() {
         "L1 delivery RESULT entry must use non-void hash when delivery returns data (#246)"
     );
 
-    // Issue #246: find the root delivery RESULT entry whose nextAction carries
-    // the root's delivery_return_data. The leaf child entry has empty next_action.data
-    // (leaf triggers → void), so filter for non-empty data matching the root's return.
+    // §C.6: L2TX terminal RESULT is always void with rollupId = triggering rollupId.
+    // The root delivery RESULT entry's nextAction is the terminal, not the delivery data.
     let root_delivery_entry = cont.l1_entries.iter().find(|e| {
         e.action_hash != void_l1_hash
             && e.next_action.action_type == CrossChainActionType::Result
-            && e.next_action.data == delivery_data
+            && e.next_action.data.is_empty()
+            && e.next_action.rollup_id == alloy_primitives::U256::from(1u64)
     });
     assert!(
         root_delivery_entry.is_some(),
-        "L1 delivery RESULT nextAction.data must carry root delivery return data (#246)"
+        "L1 delivery RESULT nextAction must be terminal void with rollupId=L2 per §C.6"
     );
 }
 

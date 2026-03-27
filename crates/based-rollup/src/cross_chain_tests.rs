@@ -2289,11 +2289,16 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         "L2 entry 1 action_hash must match hash of the RESULT action"
     );
 
-    // L1 deferred entry 1: RESULT with same return data.
+    // L1 deferred entry 1: terminal RESULT (§C.6: always void for L2TX).
     let l1_entry_1 = &entries.l1_deferred_entries[1];
+    assert!(
+        l1_entry_1.next_action.data.is_empty(),
+        "L1 deferred terminal RESULT must be void per §C.6"
+    );
     assert_eq!(
-        l1_entry_1.next_action.data, return_data,
-        "L1 deferred RESULT must also contain delivery return data"
+        l1_entry_1.next_action.rollup_id,
+        alloy_primitives::U256::from(1u64),
+        "L1 deferred terminal RESULT rollupId must be triggering rollupId (L2)"
     );
 }
 

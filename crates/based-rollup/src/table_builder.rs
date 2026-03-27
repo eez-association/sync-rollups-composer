@@ -1556,24 +1556,19 @@ pub fn build_l2_to_l1_continuation_entries(
                     }
                 };
             let delivery_result_hash = compute_action_hash(&delivery_result);
-            // Issue #246: L1 delivery RESULT also needs return data.
-            // Rollups.sol returns nextAction.data to the L1 caller.
-            let l1_delivery_exit =
-                if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
-                    l1_result_void.clone()
-                } else {
-                    CrossChainAction {
-                        action_type: CrossChainActionType::Result,
-                        rollup_id: U256::ZERO,
-                        destination: Address::ZERO,
-                        value: U256::ZERO,
-                        data: l2_call.delivery_return_data.clone(),
-                        failed: l2_call.l2_delivery_failed,
-                        source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
-                        scope: vec![],
-                    }
-                };
+            // §C.6: L2TX terminal RESULT is always void with rollupId = triggering rollupId.
+            // This applies regardless of whether inner calls return data.
+            let l1_delivery_exit = CrossChainAction {
+                action_type: CrossChainActionType::Result,
+                rollup_id: our_rollup_id, // triggering rollupId (L2)
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: vec![], // always empty per §C.6
+                failed: false,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            };
             // Scope resolution: consumed AFTER the delivery CALL executes.
             // At consumption: _etherDelta = -value (ETH was sent) → ether_delta must be -value.
             l1_entries.push(CrossChainExecutionEntry {

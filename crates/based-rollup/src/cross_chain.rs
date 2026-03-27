@@ -807,10 +807,9 @@ pub fn build_l2_to_l1_call_entries(
         scope: vec![],
     };
 
-    // Entry 2: Delivery RESULT — matches what _processCallAtScope builds
-    // after executing the delivery call on L1.
-    // For withdrawals (EOA): returnData empty, failed=false.
-    // For contract calls: returnData and failed come from L1 simulation.
+    // Entry 2 action_hash: matches what _processCallAtScope builds after executing
+    // the delivery call on L1: RESULT(rollupId=CALL.rollupId=0, data=returnData).
+    // For withdrawals (EOA): returnData empty. For contracts: from L1 simulation.
     let l1_delivery_result = CrossChainAction {
         action_type: CrossChainActionType::Result,
         rollup_id: U256::ZERO,
@@ -825,6 +824,21 @@ pub fn build_l2_to_l1_call_entries(
     let l1_delivery_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l1_delivery_result.to_sol_action(),
     ));
+
+    // Entry 2 nextAction: terminal RESULT for L2TX (per SYNC_ROLLUPS_PROTOCOL_SPEC §C.6).
+    // Always void with rollupId = triggering rollupId (L2). This applies regardless of
+    // whether the inner delivery returns data — the terminal is always empty.
+    let l2tx_terminal = CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id: rollup_id_u256, // triggering rollupId (L2)
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![], // always empty per §C.6
+        failed: false,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
 
     // Nested format: [trigger CALL entry, delivery RESULT entry]
     // The trigger CALL's nextAction is the delivery CALL (enters newScope).
@@ -863,7 +877,7 @@ pub fn build_l2_to_l1_call_entries(
                 ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
             }],
             action_hash: l1_delivery_result_hash,
-            next_action: l1_delivery_result,
+            next_action: l2tx_terminal, // §C.6: L2TX terminal is always void
         },
     ];
 
