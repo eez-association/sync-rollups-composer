@@ -64,18 +64,32 @@ pub struct DerivedBlock {
 
 /// Metadata for §4f protocol tx filtering, computed by derivation from L1 data.
 ///
-/// The driver uses this together with receipt-based L2→L1 tx identification
-/// to filter unconsumed cross-chain txs before block execution.
+/// The driver uses this with generic event-based filtering: trial-execute the
+/// full block, identify trigger txs via `ExecutionConsumed` events from the CCM,
+/// compute consumed trigger prefix using the L1 consumed map, and filter to keep
+/// only consumed triggers. This is fully protocol-generic — no dependency on
+/// entry type classification (`is_withdrawal_entry`, `is_ccm_execute_remote_call`, etc.).
 #[derive(Debug, Clone)]
 pub struct DeferredFiltering {
-    /// Number of `executeRemoteCall` (deposit) txs to keep (consumed prefix count).
-    pub consumed_deposit_count: usize,
-    /// Number of unconsumed deposit entries (for logging).
-    pub unconsumed_deposit_count: usize,
-    /// Number of L2→L1 cross-chain txs to keep (consumed prefix count).
-    /// This is `total_l2_to_l1_txs - unconsumed_withdrawal_pair_count`, where
-    /// `total_l2_to_l1_txs` is determined at filtering time from receipts.
-    pub unconsumed_withdrawal_pair_count: usize,
+    /// L1 consumed map snapshot: actionHash → remaining consumption count.
+    ///
+    /// The driver uses this for generic event-based §4f filtering:
+    /// trial-execute + `ExecutionConsumed` events + prefix counting.
+    ///
+    /// The snapshot is taken BEFORE the current batch's entries are consumed
+    /// from `remaining`, so the driver can independently determine which
+    /// triggers were consumed using the same FIFO semantics as L1.
+    pub l1_consumed_remaining: std::collections::HashMap<B256, usize>,
+
+    /// All L2 execution entries from this batch (unfiltered).
+    ///
+    /// Used by the driver for generic event-based §4f filtering via
+    /// `build_builder_protocol_txs`. When non-empty, the driver can rebuild
+    /// the block from entries instead of parsing/filtering raw encoded
+    /// transaction bytes. Falls back to `filter_block_by_trigger_prefix` on
+    /// the raw `DerivedBlock.transactions` when empty or when a proposer
+    /// (signer) is not available (fullnode/sync mode).
+    pub all_l2_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
 }
 
 /// A batch of derived blocks together with the cursor state that should be
@@ -341,6 +355,12 @@ impl DerivationPipeline {
             let mut deferred_entries: Vec<CrossChainExecutionEntry> = Vec::new();
             let mut has_unconsumed_entries = false;
 
+            // Snapshot `remaining` BEFORE this batch's entries consume it.
+            // The driver's generic §4f filtering needs the pre-batch state to
+            // independently determine which triggers were consumed via trial
+            // execution + ExecutionConsumed events + prefix counting.
+            let remaining_snapshot_for_generic_filtering = remaining.clone();
+
             for entry in &entries {
                 if entry.action_hash == B256::ZERO {
                     // Immediate entry — extract final state root from StateDelta
@@ -561,100 +581,21 @@ impl DerivationPipeline {
 
                 // §4f protocol tx filtering — deferred to the driver.
                 //
-                // When unconsumed entries exist, compute filtering metadata
-                // (consumed deposit count, unconsumed withdrawal pair count)
-                // from L1 entry data. The actual filtering is performed by the
-                // driver using receipt-based L2→L1 tx identification, which
-                // eliminates Bridge-specific selector dependencies.
+                // When unconsumed entries exist, pass the L1 consumed map
+                // snapshot to the driver. The driver handles ALL filtering
+                // generically via trial-execution + ExecutionConsumed events +
+                // prefix counting. No type-specific counting is needed here.
                 let filtering = if has_unconsumed_entries && i == 0 {
-                    // Count unconsumed entries by walking deferred entries in pairs.
-                    // Withdrawal entries come as CALL+RESULT pairs (nested format).
-                    // is_withdrawal_entry() only identifies the CALL half; the RESULT
-                    // half has next_action.action_type=Result and would be miscounted
-                    // as a deposit if counted individually. Walk structurally instead.
-                    let deferred: Vec<_> = entries
-                        .iter()
-                        .filter(|e| e.action_hash != B256::ZERO)
-                        .collect();
-                    let mut unconsumed_deposit_count = 0usize;
-                    let mut unconsumed_withdrawal_pair_count = 0usize;
-                    {
-                        // Snapshot the shared remaining counter for §4f unconsumed counting.
-                        // Uses the same shared counter that was decremented by previous
-                        // batches' entries, ensuring correct cross-batch FIFO accounting.
-                        let mut remaining_for_filter: std::collections::HashMap<B256, usize> =
-                            remaining.clone();
-
-                        let mut idx = 0;
-                        while idx < deferred.len() {
-                            if cross_chain::is_withdrawal_entry(deferred[idx]) {
-                                // Withdrawal CALL entry — next entry is the RESULT half.
-                                // A pair is unconsumed if the CALL entry is not consumed.
-                                let is_consumed = remaining_for_filter
-                                    .get_mut(&deferred[idx].action_hash)
-                                    .is_some_and(|count| {
-                                        if *count > 0 {
-                                            *count -= 1;
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                if !is_consumed {
-                                    unconsumed_withdrawal_pair_count += 1;
-                                }
-                                idx += 2; // Skip both halves of the pair
-                            } else {
-                                // Non-withdrawal deferred entry = deposit
-                                let is_consumed = remaining_for_filter
-                                    .get_mut(&deferred[idx].action_hash)
-                                    .is_some_and(|count| {
-                                        if *count > 0 {
-                                            *count -= 1;
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                if !is_consumed {
-                                    unconsumed_deposit_count += 1;
-                                }
-                                idx += 1;
-                            }
-                        }
-                    }
-
-                    // Count total executeRemoteCall txs in the block
-                    let total_execute = {
-                        let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
-                            alloy_rlp::Decodable::decode(&mut transactions.as_ref())
-                                .unwrap_or_default();
-                        txs.iter()
-                            .filter(|tx| {
-                                cross_chain::is_ccm_execute_remote_call(
-                                    tx,
-                                    self.config.cross_chain_manager_address,
-                                )
-                            })
-                            .count()
-                    };
-                    let consumed_deposit_count =
-                        total_execute.saturating_sub(unconsumed_deposit_count);
-
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,
                         %l1_block,
-                        consumed_deposit_count,
-                        unconsumed_deposit_count,
-                        unconsumed_withdrawal_pair_count,
-                        "§4f filtering deferred to driver (receipt-based)"
+                        "§4f filtering deferred to driver (generic event-based)"
                     );
 
                     Some(DeferredFiltering {
-                        consumed_deposit_count,
-                        unconsumed_deposit_count,
-                        unconsumed_withdrawal_pair_count,
+                        l1_consumed_remaining: remaining_snapshot_for_generic_filtering.clone(),
+                        all_l2_entries: execution_entries.clone(),
                     })
                 } else {
                     None

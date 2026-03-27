@@ -2154,6 +2154,217 @@ pub fn attach_unified_chained_state_deltas(
     }
 }
 
+// ──────────────────────────────────────────────
+//  Generic trigger-based filtering (Step 1 of generic filtering plan)
+// ──────────────────────────────────────────────
+
+/// Scan L2 block receipts for transactions that produce `ExecutionConsumed` events
+/// from the CrossChainManagerL2. Returns deduplicated tx indices in order.
+///
+/// A "trigger tx" is any transaction that causes entry consumption — whether it's
+/// a protocol tx (`executeIncomingCrossChainCall`) or a user tx (via proxy).
+/// The protocol is agnostic to trigger type; only the event matters.
+pub fn identify_trigger_tx_indices(
+    receipts: &[alloy_consensus::Receipt<alloy_primitives::Log>],
+    ccm_address: Address,
+) -> Vec<usize> {
+    let sig = execution_consumed_signature_hash();
+    let mut seen = std::collections::BTreeSet::new();
+    for (tx_idx, receipt) in receipts.iter().enumerate() {
+        let has_consumed = receipt.logs.iter().any(|log| {
+            log.address == ccm_address
+                && !log.data.topics().is_empty()
+                && log.data.topics()[0] == sig
+        });
+        if has_consumed {
+            seen.insert(tx_idx);
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// Filter a block's transactions by keeping the first `keep_count` trigger txs
+/// and removing the rest. Keeps ALL non-trigger txs (loadTable, setContext, user txs).
+///
+/// `trigger_tx_indices` is the output of [`identify_trigger_tx_indices`].
+/// Replaces the type-specific `filter_block_entries` and `filter_unconsumed_execute_remote_calls`.
+pub fn filter_block_by_trigger_prefix(
+    encoded_transactions: &Bytes,
+    trigger_tx_indices: &[usize],
+    keep_count: usize,
+) -> eyre::Result<Bytes> {
+    use alloy_rlp::Decodable;
+
+    if encoded_transactions.is_empty() {
+        return Ok(Bytes::new());
+    }
+
+    // Build the set of tx indices to REMOVE (triggers beyond the kept prefix)
+    let remove_set: std::collections::HashSet<usize> = trigger_tx_indices
+        .iter()
+        .skip(keep_count)
+        .copied()
+        .collect();
+
+    let txs: Vec<TransactionSigned> = Decodable::decode(&mut encoded_transactions.as_ref())
+        .map_err(|e| eyre::eyre!("failed to RLP-decode transactions: {e}"))?;
+
+    let filtered: Vec<TransactionSigned> = txs
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| !remove_set.contains(idx))
+        .map(|(_, tx)| tx)
+        .collect();
+
+    let mut buf = Vec::new();
+    alloy_rlp::encode_list(&filtered, &mut buf);
+    Ok(Bytes::from(buf))
+}
+
+/// Determine how many L2 trigger txs had their entries fully consumed on L1.
+///
+/// Walks trigger txs in block order. For each trigger tx, extracts the `actionHash`es
+/// from its `ExecutionConsumed` events. Checks that ALL hashes have remaining count > 0
+/// in the L1 consumed map. If yes: consumed, decrement counters, continue.
+/// If any hash is missing: STOP (prefix counting — §4f).
+///
+/// Returns the number of consecutive consumed trigger txs from the start.
+pub fn compute_consumed_trigger_prefix(
+    receipts: &[alloy_consensus::Receipt<alloy_primitives::Log>],
+    ccm_address: Address,
+    l1_consumed_remaining: &mut std::collections::HashMap<B256, usize>,
+    trigger_tx_indices: &[usize],
+) -> usize {
+    let sig = execution_consumed_signature_hash();
+    let mut consumed_count: usize = 0;
+
+    for &tx_idx in trigger_tx_indices {
+        let receipt = match receipts.get(tx_idx) {
+            Some(r) => r,
+            None => return consumed_count,
+        };
+
+        // Collect all actionHashes from ExecutionConsumed events in this tx's receipt
+        let action_hashes: Vec<B256> = receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                log.address == ccm_address
+                    && log.data.topics().len() >= 2
+                    && log.data.topics()[0] == sig
+            })
+            .map(|log| log.data.topics()[1])
+            .collect();
+
+        if action_hashes.is_empty() {
+            // This trigger tx had no ExecutionConsumed events — should not happen
+            // for a properly identified trigger, but stop defensively.
+            return consumed_count;
+        }
+
+        // Check that ALL action hashes have remaining > 0 in the L1 map.
+        // We must verify BEFORE decrementing — if any fails, we stop without
+        // side effects on the counters for this trigger tx.
+        let all_available = action_hashes.iter().all(|hash| {
+            l1_consumed_remaining
+                .get(hash)
+                .copied()
+                .unwrap_or(0)
+                > 0
+        });
+
+        if !all_available {
+            return consumed_count;
+        }
+
+        // All passed — decrement counters
+        for hash in &action_hashes {
+            if let Some(count) = l1_consumed_remaining.get_mut(hash) {
+                *count = count.saturating_sub(1);
+            }
+        }
+
+        consumed_count += 1;
+    }
+
+    consumed_count
+}
+
+/// Assign chained state deltas to L1 deferred entries using the intermediate root chain.
+///
+/// `group_starts[k]` is the index of the first entry in trigger group k.
+/// `roots` has T+1 values (T = number of trigger groups).
+///
+/// For group k (entries from `group_starts[k]` to `group_starts[k+1]` or end):
+///   - First entry: `StateDelta(roots[k], roots[k+1], preserve existing ether_delta)`
+///   - Remaining entries: `StateDelta(roots[k+1], roots[k+1], preserve existing ether_delta)`
+///
+/// This is protocol-generic: works for any entry type (deposits, withdrawals,
+/// continuations, or any future pattern).
+pub fn attach_generic_state_deltas(
+    entries: &mut [CrossChainExecutionEntry],
+    roots: &[B256],
+    rollup_id: u64,
+    group_starts: &[usize],
+) {
+    let rollup_id_u256 = U256::from(rollup_id);
+    let num_groups = group_starts.len();
+
+    for k in 0..num_groups {
+        let start = group_starts[k];
+        let end = if k + 1 < num_groups {
+            group_starts[k + 1]
+        } else {
+            entries.len()
+        };
+
+        // roots must have at least k+2 values (roots[k] and roots[k+1])
+        if k + 1 >= roots.len() {
+            warn!(
+                target: "based_rollup::cross_chain",
+                group = k,
+                roots_len = roots.len(),
+                "attach_generic_state_deltas: insufficient roots for group"
+            );
+            break;
+        }
+
+        let pre_root = roots[k];
+        let post_root = roots[k + 1];
+
+        for i in start..end {
+            if i >= entries.len() {
+                break;
+            }
+
+            // Preserve existing ether_delta if the entry already has state deltas
+            let existing_ether_delta = entries[i]
+                .state_deltas
+                .first()
+                .map(|d| d.ether_delta)
+                .unwrap_or(I256::ZERO);
+
+            if i == start {
+                // First entry in group: state transition from pre to post
+                entries[i].state_deltas = vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: pre_root,
+                    new_state: post_root,
+                    ether_delta: existing_ether_delta,
+                }];
+            } else {
+                // Subsequent entries in group: identity delta at post_root
+                entries[i].state_deltas = vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: post_root,
+                    new_state: post_root,
+                    ether_delta: existing_ether_delta,
+                }];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "cross_chain_tests.rs"]
 mod tests;

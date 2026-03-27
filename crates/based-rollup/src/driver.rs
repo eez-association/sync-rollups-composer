@@ -139,6 +139,15 @@ pub struct Driver<P, Pool> {
     pending_withdrawal_l1_entries: Vec<CrossChainExecutionEntry>,
     /// Metadata for pending withdrawals (user addresses + amounts) for trigger txs.
     pending_withdrawal_metadata: Vec<WithdrawalMetadata>,
+    /// Unified queue: all pending L1 deferred entries, in submission order.
+    /// Dual-written alongside the legacy queues during the transition period.
+    /// Entries are already in L1 format (no pair conversion needed).
+    pending_l1_entries: Vec<CrossChainExecutionEntry>,
+    /// Unified queue: index of the first entry in each trigger group.
+    pending_l1_group_starts: Vec<usize>,
+    /// Unified queue: trigger metadata for groups that need L1 trigger txs.
+    /// Indexed by group. `None` for protocol-triggered groups (deposits).
+    pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>,
     /// The L2 head at the time of the last health status update (for staleness tracking).
     prev_health_l2_head: u64,
     /// Timestamp of the last time `l2_head` advanced (for health staleness check).
@@ -207,6 +216,21 @@ struct WithdrawalMetadata {
     /// Simple withdrawals = 1. Multi-call patterns with N root L2→L1 calls need
     /// N invocations since each `executeL2TX` consumes one entry via `_findAndApplyExecution`.
     trigger_count: usize,
+}
+
+/// Generic trigger metadata for L1 trigger groups. Replaces `WithdrawalMetadata`
+/// in the unified queue. Groups that need L1 trigger txs (`executeL2TX`) carry
+/// `Some(TriggerMetadata)`; protocol-triggered groups (deposits) carry `None`.
+#[derive(Debug, Clone)]
+pub struct TriggerMetadata {
+    /// User address (trigger initiator on L1).
+    pub user: Address,
+    /// Amount in wei (for logging / gas estimation).
+    pub amount: U256,
+    /// RLP-encoded L2 transaction for the L2TX trigger on L1.
+    pub rlp_encoded_tx: Vec<u8>,
+    /// Number of `executeL2TX` calls needed for this trigger group.
+    pub trigger_count: usize,
 }
 
 /// Stage ID for the persistent transaction replay journal.
@@ -447,6 +471,9 @@ where
             pending_continuation_l1_entries: Vec::new(),
             pending_withdrawal_l1_entries: Vec::new(),
             pending_withdrawal_metadata: Vec::new(),
+            pending_l1_entries: Vec::new(),
+            pending_l1_group_starts: Vec::new(),
+            pending_l1_trigger_metadata: Vec::new(),
             prev_health_l2_head: 0,
             last_l2_head_advance: std::time::Instant::now(),
             consecutive_flush_mismatches: 0,
@@ -1188,6 +1215,9 @@ where
         let pre_drain_cont_len = self.pending_continuation_l1_entries.len();
         let pre_drain_wl_len = self.pending_withdrawal_l1_entries.len();
         let pre_drain_wm_len = self.pending_withdrawal_metadata.len();
+        let pre_drain_unified_len = self.pending_l1_entries.len();
+        let pre_drain_unified_groups = self.pending_l1_group_starts.len();
+        let pre_drain_unified_meta = self.pending_l1_trigger_metadata.len();
 
         let mut queued_l1_txs_for_block: Vec<Bytes> = Vec::new();
         // Saved originals for re-push on build failure. These are the
@@ -1246,6 +1276,23 @@ where
                         self.pending_continuation_l1_entries
                             .extend(call.l1_entries.iter().cloned());
                     }
+
+                    // === Unified queue population (dual-write) ===
+                    let group_start = self.pending_l1_entries.len();
+                    if !call.l1_entries.is_empty() {
+                        // Continuation: use pre-built L1 entries directly
+                        self.pending_l1_entries.extend(call.l1_entries.iter().cloned());
+                    } else {
+                        // Simple deposit: convert CALL+RESULT pair to L1 format
+                        let l1_entry = crate::cross_chain::convert_pairs_to_l1_entries(&[
+                            call.call_entry.clone(),
+                            call.result_entry.clone(),
+                        ]);
+                        self.pending_l1_entries.extend(l1_entry);
+                    }
+                    self.pending_l1_group_starts.push(group_start);
+                    self.pending_l1_trigger_metadata.push(None); // protocol trigger, no L1 executeL2TX needed
+
                     // Save for re-push on build failure (call is consumed by value)
                     calls_for_repush.push(call);
                 }
@@ -1293,7 +1340,21 @@ where
                     // split (base vs RPC) correctly includes them in rpc_entries_for_block.
                     // Without this, num_deposits miscounts when deposits+withdrawals coexist.
                     rpc_entry_count_in_builder += w_entry_count;
-                    // L1 deferred entries → stashed for flush_to_l1.
+                    // === Unified queue population (dual-write) ===
+                    // Must happen before the old stash because l1_deferred_entries
+                    // is moved into the legacy queues below.
+                    let group_start = self.pending_l1_entries.len();
+                    self.pending_l1_entries
+                        .extend(w.l1_deferred_entries.iter().cloned());
+                    self.pending_l1_group_starts.push(group_start);
+                    self.pending_l1_trigger_metadata.push(Some(TriggerMetadata {
+                        user: w.user,
+                        amount: w.amount,
+                        rlp_encoded_tx: w.rlp_encoded_tx.clone(),
+                        trigger_count: w.trigger_count,
+                    }));
+
+                    // L1 deferred entries → stashed for flush_to_l1 (legacy path).
                     // Multi-call continuations use the continuation path instead of the
                     // withdrawal path, because their 5-entry structure is not pair-based
                     // and would panic in attach_unified_chained_state_deltas.
@@ -1417,6 +1478,7 @@ where
                 l1_hash,
                 current_l1_block,
                 &execution_entries,
+                usize::MAX, // builder mode: generate all triggers
             ) {
                 Ok(txs) => txs,
                 Err(err) => {
@@ -1433,6 +1495,10 @@ where
                     self.pending_withdrawal_l1_entries
                         .truncate(pre_drain_wl_len);
                     self.pending_withdrawal_metadata.truncate(pre_drain_wm_len);
+                    self.pending_l1_entries.truncate(pre_drain_unified_len);
+                    self.pending_l1_group_starts.truncate(pre_drain_unified_groups);
+                    self.pending_l1_trigger_metadata
+                        .truncate(pre_drain_unified_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1493,6 +1559,10 @@ where
                     self.pending_withdrawal_l1_entries
                         .truncate(pre_drain_wl_len);
                     self.pending_withdrawal_metadata.truncate(pre_drain_wm_len);
+                    self.pending_l1_entries.truncate(pre_drain_unified_len);
+                    self.pending_l1_group_starts.truncate(pre_drain_unified_groups);
+                    self.pending_l1_trigger_metadata
+                        .truncate(pre_drain_unified_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1596,13 +1666,11 @@ where
 
             let mut intermediate_roots = Vec::new();
             let clean_state_root = if has_entries {
-                match self.compute_unified_intermediate_roots(
+                match self.compute_intermediate_roots(
                     next_l2_block.saturating_sub(1),
                     next_timestamp,
                     l1_hash,
                     current_l1_block,
-                    num_deposits,
-                    num_withdrawals,
                     built.state_root,
                     &built.encoded_transactions,
                 ) {
@@ -1725,6 +1793,27 @@ where
                 built.state_root
             };
 
+            // === Generic state delta attachment (unified queue) ===
+            // Applies correct state deltas to all L1 entries in the unified queue
+            // using the intermediate roots from compute_intermediate_roots.
+            // This runs AFTER the legacy attachment blocks (above) so both paths
+            // produce correct entries during the dual-write transition period.
+            if !self.pending_l1_entries.is_empty() && !intermediate_roots.is_empty() {
+                crate::cross_chain::attach_generic_state_deltas(
+                    &mut self.pending_l1_entries,
+                    &intermediate_roots,
+                    self.config.rollup_id,
+                    &self.pending_l1_group_starts,
+                );
+                info!(
+                    target: "based_rollup::driver",
+                    unified_entry_count = self.pending_l1_entries.len(),
+                    groups = self.pending_l1_group_starts.len(),
+                    roots = intermediate_roots.len(),
+                    "attached generic state deltas to unified L1 entries"
+                );
+            }
+
             // Queue ALL blocks for L1 submission (including empty ones).
             // The aggregate state root entry spans the entire batch so empty
             // blocks add only callData cost (block number + empty tx bytes).
@@ -1790,6 +1879,9 @@ where
                 self.pending_cross_chain_entries.clear();
             }
             self.pending_continuation_l1_entries.clear();
+            self.pending_l1_entries.clear();
+            self.pending_l1_group_starts.clear();
+            self.pending_l1_trigger_metadata.clear();
             return Ok(());
         };
 
@@ -2048,42 +2140,43 @@ where
         let continuation_l1_entries = std::mem::take(&mut self.pending_continuation_l1_entries);
         let withdrawal_l1_entries = std::mem::take(&mut self.pending_withdrawal_l1_entries);
         let withdrawal_metadata = std::mem::take(&mut self.pending_withdrawal_metadata);
+
+        // Drain unified queue alongside legacy queues.
+        let unified_l1_entries = std::mem::take(&mut self.pending_l1_entries);
+        let unified_group_starts = std::mem::take(&mut self.pending_l1_group_starts);
+        let unified_trigger_metadata = std::mem::take(&mut self.pending_l1_trigger_metadata);
+
         info!(
             target: "based_rollup::driver",
             pending_entry_pairs = entries.len(),
             pending_continuation_l1_entries = continuation_l1_entries.len(),
             pending_withdrawal_entries = withdrawal_l1_entries.len(),
+            unified_l1_entries = unified_l1_entries.len(),
             pending_blocks = blocks.len(),
             "flush_to_l1: drained entries and blocks for submission"
         );
 
-        // Convert L2-format entry pairs to L1-format for submission.
-        // L2 uses CALL+RESULT pairs (for evm_config execution).
-        // L1 needs single non-nested entries (actionHash=CALL, nextAction=RESULT)
-        // to avoid Rollups.sol entering newScope() for simple calls.
-        // Fullnodes reconstruct L2 pairs using CALL actions from ExecutionConsumed events.
+        // Assemble L1 entries for submission.
         //
-        // Continuation L1 entries (multi-call patterns) are pre-built by the table builder
-        // and used AS-IS — they may contain scoped child calls that require
-        // scope navigation on L1.
-        //
-        // Withdrawal L1 entries are already in nested format (not converted) because
-        // _processCallAtScope enters scope navigation for ETH delivery.
-        // Both deposit and withdrawal entries can coexist in the same batch;
-        // deposit entries (non-nested) come first, then continuation entries,
-        // then withdrawal entries (nested).
-        // When continuation L1 entries exist (multi-call patterns), they replace the
-        // pair-converted entries for the continuation call group. Simple deposits
-        // that aren't part of a continuation still use pair conversion.
-        let mut l1_entries = if continuation_l1_entries.is_empty() {
-            crate::cross_chain::convert_pairs_to_l1_entries(&entries)
+        // When the unified queue is non-empty, prefer it — entries are already in
+        // L1 format with correct state deltas from attach_generic_state_deltas.
+        // Otherwise fall back to the legacy three-queue assembly path.
+        let l1_entries = if !unified_l1_entries.is_empty() {
+            // Generic path: entries already in L1 format with correct state deltas.
+            // Clone to preserve ownership — unified_l1_entries may be re-assigned
+            // to self.pending_l1_entries on failure recovery.
+            unified_l1_entries.clone()
+        } else if continuation_l1_entries.is_empty() {
+            // Legacy simple path: convert L2 CALL+RESULT pairs to L1 format.
+            let mut converted = crate::cross_chain::convert_pairs_to_l1_entries(&entries);
+            converted.extend(withdrawal_l1_entries.iter().cloned());
+            converted
         } else {
-            // Continuation L1 entries include ALL entries for the multi-call
-            // pattern (CALL_A → RESULT, CALL_B → CALL_C scoped, RESULT → RESULT).
-            // Skip pair conversion to avoid duplicate CALL_A entry.
-            continuation_l1_entries.clone()
+            // Legacy continuation path: use pre-built L1 entries AS-IS.
+            let mut combined = continuation_l1_entries.clone();
+            combined.extend(withdrawal_l1_entries.iter().cloned());
+            combined
         };
-        l1_entries.extend(withdrawal_l1_entries.iter().cloned());
 
         // §4f nonce safety: if this batch includes cross-chain entries, set the
         // hold BEFORE sending to L1. This ensures no new batches are submitted
@@ -2141,39 +2234,66 @@ where
                 // Send withdrawal triggers BEFORE waiting for receipt — they must
                 // land in the SAME L1 block as postBatch (ExecutionNotInCurrentBlock).
                 // Same pattern as forward_queued_l1_txs above.
-                let trigger_tx_hashes: Vec<B256> = if !withdrawal_metadata.is_empty() {
-                    match self.send_withdrawal_triggers(&withdrawal_metadata).await {
-                        Ok(hashes) => hashes,
-                        Err(err) => {
-                            error!(
-                                target: "based_rollup::driver",
-                                %err,
-                                "withdrawal trigger tx failed — rewinding to re-derive"
-                            );
-                            let (rewind_target, rollback_l1_block) =
-                                if let Some(anchor) = self.l1_confirmed_anchor {
-                                    (
-                                        anchor.l2_block_number,
-                                        anchor.l1_block_number.saturating_sub(1),
-                                    )
-                                } else {
-                                    (0, self.config.deployment_l1_block)
-                                };
-                            self.clear_internal_state();
-                            self.derivation.set_last_derived_l2_block(rewind_target);
-                            self.derivation.rollback_to(rollback_l1_block);
-                            self.mode = DriverMode::Sync;
-                            self.synced
-                                .store(false, std::sync::atomic::Ordering::Relaxed);
-                            self.consecutive_rewind_cycles =
-                                self.consecutive_rewind_cycles.saturating_add(1);
-                            self.set_rewind_target(rewind_target);
-                            return Ok(());
+                //
+                // When using the unified queue, build trigger metadata from
+                // unified_trigger_metadata (filtering out None entries, which are
+                // protocol-triggered groups that don't need executeL2TX).
+                let effective_withdrawal_metadata: Vec<WithdrawalMetadata> =
+                    if !unified_trigger_metadata.is_empty() {
+                        unified_trigger_metadata
+                            .iter()
+                            .filter_map(|opt| {
+                                opt.as_ref().map(|tm| WithdrawalMetadata {
+                                    user: tm.user,
+                                    amount: tm.amount,
+                                    rlp_encoded_tx: tm.rlp_encoded_tx.clone(),
+                                    trigger_count: tm.trigger_count,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        // Clone to preserve ownership — withdrawal_metadata may be
+                        // re-assigned to self.pending_withdrawal_metadata on failure.
+                        withdrawal_metadata.clone()
+                    };
+                let trigger_tx_hashes: Vec<B256> =
+                    if !effective_withdrawal_metadata.is_empty() {
+                        match self
+                            .send_withdrawal_triggers(&effective_withdrawal_metadata)
+                            .await
+                        {
+                            Ok(hashes) => hashes,
+                            Err(err) => {
+                                error!(
+                                    target: "based_rollup::driver",
+                                    %err,
+                                    "withdrawal trigger tx failed — rewinding to re-derive"
+                                );
+                                let (rewind_target, rollback_l1_block) =
+                                    if let Some(anchor) = self.l1_confirmed_anchor {
+                                        (
+                                            anchor.l2_block_number,
+                                            anchor.l1_block_number.saturating_sub(1),
+                                        )
+                                    } else {
+                                        (0, self.config.deployment_l1_block)
+                                    };
+                                self.clear_internal_state();
+                                self.derivation
+                                    .set_last_derived_l2_block(rewind_target);
+                                self.derivation.rollback_to(rollback_l1_block);
+                                self.mode = DriverMode::Sync;
+                                self.synced
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                                self.consecutive_rewind_cycles =
+                                    self.consecutive_rewind_cycles.saturating_add(1);
+                                self.set_rewind_target(rewind_target);
+                                return Ok(());
+                            }
                         }
-                    }
-                } else {
-                    vec![]
-                };
+                    } else {
+                        vec![]
+                    };
                 // Now wait for the postBatch tx to be confirmed.
                 let proposer = self.proposer.as_ref().expect("checked above");
                 match proposer.wait_for_l1_receipt(tx_hash).await {
@@ -2377,6 +2497,9 @@ where
                             self.pending_continuation_l1_entries = continuation_l1_entries;
                             self.pending_withdrawal_l1_entries = withdrawal_l1_entries;
                             self.pending_withdrawal_metadata = withdrawal_metadata;
+                            self.pending_l1_entries = unified_l1_entries;
+                            self.pending_l1_group_starts = unified_group_starts;
+                            self.pending_l1_trigger_metadata = unified_trigger_metadata;
                         }
                         return Ok(());
                     }
@@ -2394,6 +2517,9 @@ where
                 self.pending_continuation_l1_entries = continuation_l1_entries;
                 self.pending_withdrawal_l1_entries = withdrawal_l1_entries;
                 self.pending_withdrawal_metadata = withdrawal_metadata;
+                self.pending_l1_entries = unified_l1_entries;
+                self.pending_l1_group_starts = unified_group_starts;
+                self.pending_l1_trigger_metadata = unified_trigger_metadata;
             }
         }
 
@@ -2856,6 +2982,9 @@ where
         self.pending_continuation_l1_entries.clear();
         self.pending_withdrawal_l1_entries.clear();
         self.pending_withdrawal_metadata.clear();
+        self.pending_l1_entries.clear();
+        self.pending_l1_group_starts.clear();
+        self.pending_l1_trigger_metadata.clear();
         self.pending_entry_verification_block = None;
         self.entry_verify_deferrals = 0;
         {
@@ -3425,58 +3554,112 @@ where
     /// Apply deferred §4f protocol tx filtering to a derived block.
     ///
     /// When derivation flags a block with `DeferredFiltering` metadata (unconsumed
-    /// entries exist), this method:
-    /// 1. Trial-executes the block to get receipts
-    /// 2. Scans receipts for `CrossChainCallExecuted` events to identify L2→L1 tx indices
-    /// 3. Applies prefix-counting filter using the generic `filter_block_entries`
+    /// entries exist), this method filters the block's transactions to keep only
+    /// the consumed trigger prefix.
+    ///
+    /// Two paths:
+    /// - **Rebuild path** (preferred): when the filtering carries `all_l2_entries`
+    ///   AND a proposer (signer) is available, rebuild the block from entries via
+    ///   `build_builder_protocol_txs` with `max_trigger_count`. This uses the
+    ///   same construction path as the builder and properly advances `builder_l2_nonce`.
+    /// - **Filter path** (fallback): parse the raw encoded transactions from L1
+    ///   calldata and filter via `filter_block_by_trigger_prefix`. Used by
+    ///   fullnodes (no signer) or when `all_l2_entries` is empty.
     ///
     /// Returns the effective (filtered) transaction bytes. If no filtering is needed
     /// (`block.filtering` is `None`), returns the original transactions unchanged.
-    fn apply_deferred_filtering(&self, block: &crate::derivation::DerivedBlock) -> Result<Bytes> {
+    fn apply_deferred_filtering(
+        &mut self,
+        block: &crate::derivation::DerivedBlock,
+    ) -> Result<Bytes> {
         let Some(ref filtering) = block.filtering else {
             return Ok(block.transactions.clone());
         };
 
-        // Trial-execute with full tx set to extract L2→L1 tx indices from receipts.
-        let parent_block_number = block.l2_block_number.saturating_sub(1);
-        let l2_to_l1_indices: std::collections::HashSet<usize> =
-            if filtering.unconsumed_withdrawal_pair_count > 0 {
-                self.extract_l2_to_l1_tx_indices_via_receipts(
-                    parent_block_number,
-                    block.l2_timestamp,
-                    block.l1_info.l1_block_hash,
-                    block.l1_info.l1_block_number,
-                    &block.transactions,
-                )
-                .wrap_err("failed to extract L2→L1 tx indices for §4f filtering")?
-                .into_iter()
-                .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+        // Prefer rebuild path when entries are available and we have a signer.
+        if !filtering.all_l2_entries.is_empty() && self.proposer.is_some() {
+            return self.apply_generic_filtering_via_rebuild(block, filtering);
+        }
 
-        // Compute consumed L2→L1 count from total - unconsumed
-        let total_l2_to_l1 = l2_to_l1_indices.len();
-        let consumed_l2_to_l1_count =
-            total_l2_to_l1.saturating_sub(filtering.unconsumed_withdrawal_pair_count);
+        // Fallback: filter raw encoded transactions.
+        self.apply_generic_filtering(block, filtering)
+    }
+
+    /// Generic §4f filtering using `ExecutionConsumed` events.
+    ///
+    /// This is the protocol-generic replacement for type-specific deposit/withdrawal
+    /// counting. It works uniformly for any cross-chain entry type:
+    ///
+    /// 1. Trial-executes the full block (with ALL triggers) to get receipts
+    /// 2. Identifies trigger tx indices via `ExecutionConsumed` events from the CCM
+    /// 3. Computes consumed trigger prefix using the L1 consumed map (FIFO counting)
+    /// 4. Filters to keep only consumed triggers + all non-trigger txs
+    ///
+    /// The L1 consumed map (`filtering.l1_consumed_remaining`) is a snapshot taken
+    /// by derivation BEFORE the current batch's entries consume it, ensuring the
+    /// driver can independently match triggers against L1 consumption data.
+    fn apply_generic_filtering(
+        &self,
+        block: &crate::derivation::DerivedBlock,
+        filtering: &crate::derivation::DeferredFiltering,
+    ) -> Result<Bytes> {
+        let parent_block_number = block.l2_block_number.saturating_sub(1);
+
+        // Step 1: Trial-execute the full block to get receipts.
+        let receipts = self.trial_execute_for_receipts(
+            parent_block_number,
+            block.l2_timestamp,
+            block.l1_info.l1_block_hash,
+            block.l1_info.l1_block_number,
+            &block.transactions,
+        )
+        .wrap_err("failed to trial-execute block for generic §4f filtering")?;
+
+        // Step 2: Identify trigger tx indices via ExecutionConsumed events.
+        let trigger_indices = crate::cross_chain::identify_trigger_tx_indices(
+            &receipts,
+            self.config.cross_chain_manager_address,
+        );
+
+        if trigger_indices.is_empty() {
+            // No triggers found — nothing to filter.
+            return Ok(block.transactions.clone());
+        }
+
+        // Step 3: Compute consumed trigger prefix using L1 consumed map.
+        // Clone the map because compute_consumed_trigger_prefix mutates it
+        // (decrements counters as it walks), and we don't want to affect the
+        // derivation's shared state.
+        let mut l1_remaining = filtering.l1_consumed_remaining.clone();
+        let consumed_count = crate::cross_chain::compute_consumed_trigger_prefix(
+            &receipts,
+            self.config.cross_chain_manager_address,
+            &mut l1_remaining,
+            &trigger_indices,
+        );
+
+        let total_triggers = trigger_indices.len();
+        let unconsumed_count = total_triggers.saturating_sub(consumed_count);
 
         info!(
             target: "based_rollup::driver",
             l2_block = block.l2_block_number,
-            consumed_deposit_count = filtering.consumed_deposit_count,
-            unconsumed_deposit_count = filtering.unconsumed_deposit_count,
-            consumed_l2_to_l1_count,
-            unconsumed_withdrawal_pair_count = filtering.unconsumed_withdrawal_pair_count,
-            total_l2_to_l1,
-            "applying §4f filtering (receipt-based)"
+            total_triggers,
+            consumed_count,
+            unconsumed_count,
+            "applying §4f filtering (generic event-based)"
         );
 
-        match crate::cross_chain::filter_block_entries(
+        if consumed_count >= total_triggers {
+            // All triggers consumed — no filtering needed.
+            return Ok(block.transactions.clone());
+        }
+
+        // Step 4: Filter to keep only consumed trigger prefix.
+        match crate::cross_chain::filter_block_by_trigger_prefix(
             &block.transactions,
-            self.config.cross_chain_manager_address,
-            filtering.consumed_deposit_count,
-            consumed_l2_to_l1_count,
-            &l2_to_l1_indices,
+            &trigger_indices,
+            consumed_count,
         ) {
             Ok(filtered) => Ok(filtered),
             Err(err) => {
@@ -3484,11 +3667,153 @@ where
                     target: "based_rollup::driver",
                     %err,
                     l2_block = block.l2_block_number,
-                    "failed to apply §4f filtering — using original transactions"
+                    "failed to apply generic §4f filtering — using original transactions"
                 );
                 Ok(block.transactions.clone())
             }
         }
+    }
+
+    /// Generic §4f filtering via block rebuild using `build_builder_protocol_txs`.
+    ///
+    /// Instead of parsing and filtering raw encoded transaction bytes, this method
+    /// rebuilds the block from the L2 execution entries carried in `DeferredFiltering`.
+    /// This uses the same construction path as the builder, which:
+    /// - Ensures correct protocol tx construction (setContext, loadTable, triggers)
+    /// - Properly advances `builder_l2_nonce` for builder mode nonce tracking
+    /// - Uses `max_trigger_count` to limit triggers to the consumed prefix
+    ///
+    /// Requires a proposer (signer) — fullnodes must use the filter path instead.
+    ///
+    /// Steps:
+    /// 1. Save `builder_l2_nonce` (will be restored if not all triggers are consumed)
+    /// 2. Build full block with ALL triggers via `build_builder_protocol_txs(entries, MAX)`
+    /// 3. Trial-execute to get receipts
+    /// 4. Identify trigger tx indices via `ExecutionConsumed` events from the CCM
+    /// 5. Compute consumed trigger prefix using the L1 consumed map (FIFO counting)
+    /// 6. If all consumed, return full block (nonce already advanced correctly)
+    /// 7. Otherwise, restore nonce and rebuild with `max_trigger_count = consumed_count`
+    fn apply_generic_filtering_via_rebuild(
+        &mut self,
+        block: &crate::derivation::DerivedBlock,
+        filtering: &crate::derivation::DeferredFiltering,
+    ) -> Result<Bytes> {
+        let l2_block_number = block.l2_block_number;
+        let timestamp = block.l2_timestamp;
+        let l1_block_hash = block.l1_info.l1_block_hash;
+        let l1_block_number = block.l1_info.l1_block_number;
+        let parent_block_number = l2_block_number.saturating_sub(1);
+
+        // Step 1: Save nonce so we can restore it if we need to rebuild.
+        let saved_nonce = self.builder_l2_nonce;
+
+        // Step 2: Build full block with ALL triggers.
+        let full_txs = match self.build_builder_protocol_txs(
+            l2_block_number,
+            timestamp,
+            l1_block_hash,
+            l1_block_number,
+            &filtering.all_l2_entries,
+            usize::MAX,
+        ) {
+            Ok(txs) => txs,
+            Err(err) => {
+                warn!(
+                    target: "based_rollup::driver",
+                    %err,
+                    l2_block = l2_block_number,
+                    "failed to rebuild block for §4f filtering — falling back to filter path"
+                );
+                self.builder_l2_nonce = saved_nonce;
+                return self.apply_generic_filtering(block, filtering);
+            }
+        };
+
+        // Step 3: Trial-execute the full block to get receipts.
+        let receipts = match self.trial_execute_for_receipts(
+            parent_block_number,
+            timestamp,
+            l1_block_hash,
+            l1_block_number,
+            &full_txs,
+        ) {
+            Ok(r) => r,
+            Err(err) => {
+                warn!(
+                    target: "based_rollup::driver",
+                    %err,
+                    l2_block = l2_block_number,
+                    "failed to trial-execute rebuilt block for §4f filtering — falling back"
+                );
+                self.builder_l2_nonce = saved_nonce;
+                return self.apply_generic_filtering(block, filtering);
+            }
+        };
+
+        // Step 4: Identify trigger tx indices via ExecutionConsumed events.
+        let trigger_indices = crate::cross_chain::identify_trigger_tx_indices(
+            &receipts,
+            self.config.cross_chain_manager_address,
+        );
+
+        if trigger_indices.is_empty() {
+            // No triggers found — nothing to filter. Nonce is already advanced
+            // past the protocol txs (setContext, loadTable, etc.) which is correct.
+            return Ok(full_txs);
+        }
+
+        // Step 5: Compute consumed trigger prefix using L1 consumed map.
+        let mut l1_remaining = filtering.l1_consumed_remaining.clone();
+        let consumed_count = crate::cross_chain::compute_consumed_trigger_prefix(
+            &receipts,
+            self.config.cross_chain_manager_address,
+            &mut l1_remaining,
+            &trigger_indices,
+        );
+
+        let total_triggers = trigger_indices.len();
+        let unconsumed_count = total_triggers.saturating_sub(consumed_count);
+
+        info!(
+            target: "based_rollup::driver",
+            l2_block = l2_block_number,
+            total_triggers,
+            consumed_count,
+            unconsumed_count,
+            "applying §4f filtering (generic via rebuild)"
+        );
+
+        // Step 6: If all triggers consumed, full block is correct.
+        if consumed_count >= total_triggers {
+            // Nonce already advanced correctly past all protocol txs.
+            return Ok(full_txs);
+        }
+
+        // Step 7: Not all consumed — restore nonce and rebuild with limited triggers.
+        self.builder_l2_nonce = saved_nonce;
+        let filtered_txs = match self.build_builder_protocol_txs(
+            l2_block_number,
+            timestamp,
+            l1_block_hash,
+            l1_block_number,
+            &filtering.all_l2_entries,
+            consumed_count,
+        ) {
+            Ok(txs) => txs,
+            Err(err) => {
+                warn!(
+                    target: "based_rollup::driver",
+                    %err,
+                    l2_block = l2_block_number,
+                    consumed_count,
+                    "failed to rebuild filtered block — falling back to filter path"
+                );
+                // Nonce was already restored above. Fall back to raw byte filtering.
+                return self.apply_generic_filtering(block, filtering);
+            }
+        };
+
+        Ok(filtered_txs)
     }
 
     /// Compute the state root for a block built with the given transactions.
@@ -3779,10 +4104,170 @@ where
         Ok(roots)
     }
 
+    /// Trial-execute a block and return receipts.
+    ///
+    /// Builds a block from the given encoded transactions using the same EVM config
+    /// as the real builder, executes all transactions, and returns the per-transaction
+    /// receipts. Used by `compute_intermediate_roots` for generic trigger detection.
+    fn trial_execute_for_receipts(
+        &self,
+        parent_block_number: u64,
+        timestamp: u64,
+        l1_block_hash: B256,
+        l1_block_number: u64,
+        encoded_transactions: &Bytes,
+    ) -> Result<Vec<alloy_consensus::Receipt<alloy_primitives::Log>>> {
+        use reth_evm::execute::BlockBuilder;
+
+        if encoded_transactions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let parent_header = self
+            .l2_provider
+            .sealed_header(parent_block_number)
+            .wrap_err("failed to get parent header for trial execution")?
+            .ok_or_eyre("parent header not found for trial execution")?;
+
+        let state_provider = self
+            .l2_provider
+            .state_by_block_hash(parent_header.hash())
+            .wrap_err("failed to get state provider for trial execution")?;
+
+        let state_db = StateProviderDatabase::new(state_provider.as_ref());
+        let mut db = State::builder()
+            .with_database(state_db)
+            .with_bundle_update()
+            .build();
+
+        let prev_randao = B256::from(alloy_primitives::U256::from(l1_block_number));
+        let attributes = NextBlockEnvAttributes {
+            timestamp,
+            suggested_fee_recipient: self.config.builder_address,
+            prev_randao,
+            gas_limit: calc_gas_limit(parent_header.gas_limit(), DESIRED_GAS_LIMIT),
+            parent_beacon_block_root: Some(l1_block_hash),
+            withdrawals: Some(Default::default()),
+            extra_data: Default::default(),
+        };
+
+        let sim_evm_config = self.evm_config.isolated_clone();
+
+        let mut builder = sim_evm_config
+            .builder_for_next_block(&mut db, &parent_header, attributes)
+            .wrap_err("failed to create block builder for trial execution")?;
+
+        builder
+            .apply_pre_execution_changes()
+            .wrap_err("pre-execution changes failed for trial execution")?;
+
+        let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
+            alloy_rlp::Decodable::decode(&mut encoded_transactions.as_ref())
+                .wrap_err("failed to RLP-decode transactions for trial execution")?;
+
+        for tx in txs {
+            let recovered = SignedTransaction::try_into_recovered(tx)
+                .map_err(|_| eyre::eyre!("failed to recover signer for trial execution tx"))?;
+            // Ignore execution errors — some txs may fail (e.g., reverts)
+            // but we still need to process subsequent txs.
+            let _ = builder.execute_transaction(recovered);
+        }
+
+        let outcome = builder
+            .finish(state_provider.as_ref())
+            .wrap_err("block builder finish failed for trial execution")?;
+
+        // Convert reth's EthereumReceipt<TxType, Log> to alloy_consensus::Receipt<Log>
+        // via the From impl so identify_trigger_tx_indices can consume them.
+        let receipts: Vec<alloy_consensus::Receipt<alloy_primitives::Log>> = outcome
+            .execution_result
+            .receipts
+            .into_iter()
+            .map(Into::into)
+            .collect();
+
+        Ok(receipts)
+    }
+
+    /// Compute generic intermediate state roots for a block with cross-chain entries.
+    ///
+    /// Trial-executes the full block to identify trigger txs (any tx producing
+    /// `ExecutionConsumed` events from the CCM). Then computes R(k) for k = 0..T
+    /// by filtering trigger txs and re-executing.
+    ///
+    /// Returns T+1 roots where:
+    ///   roots[0] = R(0) = state with loadTable but without any triggers
+    ///   roots[k] = R(k) = state with loadTable + first k triggers
+    ///   roots[T] = speculative = state with all triggers
+    ///
+    /// The function is protocol-generic: it doesn't distinguish between deposits,
+    /// withdrawals, or continuations. All trigger types are identified uniformly
+    /// via `ExecutionConsumed` events.
+    fn compute_intermediate_roots(
+        &self,
+        parent_block_number: u64,
+        timestamp: u64,
+        l1_block_hash: B256,
+        l1_block_number: u64,
+        speculative_root: B256,
+        block_encoded_txs: &Bytes,
+    ) -> Result<Vec<B256>> {
+        // Step 1: Trial-execute the full block to get receipts
+        let receipts = self.trial_execute_for_receipts(
+            parent_block_number,
+            timestamp,
+            l1_block_hash,
+            l1_block_number,
+            block_encoded_txs,
+        )?;
+
+        // Step 2: Identify trigger tx indices via ExecutionConsumed events
+        let trigger_indices = crate::cross_chain::identify_trigger_tx_indices(
+            &receipts,
+            self.config.cross_chain_manager_address,
+        );
+
+        // No triggers → clean IS speculative, return single root
+        if trigger_indices.is_empty() {
+            return Ok(vec![speculative_root]);
+        }
+
+        let num_triggers = trigger_indices.len();
+        let mut roots = Vec::with_capacity(num_triggers + 1);
+
+        // Step 3: Compute R(k) for k = 0..num_triggers-1
+        // R(k) = state root with loadTable + first k triggers (rest removed)
+        for k in 0..num_triggers {
+            let filtered = crate::cross_chain::filter_block_by_trigger_prefix(
+                block_encoded_txs,
+                &trigger_indices,
+                k,
+            )?;
+
+            let root = self.compute_state_root_with_entries(
+                parent_block_number,
+                timestamp,
+                l1_block_hash,
+                l1_block_number,
+                &filtered,
+            )?;
+            roots.push(root);
+        }
+
+        // Step 4: R(T) = speculative = full block = already known
+        roots.push(speculative_root);
+
+        Ok(roots)
+    }
+
     /// Construct builder-signed protocol transactions for a builder block.
     ///
     /// Returns RLP-encoded transactions (setContext, deploy, loadTable, executeIncoming).
     /// The caller should append user txs (mempool) and pass to `build_and_insert_block`.
+    ///
+    /// `max_trigger_count` limits the number of `executeIncomingCrossChainCall` trigger
+    /// transactions generated. `loadExecutionTable` is always generated if table entries
+    /// are present (regardless of this limit). Pass `usize::MAX` to generate all triggers.
     fn build_builder_protocol_txs(
         &mut self,
         l2_block_number: u64,
@@ -3790,6 +4275,7 @@ where
         l1_block_hash: B256,
         l1_block_number: u64,
         execution_entries: &[CrossChainExecutionEntry],
+        max_trigger_count: usize,
     ) -> Result<Bytes> {
         use crate::cross_chain;
 
@@ -3924,7 +4410,8 @@ where
                 )?);
                 self.builder_l2_nonce += 1;
             }
-            for trigger in &trigger_entries {
+            let trigger_limit = trigger_entries.len().min(max_trigger_count);
+            for trigger in &trigger_entries[..trigger_limit] {
                 block_txs.push(cross_chain::build_execute_incoming_tx(
                     &trigger.next_action,
                     self.config.cross_chain_manager_address,

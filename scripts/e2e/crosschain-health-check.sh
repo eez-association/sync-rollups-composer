@@ -88,6 +88,14 @@ if [ -z "${ROLLUPS_ADDRESS:-}" ]; then
   exit 1
 fi
 
+# Stop crosschain-tx-sender to avoid pending submission backlog.
+# The test deploys its own Counter and proxy — the background tx-sender
+# generates continuous load that can overwhelm the builder queue (§4f
+# filtering causes rewinds when pending batches back up).
+echo "Stopping crosschain-tx-sender (avoids pending submission backlog)..."
+$DOCKER_COMPOSE_CMD stop crosschain-tx-sender > /dev/null 2>&1 || true
+wait_for_pending_zero 30 >/dev/null || true
+
 # Check if crosschain-tx-sender's counter.env exists (optional — test deploys its own).
 COUNTER_ENV_RAW=$($DOCKER_COMPOSE_CMD exec -T builder cat /shared/counter.env 2>/dev/null || true)
 if [ -n "$COUNTER_ENV_RAW" ]; then
