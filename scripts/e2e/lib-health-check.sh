@@ -15,10 +15,13 @@ L1_PROXY="${L1_PROXY:-http://localhost:9556}"
 L2_PROXY="${L2_PROXY:-http://localhost:9548}"
 HEALTH_URL="${HEALTH_URL:-http://localhost:9560/health}"
 
-# Auto-detect the devnet compose path: look relative to script, then repo root
+# Auto-detect compose path from HEALTH_URL port (devnet=11560, testnet=9560).
+# This ensures log greps target the same network as the RPC endpoints.
 if [ -z "${DOCKER_COMPOSE_CMD:-}" ]; then
   _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  if [ -f "${_REPO_ROOT}/deployments/testnet-eez/docker-compose.yml" ]; then
+  if echo "$HEALTH_URL" | grep -q "11560"; then
+    DOCKER_COMPOSE_CMD="sudo docker compose -f ${_REPO_ROOT}/deployments/devnet-eez/docker-compose.yml -f ${_REPO_ROOT}/deployments/devnet-eez/docker-compose.dev.yml"
+  elif [ -f "${_REPO_ROOT}/deployments/testnet-eez/docker-compose.yml" ]; then
     DOCKER_COMPOSE_CMD="sudo docker compose -f ${_REPO_ROOT}/deployments/testnet-eez/docker-compose.yml -f ${_REPO_ROOT}/deployments/testnet-eez/docker-compose.dev.yml"
   else
     DOCKER_COMPOSE_CMD="sudo docker compose -f docker-compose.yml -f docker-compose.dev.yml"
