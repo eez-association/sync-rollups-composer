@@ -406,6 +406,47 @@ export function useFlashLoan(
     };
   }, []);
 
+  // Re-check NFT ownership when wallet address changes (wallet connects after mount).
+  useEffect(() => {
+    if (!walletAddress || !stateRef.current.contractsDeployed) return;
+    const nftAddress = stateRef.current.nftAddress;
+    if (!nftAddress || nftAddress === "0x" + "0".repeat(40)) return;
+    // Skip if already detected
+    if (stateRef.current.alreadyClaimed) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const nftResult = (await rpcCall(config.l2Rpc, "eth_call", [
+          { to: nftAddress, data: BALANCE_OF_SELECTOR + pad32(walletAddress) },
+          "latest",
+        ])) as string;
+        const balance = decodeUint256(nftResult);
+        if (!cancelled && balance > 0n) {
+          setState((s) => ({ ...s, alreadyClaimed: true, nftMinted: true }));
+          const { tokenAddress, poolAddress } = stateRef.current;
+          loadClaimInfo(tokenAddress, poolAddress, nftAddress, cancelled).then(info => {
+            if (!cancelled && info) {
+              setState((s) => ({
+                ...s,
+                poolBalanceAfter: info.poolBalance,
+                builderStateRoot: info.builderRoot,
+                fullnodeStateRoot: info.fullnodeRoot,
+                stateRootsMatch: info.builderRoot !== null && info.fullnodeRoot !== null && info.builderRoot === info.fullnodeRoot,
+                claimL1Block: info.claimL1Block,
+                claimL1TxHash: info.claimL1TxHash,
+                claimL2Block: info.claimL2Block,
+                claimL2TxHash: info.claimL2TxHash,
+                nftTokenId: info.nftTokenId,
+              }));
+            }
+          });
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function readPoolBalance(tokenAddr: string, poolAddr: string): Promise<string | null> {
     if (!tokenAddr || !poolAddr) return null;
     try {
