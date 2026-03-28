@@ -4247,7 +4247,7 @@ async fn deploy_rollups_contracts(rpc_url: &str) -> (Address, Address) {
     // MockZKVerifier is defined inline in Rollups.t.sol (no standalone .sol file).
     let verifier_artifact_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups-protocol/out/Rollups.t.sol/MockZKVerifier.json"
+        "/../../contracts/sync-rollups-protocol/out/TestBase.sol/MockZKVerifier.json"
     );
     let verifier_artifact: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(verifier_artifact_path).expect(
