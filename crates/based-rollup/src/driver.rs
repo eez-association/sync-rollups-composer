@@ -3793,9 +3793,13 @@ where
             self.config.cross_chain_manager_address,
         );
 
-        // No triggers → clean IS speculative, return single root
+        // No triggers → clean IS speculative. Return [clean, speculative] (2 roots)
+        // so that attach_generic_state_deltas can assign identity deltas to any
+        // pending deferred entries. This happens when the L2 protocol tx reverts
+        // (no ExecutionConsumed events) but the L1 deferred entries still need
+        // correct state deltas for _findAndApplyExecution to match.
         if trigger_indices.is_empty() {
-            return Ok(vec![speculative_root]);
+            return Ok(vec![speculative_root, speculative_root]);
         }
 
         let num_triggers = trigger_indices.len();
