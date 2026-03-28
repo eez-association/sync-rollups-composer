@@ -406,12 +406,14 @@ export function useFlashLoan(
     };
   }, []);
 
-  // Re-check NFT ownership when wallet address changes (wallet connects after mount).
+  // Re-check NFT ownership when wallet connects OR contracts become available.
+  // On page refresh: wallet may reconnect before config loads (contractsDeployed=false),
+  // so we need both deps to catch whichever arrives last.
+  const contractsDeployed = state.contractsDeployed;
   useEffect(() => {
-    if (!walletAddress || !stateRef.current.contractsDeployed) return;
+    if (!walletAddress || !contractsDeployed) return;
     const nftAddress = stateRef.current.nftAddress;
     if (!nftAddress || nftAddress === "0x" + "0".repeat(40)) return;
-    // Skip if already detected
     if (stateRef.current.alreadyClaimed) return;
 
     let cancelled = false;
@@ -423,7 +425,7 @@ export function useFlashLoan(
         ])) as string;
         const balance = decodeUint256(nftResult);
         if (!cancelled && balance > 0n) {
-          setState((s) => ({ ...s, alreadyClaimed: true, nftMinted: true }));
+          setState((s) => ({ ...s, alreadyClaimed: true, nftMinted: true, phase: "idle" }));
           const { tokenAddress, poolAddress } = stateRef.current;
           loadClaimInfo(tokenAddress, poolAddress, nftAddress, cancelled).then(info => {
             if (!cancelled && info) {
@@ -445,7 +447,7 @@ export function useFlashLoan(
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
-  }, [walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [walletAddress, contractsDeployed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function readPoolBalance(tokenAddr: string, poolAddr: string): Promise<string | null> {
     if (!tokenAddr || !poolAddr) return null;

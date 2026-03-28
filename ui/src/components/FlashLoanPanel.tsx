@@ -1247,7 +1247,7 @@ export function FlashLoanPanel({
   }
 
   const steps = isL1toL2 ? buildL1toL2Steps(state) : buildL2toL1Steps(reverseState);
-  const showSteps = activeState.phase !== "idle" || alreadyClaimed;
+  const showSteps = activeState.phase !== "idle";
   const showNft = activeState.nftMinted && (complete || alreadyClaimed);
 
   const directionLabel = isL1toL2 ? "L1 → L2" : "L2 → L1";
@@ -1333,7 +1333,7 @@ export function FlashLoanPanel({
       <button
         className={btnClass}
         onClick={handleExecute}
-        disabled={busy || !contractsDeployed}
+        disabled={busy || !contractsDeployed || alreadyClaimed}
         style={{ fontSize: 14, padding: "14px 20px", fontWeight: 700 }}
       >
         {busy ? (
