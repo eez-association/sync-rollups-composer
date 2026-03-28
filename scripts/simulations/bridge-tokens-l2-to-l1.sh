@@ -112,8 +112,24 @@ if [ "$(echo "$L1_BAL < 1000000000000000000" | bc 2>/dev/null || echo 1)" = "1" 
         "$TEST_ADDR" --value 10ether --gas-limit 21000 > /dev/null 2>&1
 fi
 
+# Fund L2 account if needed (bridge ETH for gas)
+L2_BAL=$(cast balance --rpc-url "$L2_RPC" "$TEST_ADDR" 2>/dev/null || echo "0")
+if [ "$L2_BAL" = "0" ] || [ "$L2_BAL" = "0x0" ]; then
+    info "Bridging 0.5 ETH to L2 for gas..."
+    cast send --rpc-url "$L1_COMPOSER" --private-key "$TEST_KEY" \
+        "$BRIDGE_L1" "bridgeEther(uint256,address)" "$ROLLUP_ID" "$TEST_ADDR" \
+        --value 0.5ether --gas-limit 800000 > /dev/null 2>&1
+    # Wait for L2 balance
+    for _w in $(seq 1 15); do
+        L2_BAL=$(cast balance --rpc-url "$L2_RPC" "$TEST_ADDR" 2>/dev/null || echo "0")
+        [ "$L2_BAL" != "0" ] && [ "$L2_BAL" != "0x0" ] && break
+        sleep 6
+    done
+    info "L2 balance: $L2_BAL"
+fi
+
 # Get some tokens — transfer from the pool or deployer
-TOKEN_BAL=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "0")
+TOKEN_BAL=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null | awk '{print $1}' || echo "0")
 AMOUNT="1000000000000000000"  # 1 token (18 decimals)
 
 if [ "$TOKEN_BAL" = "0" ]; then
@@ -125,7 +141,7 @@ if [ "$TOKEN_BAL" = "0" ]; then
         --gas-limit 100000 > /dev/null 2>&1 || true
 fi
 
-TOKEN_BAL=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "0")
+TOKEN_BAL=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null | awk '{print $1}' || echo "0")
 TOKEN_NAME=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "name()(string)" 2>/dev/null || echo "Unknown")
 info "Token: $TOKEN_NAME, Balance: $TOKEN_BAL"
 
@@ -141,7 +157,7 @@ echo -e "${BOLD}Step 1: Approve Bridge L1${RESET}"
 cast send --rpc-url "$L1_RPC" --private-key "$TEST_KEY" \
     "$TOKEN_L1" "approve(address,uint256)" "$BRIDGE_L1" "$AMOUNT" \
     --gas-limit 100000 > /dev/null 2>&1
-ALLOWANCE=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "allowance(address,address)(uint256)" "$TEST_ADDR" "$BRIDGE_L1" 2>/dev/null || echo "0")
+ALLOWANCE=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "allowance(address,address)(uint256)" "$TEST_ADDR" "$BRIDGE_L1" 2>/dev/null | awk '{print $1}' || echo "0")
 if [ "$ALLOWANCE" != "0" ]; then
     pass "Approved Bridge L1 for $ALLOWANCE tokens"
 else
@@ -172,7 +188,7 @@ echo -e "${BOLD}Step 3: Wait for wrapped tokens on L2${RESET}"
 
 WRAPPED_BAL="0"
 for i in $(seq 1 20); do
-    WRAPPED_BAL=$(cast call --rpc-url "$L2_RPC" "$WRAPPED_L2" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "0")
+    WRAPPED_BAL=$(cast call --rpc-url "$L2_RPC" "$WRAPPED_L2" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null | awk '{print $1}' || echo "0")
     if [ "$WRAPPED_BAL" != "0" ]; then
         break
     fi
@@ -194,8 +210,8 @@ echo -e "${BOLD}Step 4: Approve Bridge L2${RESET}"
 
 cast send --rpc-url "$L2_RPC" --private-key "$TEST_KEY" \
     "$WRAPPED_L2" "approve(address,uint256)" "$BRIDGE_L2" "$WRAPPED_BAL" \
-    --gas-limit 100000 > /dev/null 2>&1
-L2_ALLOWANCE=$(cast call --rpc-url "$L2_RPC" "$WRAPPED_L2" "allowance(address,address)(uint256)" "$TEST_ADDR" "$BRIDGE_L2" 2>/dev/null || echo "0")
+    --gas-limit 500000 2>&1 | tail -1
+L2_ALLOWANCE=$(cast call --rpc-url "$L2_RPC" "$WRAPPED_L2" "allowance(address,address)(uint256)" "$TEST_ADDR" "$BRIDGE_L2" 2>/dev/null | awk '{print $1}' || echo "0")
 if [ "$L2_ALLOWANCE" != "0" ]; then
     pass "Approved Bridge L2 for $L2_ALLOWANCE wrapped tokens"
 else
@@ -236,8 +252,8 @@ echo ""
 # ── Step 6: Verify token balances after withdrawal ──
 echo -e "${BOLD}Step 6: Verify balances${RESET}"
 
-WRAPPED_BAL_AFTER=$(cast call --rpc-url "$L2_RPC" "$WRAPPED_L2" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "?")
-TOKEN_BAL_AFTER=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "?")
+WRAPPED_BAL_AFTER=$(cast call --rpc-url "$L2_RPC" "$WRAPPED_L2" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null | awk '{print $1}' || echo "?")
+TOKEN_BAL_AFTER=$(cast call --rpc-url "$L1_RPC" "$TOKEN_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null | awk '{print $1}' || echo "?")
 
 info "Wrapped token balance on L2: $WRAPPED_BAL_AFTER (was: $WRAPPED_BAL)"
 info "Token balance on L1: $TOKEN_BAL_AFTER (was: $TOKEN_BAL)"
