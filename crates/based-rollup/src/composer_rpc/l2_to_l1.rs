@@ -1890,7 +1890,12 @@ async fn simulate_l1_delivery(
             }
         };
 
-        // Check postBatch result (tx0).
+        // Check postBatch result (tx0). Log if it reverted but DO NOT bail out.
+        // The trigger trace (tx1) still contains inner calls even when postBatch
+        // reverts (e.g., proof signature mismatch). These inner calls are essential
+        // for depth-N return call detection — the standalone fallback that was here
+        // previously called destination.call() directly (without entries/scope
+        // navigation), which broke all depth-2+ patterns by missing return calls.
         let tx0_trace = &bundle_traces[0];
         if tx0_trace.get("error").is_some() || tx0_trace.get("revertReason").is_some() {
             let error_msg = tx0_trace
@@ -1902,85 +1907,30 @@ async fn simulate_l1_delivery(
                 error = error_msg,
                 iteration,
                 "postBatch reverted in L1 delivery simulation — \
-                 falling back to standalone delivery trace"
+                 continuing with trigger trace for return call detection"
             );
-
-            // Bug 3 fix: when postBatch reverts (e.g., proof signature doesn't match
-            // because the L1 block advanced between context fetch and simulation),
-            // fall back to a standalone delivery trace. This runs destination.call(data)
-            // directly on L1 to capture the correct return data without needing a
-            // valid postBatch proof. The return data is state-independent for simple
-            // L2→L1 patterns (e.g., Counter.increment() returns the new counter value).
-            let standalone_req = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "debug_traceCallMany",
-                "params": [
-                    [
-                        {
-                            "transactions": [
-                                {
-                                    "from": builder_addr_hex,
-                                    "to": format!("{destination}"),
-                                    "data": format!("0x{}", hex::encode(data)),
-                                    "value": format!("0x{:x}", value),
-                                    "gas": "0x1c9c380"
-                                }
-                            ]
-                        }
-                    ],
-                    null,
-                    { "tracer": "callTracer" }
-                ],
-                "id": 99959
-            });
-            if let Ok(resp) = client.post(l1_rpc_url).json(&standalone_req).send().await {
-                if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(trace_result) = body
-                        .get("result")
-                        .and_then(|r| r.get(0))
-                        .and_then(|b| b.as_array())
-                        .and_then(|a| a.first())
-                    {
-                        let has_trace_error = trace_result.get("error").is_some()
-                            || trace_result.get("revertReason").is_some();
-                        if !has_trace_error {
-                            if let Some(output_hex) =
-                                trace_result.get("output").and_then(|v| v.as_str())
-                            {
-                                let hex_clean =
-                                    output_hex.strip_prefix("0x").unwrap_or(output_hex);
-                                let trace_data = hex::decode(hex_clean).unwrap_or_default();
-                                if !trace_data.is_empty() {
-                                    tracing::info!(
-                                        target: "based_rollup::proxy",
-                                        data_len = trace_data.len(),
-                                        "captured delivery return data via standalone fallback \
-                                         after postBatch revert"
-                                    );
-                                    return Some((trace_data, false, vec![]));
-                                }
-                            }
-                        } else {
-                            tracing::info!(
-                                target: "based_rollup::proxy",
-                                "standalone fallback delivery trace also reverted — \
-                                 delivery target may not have code or reverted"
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Standalone fallback failed too. On first iteration, return empty.
-            // On subsequent, return what we have.
-            if iteration == 1 {
-                return Some((vec![], false, vec![]));
-            }
-            return Some((final_return_data, final_delivery_failed, all_return_calls));
+            // Fall through to trigger trace extraction below.
+            // The trigger tx (tx1) also reverts, but callTracer still captures
+            // all inner calls (proxy calls, executeCrossChainCall, etc.) which
+            // are needed for depth-N return call discovery.
         }
 
         // Extract delivery output from executeL2TX trace (tx1).
         let trigger_trace = &bundle_traces[1];
+        // DEBUG: dump trigger trace for depth-N investigation
+        {
+            let trace_str: String = serde_json::to_string(trigger_trace)
+                .unwrap_or_default()
+                .chars()
+                .take(2000)
+                .collect();
+            tracing::info!(
+                target: "based_rollup::proxy",
+                iteration,
+                trigger_trace_json = %trace_str,
+                "DEBUG: L1 delivery simulation trigger trace (tx1)"
+            );
+        }
         let (return_data, _delivery_failed) =
             extract_delivery_output_from_trigger_trace(trigger_trace, destination);
 
@@ -2015,101 +1965,14 @@ async fn simulate_l1_delivery(
                 && a.source_address == b.source_address
         });
 
-        // Determine return data. For depth-1 patterns (no return calls at all),
-        // the trigger trace may give empty output because the trigger reverts
-        // with placeholder entries. In that case, run a standalone
-        // debug_traceCallMany with just the delivery call to capture the real
-        // return data. For depth-2+ patterns (return calls present), the trigger
-        // trace output may include ABI-encoded data from wrapper contracts that
-        // call into non-existent inner proxies — using that data would produce
-        // wrong RESULT hashes. Use the trigger trace data as-is (which is
-        // typically empty for depth-2+, correctly yielding result_void).
-        if !return_data.is_empty() {
-            // Trigger trace gave data — use it regardless of depth.
-            final_return_data = return_data.clone();
-        } else if truly_new.is_empty() && all_return_calls.is_empty() {
-            // Depth-1: no return calls at all. Run a standalone delivery trace
-            // to capture the real return data. Use builder_address as the sender
-            // since the proxy is created dynamically by executeL2TX on L1.
-            let delivery_trace_req = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "debug_traceCallMany",
-                "params": [
-                    [
-                        {
-                            "transactions": [
-                                {
-                                    "from": builder_addr_hex,
-                                    "to": format!("{destination}"),
-                                    "data": format!("0x{}", hex::encode(data)),
-                                    "value": format!("0x{:x}", value),
-                                    "gas": "0x1c9c380"
-                                }
-                            ],
-                            "blockOverride": {
-                                "number": next_block,
-                                "time": format!("{:#x}", trace_block_timestamp)
-                            }
-                        }
-                    ],
-                    null,
-                    { "tracer": "callTracer" }
-                ],
-                "id": 99960
-            });
-            let mut got_trace_data = false;
-            if let Ok(resp) = client
-                .post(l1_rpc_url)
-                .json(&delivery_trace_req)
-                .send()
-                .await
-            {
-                if let Ok(body) = resp.json::<Value>().await {
-                    // Extract the output from the trace result.
-                    // Structure: result[0][0].output
-                    if let Some(trace_result) = body
-                        .get("result")
-                        .and_then(|r| r.get(0))
-                        .and_then(|b| b.as_array())
-                        .and_then(|a| a.first())
-                    {
-                        let has_error = trace_result.get("error").is_some()
-                            || trace_result.get("revertReason").is_some();
-                        if !has_error {
-                            if let Some(output_hex) =
-                                trace_result.get("output").and_then(|v| v.as_str())
-                            {
-                                let hex_clean = output_hex.strip_prefix("0x").unwrap_or(output_hex);
-                                let trace_data = hex::decode(hex_clean).unwrap_or_default();
-                                if !trace_data.is_empty() {
-                                    tracing::info!(
-                                        target: "based_rollup::proxy",
-                                        data_len = trace_data.len(),
-                                        "captured delivery return data via standalone debug_traceCallMany"
-                                    );
-                                    final_return_data = trace_data;
-                                    got_trace_data = true;
-                                }
-                            }
-                        } else {
-                            tracing::info!(
-                                target: "based_rollup::proxy",
-                                "standalone delivery trace reverted — accepting empty return data"
-                            );
-                            got_trace_data = true; // Reverted — empty is correct.
-                        }
-                    }
-                }
-            }
-            if !got_trace_data {
-                // Transport failure — accept empty return data.
-                final_return_data = vec![];
-            }
-        } else {
-            // Depth-2+: return calls present. Use trigger trace data as-is
-            // (empty for depth-2+ is correct — yields result_void).
-            final_return_data = return_data.clone();
-        }
+        // Delivery return data from the trigger trace.
+        // Per §C.6, the L2TX terminal RESULT is always void — we don't need
+        // delivery_return_data for the terminal. But we still capture it for
+        // the action_hash of the scope resolution entry (which matches what
+        // _processCallAtScope produces on L1).
+        // The trigger trace may be reverted (placeholder entries), so
+        // find_delivery_call extracts data from inner calls even in reverted frames.
+        final_return_data = return_data.clone();
 
         // Check convergence: no new return calls AND return data stabilized.
         // The return data may change across iterations: iteration N captures
