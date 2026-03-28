@@ -197,7 +197,7 @@ assert "etherBalance decreased by 0.5 ETH" '[ "$EB_DELTA" = "-500000000000000000
 PROXY_LOG=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix --since 120s 2>&1 | grep -c "detected internal L2" || true)
 assert "Proxy detected withdrawal" '[ "$PROXY_LOG" -ge 1 ]'
 
-TRIGGER_LOG=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix --since 120s 2>&1 | grep -c "withdrawal trigger" || true)
+TRIGGER_LOG=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix --since 120s 2>&1 | grep -c "executeL2TX trigger" || true)
 assert "Trigger tx sent" '[ "$TRIGGER_LOG" -ge 1 ]'
 
 ROOTS=$(check_state_roots)
@@ -492,7 +492,7 @@ STRIP_ANSI='s/\x1b\[[0-9;]*m//g'
 # Extract all trigger tx hashes from builder logs
 TRIGGER_HASHES=$($DOCKER_COMPOSE_CMD logs builder --no-log-prefix 2>&1 \
   | sed "$STRIP_ANSI" \
-  | grep -E "sent createCrossChainProxy|sent withdrawal trigger" \
+  | (grep -E "sent createCrossChainProxy|sent withdrawal trigger|sent executeL2TX trigger" || true) \
   | grep -oP 'hash=\K0x[a-fA-F0-9]+' | sort -u)
 
 T16_TOTAL=0
