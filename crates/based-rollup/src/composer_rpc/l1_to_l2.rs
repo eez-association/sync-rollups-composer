@@ -1876,6 +1876,7 @@ async fn trace_and_detect_internal_calls(
             sys_result.and_then(|s| super::common::parse_address_from_abi_return(&s))
         };
 
+        #[allow(clippy::needless_range_loop)] // Index needed: immutable reads then mutable writes on detected_calls
         for call_idx in 0..detected_calls.len() {
             // Clone the fields we need before any mutable borrow of detected_calls.
             let call_destination = detected_calls[call_idx].destination;

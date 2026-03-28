@@ -856,6 +856,7 @@ fn find_children(detected: &[DetectedCall], parent_idx: usize) -> Vec<(usize, &D
 /// For leaf children (no grandchildren): simple trigger → RESULT(L1, void).
 /// For internal children (with grandchildren): trigger → execution with scope=[0],
 /// plus recursive reentrant entries for grandchildren, plus scope resolution.
+#[allow(clippy::only_used_in_recursion)]
 fn push_reentrant_child_entries(
     children: &[(usize, &DetectedCall)],
     detected: &[DetectedCall],
