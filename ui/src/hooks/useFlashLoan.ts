@@ -189,12 +189,14 @@ async function loadClaimInfo(
       l1LogPromise,
     ]);
 
-    // Extract mint info from the first Transfer log (L2)
+    // Extract mint info from the LAST Transfer log (L2).
+    // Multiple flash loans may have been executed by different users.
+    // Use the last mint event (most recent) — it's the current user's NFT.
     let claimL2Block: number | null = null;
     let claimL2TxHash: string | null = null;
     let nftTokenId: string | null = null;
     if (nftLogs && nftLogs.length > 0) {
-      const log = nftLogs[0]!;
+      const log = nftLogs[nftLogs.length - 1]!;
       if (log.blockNumber) claimL2Block = parseInt(log.blockNumber, 16);
       if (log.transactionHash) claimL2TxHash = log.transactionHash;
       if (log.topics && log.topics.length >= 4) {

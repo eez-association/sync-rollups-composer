@@ -1323,7 +1323,7 @@ export function FlashLoanPanel({
               {isL1toL2 ? "NFT already claimed on L2" : "NFT already claimed on L1"}
             </div>
             <div className={styles.claimedDesc}>
-              This demo can only run once per deployment. See results below for details.
+              You already own a FlashLoaners NFT. See results below for details.
             </div>
           </div>
         </div>
