@@ -1427,11 +1427,13 @@ fn test_l1_reentrant_child_delivery_return_data() {
     let void_l1_hash = compute_action_hash(&void_l1);
 
     // The delivery RESULT entry (Entry 0b) should NOT use void hash
-    // because delivery_return_data is non-empty
+    // because delivery_return_data is non-empty.
+    // rollupId: _processCallAtScope uses action.rollupId (child's target).
+    // For L1→L2 return calls (child targets L2), rollupId = our_rollup_id (L2).
     let delivery_result_entry = cont.l1_entries.iter().find(|e| {
         e.action_hash != void_l1_hash
             && e.next_action.action_type == CrossChainActionType::Result
-            && e.next_action.rollup_id == U256::ZERO
+            && e.next_action.rollup_id == alloy_primitives::U256::from(1u64)
     });
     assert!(
         delivery_result_entry.is_some(),

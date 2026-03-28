@@ -473,25 +473,28 @@ pub fn build_continuation_entries(
                     };
                 let child_result_hash = compute_action_hash(&child_result);
 
-                // Terminal next_action: the RESULT data propagated to the L1 caller.
-                // For depth-2 patterns (L1→L2→L1), the child's delivery_return_data
-                // carries the actual return from the L1 execution (e.g., Counter.increment()
-                // returns uint256(1)). This is what _processCallAtScope builds as
-                // RESULT(data=returnData) after calling executeOnBehalf.
-                // The resolution entry's nextAction must match this RESULT.
+                // Terminal next_action: the RESULT of the OUTER scope after
+                // the child's scope resolves. This is NOT the child's delivery
+                // return — it's the parent L1→L2 call's L2 delivery result.
                 //
-                // rollupId: Rollups.sol._processCallAtScope uses action.rollupId
-                // (the CALL's target rollup) for the RESULT. For L2→L1 children,
-                // this is child_target_rollup (0/MAINNET).
+                // After newScope resolves the child CALL (scope=[0]),
+                // _findAndApplyExecution matches this entry and returns
+                // resolution_terminal as nextAction. This propagates back
+                // through newScope → executeCrossChainCall as the final
+                // RESULT of the entire scope chain.
+                //
+                // rollupId: our_rollup_id (L2), because the outer CALL targets L2.
+                // data: detected.l2_return_data (what the L2 delivery returned),
+                //       typically void for incrementProxy-style functions.
                 let resolution_terminal =
-                    if !child.delivery_return_data.is_empty() || child.l2_delivery_failed {
+                    if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
                         CrossChainAction {
                             action_type: CrossChainActionType::Result,
-                            rollup_id: child_target_rollup,
+                            rollup_id: our_rollup_id,
                             destination: Address::ZERO,
                             value: U256::ZERO,
-                            data: child.delivery_return_data.clone(),
-                            failed: child.l2_delivery_failed,
+                            data: detected.l2_return_data.clone(),
+                            failed: detected.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: U256::ZERO,
                             scope: vec![],
@@ -922,12 +925,20 @@ fn push_reentrant_child_entries(
                 &child.delivery_return_data
             };
             let child_failed = child.l2_delivery_failed;
+            // rollupId: _processCallAtScope builds RESULT(rollupId=action.rollupId).
+            // For L1→L2 return calls, target is our_rollup_id (L2).
+            // For L2→L1 forward calls, target is U256::ZERO (L1).
+            let leaf_result_rollup = if is_return_call {
+                our_rollup_id
+            } else {
+                U256::ZERO
+            };
             let leaf_next = if child_return_data.is_empty() && !child_failed {
-                l1_result_void.clone()
+                result_void(leaf_result_rollup)
             } else {
                 CrossChainAction {
                     action_type: CrossChainActionType::Result,
-                    rollup_id: U256::ZERO,
+                    rollup_id: leaf_result_rollup,
                     destination: Address::ZERO,
                     value: U256::ZERO,
                     data: child_return_data.clone(),
@@ -991,7 +1002,8 @@ fn push_reentrant_child_entries(
             );
 
             // Scope resolution for this child's execution.
-            // _processCallAtScope builds RESULT{data: returnData} after executeOnBehalf.
+            // _processCallAtScope builds RESULT{rollupId: action.rollupId, data: returnData}
+            // after calling executeOnBehalf. The rollupId must match the CALL target's rollupId.
             // Issue #246: For L1→L2 return calls, use l2_return_data (child executes
             // on L2, delivery_return_data is empty). For L2→L1 calls, use delivery_return_data.
             let child_scope_data = if is_return_call {
@@ -1000,12 +1012,20 @@ fn push_reentrant_child_entries(
                 &child.delivery_return_data
             };
             let child_scope_failed = child.l2_delivery_failed;
+            // rollupId: _processCallAtScope uses action.rollupId (the CALL's target rollup).
+            // For L1→L2 return calls (is_return_call=true), target is our_rollup_id (L2).
+            // For L2→L1 children, target is U256::ZERO (L1/MAINNET).
+            let child_result_rollup = if is_return_call {
+                our_rollup_id
+            } else {
+                U256::ZERO
+            };
             let child_scope_result = if child_scope_data.is_empty() && !child_scope_failed {
-                result_void(U256::ZERO)
+                result_void(child_result_rollup)
             } else {
                 CrossChainAction {
                     action_type: CrossChainActionType::Result,
-                    rollup_id: U256::ZERO,
+                    rollup_id: child_result_rollup,
                     destination: Address::ZERO,
                     value: U256::ZERO,
                     data: child_scope_data.clone(),
@@ -1016,23 +1036,11 @@ fn push_reentrant_child_entries(
                 }
             };
             let scope_result_hash = compute_action_hash(&child_scope_result);
-            // Issue #246: L1 scope resolution also needs return data.
-            // Rollups.sol:524 returns nextAction.data to the L1 caller.
-            let l1_scope_exit = if child_scope_data.is_empty() && !child_scope_failed {
-                l1_result_void.clone()
-            } else {
-                CrossChainAction {
-                    action_type: CrossChainActionType::Result,
-                    rollup_id: U256::ZERO,
-                    destination: Address::ZERO,
-                    value: U256::ZERO,
-                    data: child_scope_data.clone(),
-                    failed: child_scope_failed,
-                    source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
-                    scope: vec![],
-                }
-            };
+            // Scope exit terminal: the RESULT of the OUTER scope after the child
+            // resolves. This is the L2TX terminal for the L2→L1 root call.
+            // Per §C.6, L2TX terminal RESULT is always void with
+            // rollupId = triggering rollupId (our_rollup_id for L2→L1).
+            let l1_scope_exit = result_void(our_rollup_id);
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: empty_deltas.to_vec(),
                 action_hash: scope_result_hash,
