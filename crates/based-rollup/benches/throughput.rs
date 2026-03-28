@@ -45,6 +45,10 @@ fn test_rollup_config() -> RollupConfig {
         l1_proxy_port: 0,
         l1_gas_overbid_pct: 10,
         builder_address: Address::ZERO,
+        bridge_l2_address: Address::ZERO,
+        bridge_l1_address: Address::ZERO,
+        bootstrap_accounts_raw: String::new(),
+        bootstrap_accounts: vec![],
     }
 }
 
@@ -128,7 +132,7 @@ fn bench_system_call_encoding(c: &mut Criterion) {
 
     c.bench_function("encode_set_context_calldata", |b| {
         b.iter(|| {
-            encode_set_context_calldata(&l1_info, 5, 1_700_000_060);
+            encode_set_context_calldata(&l1_info);
         });
     });
 }

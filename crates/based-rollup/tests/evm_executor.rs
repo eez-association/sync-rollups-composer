@@ -329,7 +329,7 @@ fn load_contract_bytecode(artifact_path: &str) -> AlloBytes {
     let content =
         std::fs::read_to_string(artifact_path).unwrap_or_else(|e| {
             panic!(
-                "failed to read artifact {artifact_path}: {e} — run `forge build` in contracts/sync-rollups/"
+                "failed to read artifact {artifact_path}: {e} — run `forge build` in contracts/sync-rollups-protocol/"
             )
         });
     let artifact: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -344,7 +344,7 @@ fn load_contract_bytecode(artifact_path: &str) -> AlloBytes {
 fn load_ccm_deployed_bytecode() -> AlloBytes {
     let artifact_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/CrossChainManagerL2.sol/CrossChainManagerL2.json"
+        "/../../contracts/sync-rollups-protocol/out/CrossChainManagerL2.sol/CrossChainManagerL2.json"
     );
     load_contract_bytecode(artifact_path)
 }
@@ -438,7 +438,7 @@ fn create_cross_chain_test_db() -> CacheDB<EmptyDB> {
     // Deploy Counter contract from compiled artifact
     let counter_artifact = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/CounterContracts.sol/Counter.json"
+        "/../../contracts/sync-rollups-protocol/out/CounterContracts.sol/Counter.json"
     );
     let counter_code = load_contract_bytecode(counter_artifact);
     db.insert_account_info(
@@ -457,7 +457,7 @@ fn create_cross_chain_test_db() -> CacheDB<EmptyDB> {
         SYSTEM_ADDRESS,
         AccountInfo {
             balance: U256::from(1_000_000_000_000_000_000u128),
-            code_hash: keccak256(&[]),
+            code_hash: keccak256([]),
             nonce: 0,
             code: None,
             account_id: None,
@@ -552,7 +552,7 @@ fn test_cross_chain_incoming_call_executes_counter() {
     // Cross-chain entries are no longer loaded via system calls — they are
     // now handled through builder-signed transactions. Keep entries constructed
     // above for reference but do not load them into the EVM config.
-    let _entries = vec![result_entry, call_entry];
+    let _entries = [result_entry, call_entry];
 
     // ── Execute the block ──
     let l2_block_number = 1u64;
@@ -767,7 +767,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
         deployer,
         AccountInfo {
             balance: U256::from(10_000_000_000_000_000_000u128),
-            code_hash: keccak256(&[]),
+            code_hash: keccak256([]),
             nonce: 0,
             code: None,
             account_id: None,
@@ -813,7 +813,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
     // ── Pre-setup: deploy CounterAndProxy(target=remoteProxy) ──
     let cap_artifact = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/CounterContracts.sol/CounterAndProxy.json"
+        "/../../contracts/sync-rollups-protocol/out/CounterContracts.sol/CounterAndProxy.json"
     );
     let cap_creation = load_creation_bytecode(cap_artifact);
     // Append constructor arg: abi.encode(address remoteProxy)
@@ -925,7 +925,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
     let evm_config = RollupEvmConfig::new(chain_spec, config.clone());
 
     // Cross-chain entries are no longer loaded via system calls.
-    let _entries = vec![inner_entry, outer_result_entry, trigger_entry];
+    let _entries = [inner_entry, outer_result_entry, trigger_entry];
 
     let l2_block_number = 1u64;
     let header = Header {
@@ -1149,7 +1149,7 @@ fn test_cross_chain_multi_entry_different_destinations() {
     ]);
     let counter_artifact = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../contracts/sync-rollups/out/CounterContracts.sol/Counter.json"
+        "/../../contracts/sync-rollups-protocol/out/CounterContracts.sol/Counter.json"
     );
     let counter_code = load_contract_bytecode(counter_artifact);
     db.insert_account_info(
@@ -1384,7 +1384,7 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
     ));
 
     // Cross-chain entries are no longer loaded via system calls.
-    let _entries = vec![
+    let _entries = [
         CrossChainExecutionEntry {
             state_deltas: vec![],
             action_hash: result_action_hash,

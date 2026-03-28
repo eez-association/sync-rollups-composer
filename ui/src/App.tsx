@@ -110,7 +110,7 @@ export function App() {
   const crossChainGeneric = useCrossChain(log, wallet.sendL1Tx, wallet.sendL1ProxyTx);
   const bridgeHook = useBridge(log, wallet.sendTx, wallet.sendL2ProxyTx, wallet.sendL1Tx, wallet.sendL1ProxyTx, wallet.address);
   const flashDeploy = useFlashLoanDeploy(log, wallet.sendTx, wallet.sendL1Tx, wallet.address);
-  const flashLoan = useFlashLoan(log, wallet.sendL1ProxyTx, {
+  const flashLoan = useFlashLoan(log, wallet.sendL1ProxyTx, wallet.address ?? undefined, {
     executorL1: flashDeploy.state.executorL1 || undefined,
     executorL2: flashDeploy.state.executorL2 || undefined,
   });

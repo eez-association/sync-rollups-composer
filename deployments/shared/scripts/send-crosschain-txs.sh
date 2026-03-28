@@ -166,11 +166,11 @@ done
 header
 info "Deploying Counter contract on L2..."
 
-# Deploy from source (test/mocks/CounterContracts.sol:Counter in sync-rollups).
+# Deploy from source (test/mocks/CounterContracts.sol:Counter in sync-rollups-protocol).
 # This ensures the deployed bytecode matches what verify-contracts.sh verifies on Blockscout.
 # Counter has: uint256 public counter; function increment() external returns (uint256);
 CONTRACTS_DIR="${CONTRACTS_DIR:-/app/contracts}"
-SYNC_DIR="$CONTRACTS_DIR/sync-rollups"
+SYNC_DIR="$CONTRACTS_DIR/sync-rollups-protocol"
 
 # Check current nonce — if > 0 a previous deploy may have succeeded
 CURRENT_NONCE=$(cast nonce --rpc-url "$L2_RPC" "$SENDER_ADDR" 2>/dev/null || echo "0")

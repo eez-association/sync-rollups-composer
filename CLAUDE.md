@@ -48,9 +48,9 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 ### Cross-Chain Entry Safety
 - **NEVER align state roots by overwriting pre_state_root** — NO EXCEPTIONS. If roots don't match, there is a real bug in derivation or filtering. The builder must keep rewinding until the root cause is fixed. Fabricating pre_state_roots produces blocks that fullnodes cannot reproduce.
 - **NEVER use all-or-nothing filtering.** §4f is per-executeRemoteCall with prefix counting. All-or-nothing loses consumed entry effects in partial consumption.
-- **NEVER fire-and-forget cross-chain detection.** Both proxies (L1 for deposits, L2 for withdrawals) MUST use hold-then-forward: queue entries, await confirmation, THEN forward user tx. Fire-and-forget causes timing races.
+- **NEVER fire-and-forget cross-chain detection.** Both composer RPCs (L1→L2 for deposits, L2→L1 for withdrawals) MUST use hold-then-forward: queue entries, await confirmation, THEN forward user tx. Fire-and-forget causes timing races.
 - **Deposits and withdrawals can coexist in the same block.** Mutual exclusion was removed. `attach_unified_chained_state_deltas()` builds a single D+W+1 root chain that covers both entry types together.
-- **§4f filtering covers both deposits and withdrawals via `filter_block_entries()`.** Single unified call handles `executeRemoteCall` (deposit) and `bridgeEther(0)` (withdrawal) prefix counting. Replaces the former separate `filter_unconsumed_withdrawal_txs()` path.
+- **§4f filtering covers both deposits and L2→L1 calls via `filter_block_entries()`.** Single unified call handles `executeRemoteCall` (deposits) and L2→L1 cross-chain txs (identified generically by `CrossChainCallExecuted` receipt events, not Bridge selectors). Replaces the former separate `filter_unconsumed_withdrawal_txs()` path.
 
 ### Deposit Minting
 - **Deposit minting is no longer needed.** CCM receives 1M ETH via genesis injection (deploy.sh adds the CCM address to a copy of genesis.json at deploy time). `apply_pre_execution_changes` is a pure passthrough to `EthBlockExecutor` — no balance injection, no block body scanning, no Arc<Mutex> state.
@@ -65,7 +65,7 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 ### Continuation Entry Construction (Flash Loans)
 - **NEVER include a RESULT table entry when `extra_l2_entries` (continuations) are present.** `convert_l1_entries_to_l2_pairs` skips the `result_entry` push when `has_continuations=true`. The driver RPC path (`driver.rs`, `rpc_entries` loop) likewise skips `result_entry` when `extra_l2_entries` is non-empty. Including it causes `ExecutionNotFound` — same `actionHash` but wrong `nextAction` conflicts with Entry 0 from the continuation chain.
 - **NEVER classify continuation entries as trigger entries in `partition_entries()`.** Continuation entries have `nextAction=CALL_B` targeting our rollup, but their `actionHash=hash(RESULT)` — NOT `hash(CALL_B)`. Only classify as trigger when `hash(next_action) == action_hash` (true for CALL triggers, false for continuations). Mis-classifying sends them to `executeIncomingCrossChainCall` instead of `loadExecutionTable`, causing `ExecutionNotFound` on the scope exit.
-- **Canonical reference for continuation L2 entry layout**: `contracts/sync-rollups/script/flash-loan-test/ExecuteFlashLoan.s.sol`. Verify entry hashes `0x7cee89f0...` (RESULT_L2_void) and `0xe690f92b...` (CALL_bridgeReturn) match derivation output.
+- **Canonical reference for continuation L2 entry layout**: `contracts/sync-rollups-protocol/script/flash-loan-test/ExecuteFlashLoan.s.sol`. Verify entry hashes `0x7cee89f0...` (RESULT_L2_void) and `0xe690f92b...` (CALL_bridgeReturn) match derivation output.
 
 ### Deploy Split and Docker Dependency Chain
 - **NEVER deploy L2 contracts before the builder is healthy.** `deploy_l2.sh` verifies `canonicalBridgeAddress` and deploys flash loan contracts that depend on CCM state written by the builder's block 2 protocol tx. Run `deploy-l2` service only after `builder: healthy`.
@@ -74,7 +74,7 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 - **Docker dependency chain for flash loans**: `l1 (healthy) → deploy (L1) → builder (healthy) → deploy-l2 (L2) → complex-tx-sender`.
 
 ### Bytecode & CREATE2 Determinism
-- **ALL bytecodes MUST come from `contracts/sync-rollups/out/`.** The project has TWO `out/` directories: `contracts/out/` (L2Context, Counter, MockECDSAVerifier, test contracts) and `contracts/sync-rollups/out/` (all sync-rollups contracts). They can produce DIFFERENT bytecodes for the same contract due to separate `forge build` invocations with different metadata. Mixing sources causes CREATE2 address mismatches. The `_bc()` helper in deploy.sh reads exclusively from the correct directory.
+- **ALL bytecodes MUST come from `contracts/sync-rollups-protocol/out/`.** The project has TWO `out/` directories: `contracts/out/` (L2Context, Counter, MockECDSAVerifier, test contracts) and `contracts/sync-rollups-protocol/out/` (all sync-rollups-protocol contracts). They can produce DIFFERENT bytecodes for the same contract due to separate `forge build` invocations with different metadata. Mixing sources causes CREATE2 address mismatches. The `_bc()` helper in deploy.sh reads exclusively from the correct directory.
 - **NEVER compile on host and expect Docker to match.** Host and Docker forge versions differ — bytecodes WILL differ, breaking CREATE2 determinism. All compilation happens inside the Docker deploy container.
 - **`forge inspect` ≠ `forge build` output.** `forge inspect` can produce different bytecode than what's in `out/`. Always read from JSON artifact files for CREATE2 computation.
 
@@ -101,7 +101,7 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 
 ### Contract ABI Compatibility (feature/contract_updates)
 - **`publicInputsHash` uses `block.timestamp`, not `block.number`.** The Rollups.sol contract changed this. The builder predicts timestamp as `latest_timestamp + block_time`. Proxy simulations use `blockOverride.time` for consistency.
-- **`computeCrossChainProxyAddress` takes 2 args, not 3.** The `domain` parameter was removed. All callers (`driver.rs`, `proxy.rs`) must match.
+- **`computeCrossChainProxyAddress` takes 2 args, not 3.** The `domain` parameter was removed. All callers (`driver.rs`, `composer_rpc/`) must match.
 - **ALWAYS verify Solidity ABI against the actual contract code** before implementing Rust callers. Use `grep` on the `.sol` files, not assumptions from old code.
 
 ### Debugging Process
@@ -116,7 +116,7 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 - **NEVER implement a fix for just the specific pattern that broke.** Read the protocol spec and implement the general mechanism.
 - **Use protocol identity mechanisms (authorizedProxies, computeCrossChainProxyAddress), not trace heuristics.** Trace output parsing is fragile and breaks with wrapper contracts.
 - **The protocol supports arbitrary depth, non-void returns, multiple identical calls, and wrapper-mediated proxy calls.** Every entry construction path must handle ALL of these.
-- **Reuse existing generic patterns.** `l1_proxy.rs:walk_trace_tree` is the correct model for proxy detection.
+- **Reuse existing generic patterns.** `composer_rpc/trace.rs:walk_trace_tree` is the single generic detection path for all cross-chain proxy detection.
 - **Always use `debug_traceCallMany` for simulation, never `eth_call`.** `debug_traceCallMany` provides full call tree visibility and state bundling. `eth_call` only gives flat results. Exception: read-only view calls (`authorizedProxies`, `computeCrossChainProxyAddress`) may use `eth_call`.
 - **Derivation is purely from L1 data.** The fullnode derives L2 blocks from L1 `postBatch` entries alone. NEVER add L2 simulation to the derivation path. The L1 entries already contain all necessary information.
 - **NEVER hardcode function selectors.** Use typed ABI encoding via `sol!` macros and `SolCall::abi_encode()`. Example: `IRollups::computeCrossChainProxyAddressCall { ... }.abi_encode()`. Hardcoded selectors cause silent failures and cannot be verified at compile time.
@@ -129,7 +129,7 @@ Specialized subagents in `.claude/agents/`. The user communicates in Spanish —
 
 ### Routing
 
-- Use `core-worker` for any work on `crates/based-rollup/src/*.rs`: state roots, consensus, cross-chain, filtering, bridge, L1 submission, nonce management, EVM, reorg.
+- Use `core-worker` for any work on `crates/based-rollup/src/` (including `composer_rpc/`): state roots, consensus, cross-chain, filtering, bridge, L1 submission, nonce management, EVM, reorg.
 - Use `ui-worker` for visual/layout/CSS/React work in `ui/`.
 - Use `general-worker` for research, scripts, Docker, Kurtosis, CI/CD, external repos, GitHub issues.
 - Use `auditor` to verify changes against docs/DERIVATION.md. READ-ONLY.
@@ -175,7 +175,6 @@ A minimal based rollup built on reth. L2 blocks follow a deterministic 12-second
 sync-rollup-composer/
 ├── docs/
 │   ├── DERIVATION.md                   # Normative spec
-│   ├── SYNC_ROLLUPS_PROTOCOL_SPEC.md   # Formal spec from Solidity contracts
 │   └── architecture.excalidraw         # Architecture diagram
 ├── CLAUDE.md                           # This file
 ├── .claude/agents/                     # 8 subagent definitions
@@ -219,7 +218,7 @@ sync-rollup-composer/
 │       ├── start.sh / verify-finality.sh
 │       ├── network_params.yaml
 │       └── README.md
-├── contracts/sync-rollups/             # Submodule (never modify)
+├── contracts/sync-rollups-protocol/    # Submodule (never modify; includes docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md)
 ├── contracts/test/                     # Test contracts (MockZKVerifier, RevertOnReceive, WithdrawalSender)
 ├── contracts/test-depth2/              # PingPong depth test contracts (issue #236)
 ├── contracts/test-multi-call/          # Multi-call test contracts (CallTwice, CallTwoDifferent, ConditionalCallTwice, Counter)
@@ -249,8 +248,14 @@ sync-rollup-composer/
     ├── table_builder.rs                # Flash loan continuation analysis, L1/L2 entry building
     ├── evm_config.rs                   # EVM config, thin executor wrapper (CCM pre-minted in genesis)
     ├── proposer.rs                     # L1 submission, explicit nonces, recovery
-    ├── proxy.rs                        # L2 proxy, withdrawal detection (hold-then-forward)
-    ├── l1_proxy.rs                     # L1 proxy, deposit detection (hold-then-forward)
+    ├── composer_rpc/                   # Cross-chain RPC interception (replaces proxy.rs + l1_proxy.rs)
+    │   ├── mod.rs                      # Module root
+    │   ├── common.rs                   # Shared HTTP helpers, JSON-RPC parsing, proxy detection
+    │   ├── trace.rs                    # Generic trace-based cross-chain call detection (walk_trace_tree)
+    │   ├── l2_to_l1.rs                # L2 composer RPC — intercepts L2→L1 calls (hold-then-forward)
+    │   ├── l1_to_l2.rs                # L1 composer RPC — intercepts L1→L2 calls (hold-then-forward)
+    │   ├── l2_to_l1_tests.rs          # Tests for L2→L1 detection
+    │   └── l1_to_l2_tests.rs          # Tests for L1→L2 detection
     ├── rpc.rs                          # syncrollups_* RPC
     ├── execution_planner.rs            # Tx simulation, action hash
     ├── config.rs / consensus.rs        # Config, timestamp validation
@@ -262,21 +267,22 @@ sync-rollup-composer/
 
 ## Key Architecture
 
-- **Protocol TX filtering (§4f)**: `filter_block_entries()` does unified prefix counting for both `executeRemoteCall` (deposits) and `bridgeEther(0)` (withdrawals). loadExecutionTable always kept. NEVER all-or-nothing.
+- **Protocol TX filtering (§4f)**: `filter_block_entries()` does unified prefix counting for `executeRemoteCall` (deposits) and L2→L1 cross-chain txs (identified generically via `CrossChainCallExecuted` receipt events, not Bridge selectors). `extract_l2_to_l1_tx_indices()` scans receipts for `CrossChainCallExecuted` events emitted by the CCM to identify L2→L1 tx indices. loadExecutionTable always kept. NEVER all-or-nothing.
 - **Unified intermediate roots**: `attach_unified_chained_state_deltas()` builds a single D+W+1 root chain for any mix of deposit/withdrawal entries. Stored in `PendingBlock.intermediate_roots`. Deposits and withdrawals can coexist in the same block.
 - **CCM genesis pre-mint**: CCM gets 1M ETH via genesis injection (deploy.sh adds the CCM address to a copy of genesis.json at deploy time). No runtime minting needed. `evm_config.rs` is a thin delegation wrapper around `EthBlockExecutor`.
 - **Entry verification hold**: set BEFORE send_to_l1. Builder HALTS block production (`step_builder` returns early). Cleared by verify or rewind. After MAX_ENTRY_VERIFY_DEFERRALS=3, rewinds instead of accepting mismatch.
 - **Nonce-linked atomicity (§13b)**: postBatch(K), createProxy(K+1), trigger(K+2). Explicit nonces. reset_nonce on failure.
-- **Hold-then-forward**: both proxies await entry queue confirmation before forwarding user tx.
+- **Hold-then-forward**: both composer RPCs (`composer_rpc/l2_to_l1.rs`, `composer_rpc/l1_to_l2.rs`) await entry queue confirmation before forwarding user tx.
+- **Generic trace-based detection**: `composer_rpc/trace.rs:walk_trace_tree` is the single detection path for both directions. Walks `callTracer` trace trees looking for `executeCrossChainCall` child calls on the CCM — no Bridge-specific selectors. Detects persistent proxies (via `authorizedProxies` lookup) and ephemeral proxies (via `createCrossChainProxy` in the same trace). Works for bridgeEther, bridgeTokens, direct proxy calls, wrapper contracts, flash loans, and any future cross-chain pattern.
 - **ECDSA proof signing**: `proposer.rs` `sign_proof()` signs the publicInputsHash with the builder key. The publicInputsHash is keccak256(abi.encodePacked(blockhash, timestamp, encode(entryHashes), encode(blobHashes), keccak256(callData))). `tmpECDSAVerifier` on L1 verifies via ecrecover (raw hash, no EIP-191 prefix). Development-only.
 - **Block 1 genesis**: L2Context(nonce=0), CCM(nonce=1), Bridge(nonce=2), Bridge.initialize(nonce=3).
-- **L1→L2 flash loan continuation flow**: L1 proxy detects multi-call txs via iterative `debug_traceCallMany`. `table_builder.rs` analyzes calls and builds L1+L2 entries. On L2, `loadExecutionTable` loads 3 continuation entries; a single `executeIncomingCrossChainCall` triggers the full chain (receiveTokens → claimAndBridgeBack → bridgeTokens return) via CCM `newScope()`. Canonical reference: `contracts/sync-rollups/script/flash-loan-test/ExecuteFlashLoan.s.sol`.
-- **L2→L1 multi-call continuation**: `build_l2_to_l1_continuation_entries()` generates 3 L2 entries (with scope navigation on Entry 1: `callReturn{scope=[0]}`) and 5 L1 entries (with nested delivery on Entry 0). Return calls are constructed analytically from the forward trip's `receiveTokens` params — simulation is not used for the second call due to token availability ordering. Mirrors the L1→L2 pattern: scope navigation is required on both sides so tokens are returned within the same tx.
-- **Configurable-depth cross-chain (issue #236)**: `proxy.rs` supports up to `MAX_RECURSIVE_DEPTH=5` (defined in `proxy.rs`) hops via iterative `debug_traceCallMany` expansion. Both the multi-call path and the single-call path use the same constant. PingPong contracts (`contracts/test-depth2/`) use generic `ping(round, maxRounds)` and `pong(round, maxRounds)` signatures; `start(maxRounds)` triggers N rounds of L2→L1 with (N-1) L1→L2 returns. Deployed via `scripts/e2e/deploy-ping-pong.sh` using dev#10.
+- **L1→L2 flash loan continuation flow**: `composer_rpc/l1_to_l2.rs` detects multi-call txs via iterative `debug_traceCallMany`. `table_builder.rs` analyzes calls and builds L1+L2 entries. On L2, `loadExecutionTable` loads 3 continuation entries; a single `executeIncomingCrossChainCall` triggers the full chain (receiveTokens → claimAndBridgeBack → bridgeTokens return) via CCM `newScope()`. Canonical reference: `contracts/sync-rollups-protocol/script/flash-loan-test/ExecuteFlashLoan.s.sol`.
+- **L2→L1 multi-call continuation**: `build_l2_to_l1_continuation_entries()` generates 3 L2 entries (with scope navigation on Entry 1: `callReturn{scope=[0]}`) and 5 L1 entries (with nested delivery on Entry 0). Return calls are constructed analytically from the forward trip's `receiveTokens` params — simulation is not used for the second call due to token availability ordering. Mirrors the L1→L2 pattern: scope navigation is required on both sides so tokens are returned within the same tx. NOTE: `table_builder.rs` still uses `IBridge::receiveTokensCall` for flash loan ABI decode (to be refactored separately to eliminate the last Bridge-specific dependency).
+- **Configurable-depth cross-chain (issue #236)**: `composer_rpc/l2_to_l1.rs` supports up to `MAX_RECURSIVE_DEPTH=5` (defined in `composer_rpc/l2_to_l1.rs`) hops via iterative `debug_traceCallMany` expansion. Both the multi-call path and the single-call path use the same constant. PingPong contracts (`contracts/test-depth2/`) use generic `ping(round, maxRounds)` and `pong(round, maxRounds)` signatures; `start(maxRounds)` triggers N rounds of L2→L1 with (N-1) L1→L2 returns. Deployed via `scripts/e2e/deploy-ping-pong.sh` using dev#10.
 
 ## Docker Services (Devnet)
 
-- **L1**: port 9555 | **builder**: 9545 (RPC), 9550 (WS), 9548 (proxy), 9556 (L1 proxy), 9560 (health)
+- **L1**: port 9555 | **builder**: 9545 (RPC), 9550 (WS), 9548 (L2→L1 composer RPC), 9556 (L1→L2 composer RPC), 9560 (health)
 - **fullnode1**: 9546 | **fullnode2**: 9547 | **sync-ui**: 8080
 - **deploy**: L1 contracts (Rollups.sol, tmpECDSAVerifier, Bridge, etc.) — runs once at startup
 - **deploy-l2**: L2 contracts (canonicalBridgeAddress verify + flash loan contracts) — runs after builder healthy
@@ -363,7 +369,13 @@ All E2E tests (scripts/e2e/) use dedicated keys (#2, #3, #6-#8, #10-#18) except 
 - `domain` parameter in `computeCrossChainProxyAddress` — removed in feature/contract_updates; function now takes 2 args (rollupId, deployer). All callers updated.
 - `block.number` in `publicInputsHash` — replaced by `block.timestamp` in feature/contract_updates. Builder and proxy simulation code predict/override timestamp accordingly.
 - Hardcoded depth-2 PingPong function names `pingAgain()`, `pong()` (no args), and `finalPong()` — replaced by generic `ping(uint256 round, uint256 maxRounds)`, `pong(uint256 round, uint256 maxRounds)`, and `start(uint256 maxRounds)` in `contracts/test-depth2/src/`. The configurable-depth design supports 1 to `MAX_RECURSIVE_DEPTH=5` rounds without new function signatures per depth.
-- Per-depth L1 re-trace path in `proxy.rs` that used isolated single-call simulation for each depth level — replaced by iterative `debug_traceCallMany` expansion that accumulates children across `MAX_RECURSIVE_DEPTH` passes.
+- Per-depth L1 re-trace path in the old `proxy.rs` that used isolated single-call simulation for each depth level — replaced by iterative `debug_traceCallMany` expansion that accumulates children across `MAX_RECURSIVE_DEPTH` passes.
+- `proxy.rs` (entire file) — refactored into `composer_rpc/l2_to_l1.rs`. All Bridge-specific selectors removed; detection uses generic `trace::walk_trace_tree`.
+- `l1_proxy.rs` (entire file) — refactored into `composer_rpc/l1_to_l2.rs`. Detection uses shared `trace::walk_trace_tree`.
+- `build_withdrawal_entries()` in cross_chain.rs — callers now use `build_l2_to_l1_call_entries()` (generic, not Bridge-specific).
+- `is_bridge_ether_withdrawal()` / `is_bridge_withdrawal()` in cross_chain.rs — replaced by receipt-based `CrossChainCallExecuted` event scanning via `extract_l2_to_l1_tx_indices()`.
+- Bridge-specific selector fast/medium/slow detection paths in the old proxy — replaced by single generic `trace::walk_trace_tree` path that detects `executeCrossChainCall` child calls on the CCM.
+- `trigger_user` field as a separate concept from `source_address` — `trigger_user` always equaled `source_address`, so the distinction was eliminated (note: `trigger_user` still exists as a parameter name in `l2_to_l1.rs` internal functions but always receives `source_address`).
 
 ## Build & Test
 
@@ -410,4 +422,4 @@ cargo +nightly fmt --all
 
 ## Test Coverage
 
-529 tests across unit, EVM integration, and E2E. 436 unit tests pass standalone; 83 `e2e_anvil` tests and 10 `evm_executor` integration tests require `anvil` running locally (and compiled contract artifacts in `contracts/sync-rollups/out/`). Tests in `*_tests.rs` sibling files. No clippy errors, no `unwrap()` in production code.
+540 tests across unit, EVM integration, and E2E. Tests in `*_tests.rs` sibling files. The `e2e_anvil` and `evm_executor` integration tests require `anvil` running locally (and compiled contract artifacts in `contracts/sync-rollups-protocol/out/`). No clippy errors, no `unwrap()` in production code.

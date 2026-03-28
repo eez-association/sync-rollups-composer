@@ -166,7 +166,7 @@ fn test_calldata_gas_at_exact_boundary_passes() {
     // Calldata gas exactly equal to MAX_CALLDATA_GAS should pass (> not >=)
     let gas = Proposer::MAX_CALLDATA_GAS;
     assert!(
-        !(gas > Proposer::MAX_CALLDATA_GAS),
+        gas <= Proposer::MAX_CALLDATA_GAS,
         "equal should pass the check"
     );
     assert!(gas + 1 > Proposer::MAX_CALLDATA_GAS, "one over should fail");
@@ -196,7 +196,7 @@ fn test_batch_halving_reaches_one() {
         assert_eq!(size, 1, "halving from {start} must reach 1, not 0");
     }
     let batch_size = 1usize;
-    assert!(!(batch_size > 1), "size 1 should not enter halving branch");
+    assert!(batch_size <= 1, "size 1 should not enter halving branch");
 }
 
 #[test]
@@ -377,7 +377,8 @@ fn test_post_batch_calldata_empty_proof_vs_nonempty_proof() {
     let empty_proof = Bytes::default();
     let nonempty_proof = Bytes::from(vec![0xAB; 64]); // 64-byte proof
 
-    let calldata_empty = encode_post_batch_calldata(&[entry.clone()], Bytes::new(), empty_proof);
+    let calldata_empty =
+        encode_post_batch_calldata(std::slice::from_ref(&entry), Bytes::new(), empty_proof);
     let calldata_proof = encode_post_batch_calldata(&[entry], Bytes::new(), nonempty_proof);
 
     assert_ne!(
@@ -773,7 +774,7 @@ fn test_switch_l1_url_rebuilds_fresh_provider() {
 
 #[test]
 fn test_build_block_entries_produces_correct_state_deltas() {
-    let blocks = vec![
+    let blocks = [
         PendingBlock {
             l2_block_number: 1,
             pre_state_root: B256::with_last_byte(0x00),

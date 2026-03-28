@@ -48,12 +48,48 @@ pub struct DerivedBlock {
     pub l1_info: L1BlockInfo,
     /// State root submitted by the builder (for verification).
     pub state_root: B256,
-    /// Transactions from the postBatch callData.
+    /// Transactions from the postBatch callData (may be unfiltered if
+    /// `filtering` is `Some` — the driver applies §4f filtering using
+    /// receipt-based L2→L1 tx identification before execution).
     pub transactions: Bytes,
     /// Whether this was an empty submission (no transactions).
     pub is_empty: bool,
     /// Cross-chain execution entries to load into CrossChainManagerL2.
     pub execution_entries: Vec<CrossChainExecutionEntry>,
+    /// Deferred §4f filtering metadata — present when unconsumed entries
+    /// require the driver to filter protocol txs before execution.
+    /// `None` means no filtering needed (all entries consumed or no entries).
+    pub filtering: Option<DeferredFiltering>,
+}
+
+/// Metadata for §4f protocol tx filtering, computed by derivation from L1 data.
+///
+/// The driver uses this with generic event-based filtering: trial-execute the
+/// full block, identify trigger txs via `ExecutionConsumed` events from the CCM,
+/// compute consumed trigger prefix using the L1 consumed map, and filter to keep
+/// only consumed triggers. This is fully protocol-generic — no dependency on
+/// entry type classification.
+#[derive(Debug, Clone)]
+pub struct DeferredFiltering {
+    /// L1 consumed map snapshot: actionHash → remaining consumption count.
+    ///
+    /// The driver uses this for generic event-based §4f filtering:
+    /// trial-execute + `ExecutionConsumed` events + prefix counting.
+    ///
+    /// The snapshot is taken BEFORE the current batch's entries are consumed
+    /// from `remaining`, so the driver can independently determine which
+    /// triggers were consumed using the same FIFO semantics as L1.
+    pub l1_consumed_remaining: std::collections::HashMap<B256, usize>,
+
+    /// All L2 execution entries from this batch (unfiltered).
+    ///
+    /// Used by the driver for generic event-based §4f filtering via
+    /// `build_builder_protocol_txs`. When non-empty, the driver can rebuild
+    /// the block from entries instead of parsing/filtering raw encoded
+    /// transaction bytes. Falls back to `filter_block_by_trigger_prefix` on
+    /// the raw `DerivedBlock.transactions` when empty or when a proposer
+    /// (signer) is not available (fullnode/sync mode).
+    pub all_l2_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
 }
 
 /// A batch of derived blocks together with the cursor state that should be
@@ -231,6 +267,13 @@ impl DerivationPipeline {
         let mut local_derived_l2_block = self.last_derived_l2_block;
         let mut local_l1_info = self.last_l1_info.clone();
 
+        // Shared consumed-entry counter across ALL batches in this derivation window.
+        // MUST be shared (not rebuilt per-batch) because the same actionHash can appear
+        // in multiple batches. On L1, entries are consumed FIFO across batches, so
+        // the remaining count must decrement across batches in order.
+        let mut remaining: std::collections::HashMap<B256, usize> =
+            consumed_map.iter().map(|(k, v)| (*k, v.len())).collect();
+
         for log in logs {
             let l1_block = match log.block_number {
                 Some(n) => n,
@@ -312,14 +355,11 @@ impl DerivationPipeline {
             let mut deferred_entries: Vec<CrossChainExecutionEntry> = Vec::new();
             let mut has_unconsumed_entries = false;
 
-            // Build occurrence-aware remaining counter from consumed_map.
-            // Each actionHash maps to how many times it was consumed on L1.
-            // Duplicate-call patterns (e.g., CallTwice) produce multiple
-            // ExecutionConsumed events with the same actionHash.
-            let mut remaining: std::collections::HashMap<B256, usize> = consumed_map
-                .iter()
-                .map(|(k, v)| (*k, v.len()))
-                .collect();
+            // Snapshot `remaining` BEFORE this batch's entries consume it.
+            // The driver's generic §4f filtering needs the pre-batch state to
+            // independently determine which triggers were consumed via trial
+            // execution + ExecutionConsumed events + prefix counting.
+            let remaining_snapshot_for_generic_filtering = remaining.clone();
 
             for entry in &entries {
                 if entry.action_hash == B256::ZERO {
@@ -362,12 +402,15 @@ impl DerivationPipeline {
             // need the full entry pairs for effective_state_root computation via
             // chained state deltas (§4e). The CALL actions come from
             // ExecutionConsumed events emitted when entries are consumed on L1.
-            let call_actions: Vec<cross_chain::CrossChainAction> =
-                consumed_map.values().flat_map(|v| v.iter()).cloned().collect();
+            let call_actions: Vec<cross_chain::CrossChainAction> = consumed_map
+                .values()
+                .flat_map(|v| v.iter())
+                .cloned()
+                .collect();
             let deferred_entries = if !call_actions.is_empty() {
                 let mut pairs =
                     cross_chain::convert_l1_entries_to_l2_pairs(&deferred_entries, &call_actions);
-                // Append continuation entries for flash loan patterns (§4e).
+                // Append continuation entries for multi-call patterns (§4e).
                 // Continuation L1 entries have nextAction.type == CALL instead of RESULT,
                 // signaling a reentrant cross-chain call. The additional L2 entries are
                 // needed for the CCM execution table to resolve the full call chain.
@@ -389,7 +432,7 @@ impl DerivationPipeline {
                         target: "based_rollup::derivation",
                         count = continuation.len(),
                         %l1_block,
-                        "appending flash loan continuation entries"
+                        "appending multi-call continuation entries"
                     );
                     pairs.extend(continuation);
                 }
@@ -519,6 +562,7 @@ impl DerivationPipeline {
                             transactions: Bytes::new(),
                             is_empty: true,
                             execution_entries: vec![],
+                            filtering: None,
                         });
                     }
                 }
@@ -535,137 +579,26 @@ impl DerivationPipeline {
                     vec![]
                 };
 
-                // §4f protocol tx filtering — unified for deposits and withdrawals.
+                // §4f protocol tx filtering — deferred to the driver.
                 //
-                // When unconsumed entries exist, filter both unconsumed
-                // `executeRemoteCall` (deposit) and `bridgeEther(0)` (withdrawal)
-                // txs from the block's callData. Uses a single `filter_block_entries`
-                // call with independent prefix counts for each type.
-                let effective_transactions = if has_unconsumed_entries && i == 0 {
-                    // Count unconsumed entries by walking deferred entries in pairs.
-                    // Withdrawal entries come as CALL+RESULT pairs (nested format).
-                    // is_withdrawal_entry() only identifies the CALL half; the RESULT
-                    // half has next_action.action_type=Result and would be miscounted
-                    // as a deposit if counted individually. Walk structurally instead.
-                    let deferred: Vec<_> = entries
-                        .iter()
-                        .filter(|e| e.action_hash != B256::ZERO)
-                        .collect();
-                    let mut unconsumed_deposit_count = 0usize;
-                    let mut unconsumed_withdrawal_pair_count = 0usize;
-                    {
-                        // Build a separate remaining counter for §4f unconsumed counting.
-                        // This is independent of the classification loop's `remaining`
-                        // because we're re-walking the original entry list.
-                        let mut remaining_for_filter: std::collections::HashMap<B256, usize> =
-                            consumed_map
-                                .iter()
-                                .map(|(k, v)| (*k, v.len()))
-                                .collect();
-
-                        let mut idx = 0;
-                        while idx < deferred.len() {
-                            if cross_chain::is_withdrawal_entry(deferred[idx]) {
-                                // Withdrawal CALL entry — next entry is the RESULT half.
-                                // A pair is unconsumed if the CALL entry is not consumed.
-                                let is_consumed = remaining_for_filter
-                                    .get_mut(&deferred[idx].action_hash)
-                                    .is_some_and(|count| {
-                                        if *count > 0 {
-                                            *count -= 1;
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                if !is_consumed {
-                                    unconsumed_withdrawal_pair_count += 1;
-                                }
-                                idx += 2; // Skip both halves of the pair
-                            } else {
-                                // Non-withdrawal deferred entry = deposit
-                                let is_consumed = remaining_for_filter
-                                    .get_mut(&deferred[idx].action_hash)
-                                    .is_some_and(|count| {
-                                        if *count > 0 {
-                                            *count -= 1;
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                if !is_consumed {
-                                    unconsumed_deposit_count += 1;
-                                }
-                                idx += 1;
-                            }
-                        }
-                    }
-
-                    // Count total executeRemoteCall txs in the block
-                    let total_execute = {
-                        let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
-                            alloy_rlp::Decodable::decode(&mut transactions.as_ref())
-                                .unwrap_or_default();
-                        txs.iter()
-                            .filter(|tx| {
-                                cross_chain::is_ccm_execute_remote_call(
-                                    tx,
-                                    self.config.cross_chain_manager_address,
-                                )
-                            })
-                            .count()
-                    };
-                    let consumed_deposit_count =
-                        total_execute.saturating_sub(unconsumed_deposit_count);
-
-                    // Count total bridgeEther(0) txs in the block
-                    let total_withdrawals = {
-                        let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
-                            alloy_rlp::Decodable::decode(&mut transactions.as_ref())
-                                .unwrap_or_default();
-                        txs.iter()
-                            .filter(|tx| {
-                                cross_chain::is_bridge_ether_withdrawal(
-                                    tx,
-                                    self.config.bridge_l2_address,
-                                )
-                            })
-                            .count()
-                    };
-                    let consumed_withdrawal_count =
-                        total_withdrawals.saturating_sub(unconsumed_withdrawal_pair_count);
-
+                // When unconsumed entries exist, pass the L1 consumed map
+                // snapshot to the driver. The driver handles ALL filtering
+                // generically via trial-execution + ExecutionConsumed events +
+                // prefix counting. No type-specific counting is needed here.
+                let filtering = if has_unconsumed_entries && i == 0 {
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,
                         %l1_block,
-                        consumed_deposit_count,
-                        unconsumed_deposit_count,
-                        consumed_withdrawal_count,
-                        unconsumed_withdrawal_pair_count,
-                        "filtering unconsumed txs from block (§4f unified)"
+                        "§4f filtering deferred to driver (generic event-based)"
                     );
 
-                    match cross_chain::filter_block_entries(
-                        transactions,
-                        self.config.cross_chain_manager_address,
-                        self.config.bridge_l2_address,
-                        consumed_deposit_count,
-                        consumed_withdrawal_count,
-                    ) {
-                        Ok(filtered) => filtered,
-                        Err(err) => {
-                            warn!(
-                                target: "based_rollup::derivation",
-                                %err,
-                                "failed to filter block entries — using original"
-                            );
-                            transactions.clone()
-                        }
-                    }
+                    Some(DeferredFiltering {
+                        l1_consumed_remaining: remaining_snapshot_for_generic_filtering.clone(),
+                        all_l2_entries: execution_entries.clone(),
+                    })
                 } else {
-                    transactions.clone()
+                    None
                 };
                 let effective_block_state_root = state_root;
 
@@ -674,9 +607,10 @@ impl DerivationPipeline {
                     l2_timestamp,
                     l1_info: l1_info.clone(),
                     state_root: effective_block_state_root,
-                    transactions: effective_transactions,
+                    transactions: transactions.clone(),
                     is_empty,
                     execution_entries,
+                    filtering,
                 });
 
                 // Update local tracking for gap-fill and L1 context

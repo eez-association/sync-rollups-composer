@@ -175,10 +175,14 @@ fn test_build_entries_action_hash_varies_with_rollup_id() {
         1,
         B256::ZERO,
         B256::with_last_byte(0x01),
-        &[signed_tx.clone()],
+        std::slice::from_ref(&signed_tx),
     );
-    let entries_r2 =
-        build_entries_for_block(2, B256::ZERO, B256::with_last_byte(0x01), &[signed_tx]);
+    let entries_r2 = build_entries_for_block(
+        2,
+        B256::ZERO,
+        B256::with_last_byte(0x01),
+        std::slice::from_ref(&signed_tx),
+    );
 
     assert_ne!(
         entries_r1[0].action_hash, entries_r2[0].action_hash,
@@ -329,7 +333,7 @@ fn test_build_entries_from_encoded_matches_build_entries_for_block() {
     let post = B256::with_last_byte(0xBB);
 
     // Build entries via both paths
-    let entries_from_tx = build_entries_for_block(1, pre, post, &[signed_tx.clone()]);
+    let entries_from_tx = build_entries_for_block(1, pre, post, std::slice::from_ref(&signed_tx));
 
     let mut rlp_buf = Vec::new();
     alloy_rlp::encode_list(&[signed_tx], &mut rlp_buf);
@@ -513,7 +517,7 @@ fn test_e2e_pipeline_roundtrip_build_to_load_execution_table() {
     );
 
     // Step 7: Fullnode encodes loadExecutionTable calldata for builder protocol transaction
-    let load_calldata = encode_load_execution_table_calldata(&[derived_entry.clone()]);
+    let load_calldata = encode_load_execution_table_calldata(std::slice::from_ref(derived_entry));
     assert!(!load_calldata.is_empty());
 
     // Step 8: Decode the loadExecutionTable calldata (simulating what the
@@ -549,7 +553,7 @@ fn test_e2e_pipeline_roundtrip_build_to_load_execution_table() {
     );
     // Verify the loadExecutionTable calldata round-trips identically
     // by re-encoding the derived entry and comparing bytes
-    let re_encoded = encode_load_execution_table_calldata(&[derived_entry.clone()]);
+    let re_encoded = encode_load_execution_table_calldata(std::slice::from_ref(derived_entry));
     assert_eq!(
         load_calldata, re_encoded,
         "re-encoding derived entry must produce identical calldata"
@@ -726,7 +730,8 @@ fn test_cross_path_action_hash_with_real_transaction() {
     let post = B256::with_last_byte(0xBB);
 
     // Path (1): build_entries_for_block (encodes internally)
-    let entries_path1 = build_entries_for_block(rollup_id, pre, post, &[signed_tx.clone()]);
+    let entries_path1 =
+        build_entries_for_block(rollup_id, pre, post, std::slice::from_ref(&signed_tx));
     let hash_path1 = entries_path1[0].action_hash;
 
     // Path (2): build_entries_from_encoded (pre-encoded RLP)
@@ -832,21 +837,22 @@ fn test_cross_path_action_hash_multi_tx_property() {
     }
 }
 
-/// Verify that `build_entries_from_encoded` always sets `ether_delta` to zero
-/// for L2TX actions (no cross-chain ETH transfer in standard block entries).
-/// Verify that `build_entries_from_encoded` propagates rollup_id into both
-/// the state_delta and next_action fields.
-/// Verify that even with many transactions, both builder paths produce
-/// exactly one entry with exactly one state delta (not one per transaction).
-/// Document that `build_entries_for_block` always sets `failed=false` on the
-/// next_action. Individual transaction reverts are not tracked at the entry
-/// level — the entry covers the entire block's state transition. A block with
-/// reverted txs still produces a valid state transition (gas consumed, nonces
-/// incremented), so `failed` must be false.
-/// Verify that the pre/post state roots passed to `build_entries_from_encoded`
-/// are faithfully recorded in the state delta without transformation.
-/// This documents the contract between the driver (which sets pre=parent.state_root,
-/// post=sealed_block.state_root) and the execution planner.
+// Verify that `build_entries_from_encoded` always sets `ether_delta` to zero
+// for L2TX actions (no cross-chain ETH transfer in standard block entries).
+// Verify that `build_entries_from_encoded` propagates rollup_id into both
+// the state_delta and next_action fields.
+// Verify that even with many transactions, both builder paths produce
+// exactly one entry with exactly one state delta (not one per transaction).
+// Document that `build_entries_for_block` always sets `failed=false` on the
+// next_action. Individual transaction reverts are not tracked at the entry
+// level — the entry covers the entire block's state transition. A block with
+// reverted txs still produces a valid state transition (gas consumed, nonces
+// incremented), so `failed` must be false.
+// Verify that the pre/post state roots passed to `build_entries_from_encoded`
+// are faithfully recorded in the state delta without transformation.
+// This documents the contract between the driver (which sets pre=parent.state_root,
+// post=sealed_block.state_root) and the execution planner.
+//
 // ── Iteration 80: Synchronous composability invariant tests ──
 //
 // Core guarantee: "any L2 transaction executed by the builder produces
@@ -980,8 +986,8 @@ fn assert_pipeline_invariant(
     );
 
     // INVARIANT: loadExecutionTable encoding is deterministic
-    let load_calldata = encode_load_execution_table_calldata(&[derived_entry.clone()]);
-    let re_encoded = encode_load_execution_table_calldata(&[original.clone()]);
+    let load_calldata = encode_load_execution_table_calldata(std::slice::from_ref(derived_entry));
+    let re_encoded = encode_load_execution_table_calldata(std::slice::from_ref(original));
     assert_eq!(
         load_calldata, re_encoded,
         "loadExecutionTable encoding must be identical for builder vs derived entries"
@@ -1191,7 +1197,7 @@ fn test_composability_invariant_action_hash_independent_of_state_roots() {
         1,
         B256::with_last_byte(0xAA),
         B256::with_last_byte(0xBB),
-        &[tx.clone()],
+        std::slice::from_ref(&tx),
     );
     let entry_b = build_entries_for_block(
         1,
@@ -1265,7 +1271,7 @@ fn test_composability_invariant_rollup_isolation() {
     let post = B256::with_last_byte(0xBB);
 
     let entries: Vec<_> = (1..=5)
-        .map(|rid| build_entries_for_block(rid, pre, post, &[tx.clone()]))
+        .map(|rid| build_entries_for_block(rid, pre, post, std::slice::from_ref(&tx)))
         .collect();
 
     // Every pair of rollup IDs must produce different action hashes
@@ -1515,7 +1521,7 @@ fn test_state_only_entry_l1_pipeline_roundtrip() {
     assert_eq!(derived_entry.state_deltas[0].new_state, post);
 
     // Step 5: Encode for L2 builder protocol transaction
-    let load_calldata = encode_load_execution_table_calldata(&[derived_entry.clone()]);
+    let load_calldata = encode_load_execution_table_calldata(std::slice::from_ref(derived_entry));
     let final_decoded = ICrossChainManagerL2::loadExecutionTableCall::abi_decode(&load_calldata)
         .expect("loadExecutionTable decode");
     assert_eq!(
@@ -1721,7 +1727,7 @@ fn test_pending_block_state_root_matches_execution_entry_delta() {
 
     let pending_block = PendingBlock {
         l2_block_number: 42,
-        pre_state_root: pre_state_root,
+        pre_state_root,
         state_root: post_state_root,
         clean_state_root: post_state_root,
         encoded_transactions: alloy_primitives::Bytes::from(rlp_buf.clone()),

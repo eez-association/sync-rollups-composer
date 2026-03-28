@@ -133,7 +133,6 @@ async fn test_health_server_concurrent_requests() {
     // Spawn 10 concurrent requests
     let mut handles = Vec::new();
     for _ in 0..10 {
-        let addr = addr;
         handles.push(tokio::spawn(async move {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             stream

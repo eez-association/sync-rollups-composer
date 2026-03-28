@@ -24,17 +24,17 @@ The dashboard visualizes a based rollup:
 - Builder RPC: `http://localhost:9545` (eth_* + syncrollups_*)
 - Fullnodes: `:9546`, `:9547`
 - L1: `:9555`
-- L2 Proxy: `:9548` (wallet sends withdrawals here)
-- L1 Proxy: `:9556` (wallet sends deposits here)
+- L2→L1 composer RPC: `:9548` (wallet sends L2→L1 cross-chain calls here)
+- L1→L2 composer RPC: `:9556` (wallet sends L1→L2 cross-chain calls here)
 - Health: `:9560/health` → `{ healthy, mode, l2_head, l1_derivation_head, pending_submissions, consecutive_rewind_cycles, commit }`
 - Blockscout L1: `:4000`, L2: `:4001`
 - L2 Chain ID: 42069
 
 ## Bridge Architecture
-- **Deposits**: user sends bridgeEther(1) on L1 through L1 proxy (port 9556). ETH transferred from CCM pre-minted genesis balance on L2.
-- **Withdrawals**: user sends Bridge.bridgeEther(0) on L2 through L2 proxy (port 9548). ETH delivered on L1.
-- Key: withdrawals go to rollupId=0 (L1), deposits to rollupId=1 (L2).
-- Gas estimation for withdrawals should use the proxy port (9548), not direct RPC.
+- **Deposits (L1→L2)**: user sends bridgeEther(1) or bridgeTokens on L1 through L1→L2 composer RPC (port 9556). ETH/tokens transferred to L2.
+- **Withdrawals (L2→L1)**: user sends bridgeEther(0) or bridgeTokens on L2 through L2→L1 composer RPC (port 9548). ETH/tokens delivered on L1.
+- Key: rollupId=0 targets L1, rollupId=1 targets L2. Detection is generic (any proxy call, not just Bridge).
+- Gas estimation for cross-chain calls should use the composer RPC port (9548/9556), not direct RPC.
 
 ## Standards
 Dark theme, premium polish. Critical info visible: state root mismatches, rewinds, pending count. Single-file components, Tailwind, React hooks. Handle empty/error/loading states.

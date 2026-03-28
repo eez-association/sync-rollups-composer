@@ -8,7 +8,7 @@ use based_rollup::driver::Driver;
 use based_rollup::evm_config::RollupExecutorBuilder;
 use based_rollup::health;
 use based_rollup::rpc::{
-    QueuedCrossChainCall, QueuedWithdrawal, SyncRollupsApiServer, SyncRollupsRpc,
+    QueuedCrossChainCall, QueuedL2ToL1Call, SyncRollupsApiServer, SyncRollupsRpc,
 };
 use clap::Parser;
 use eyre::Result;
@@ -35,7 +35,7 @@ fn print_genesis_state_root() -> Result<()> {
 
     // Convert alloc entries to (Address, TrieAccount) for state root computation.
     // GenesisAccount implements Into<TrieAccount> via alloy-genesis.
-    let state_root = alloy_trie::root::state_root_unhashed(genesis.alloc.into_iter());
+    let state_root = alloy_trie::root::state_root_unhashed(genesis.alloc);
     println!("{state_root}");
     Ok(())
 }
@@ -71,12 +71,12 @@ fn main() -> Result<()> {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let forward_txs_for_rpc = pending_l1_forward_txs.clone();
 
-        // Shared queue for L2→L1 withdrawals.
-        // The L2 RPC proxy detects Bridge.bridgeEther(0) and queues here;
-        // the driver drains alongside deposits (unified intermediate roots).
-        let queued_withdrawals: Arc<std::sync::Mutex<Vec<QueuedWithdrawal>>> =
+        // Shared queue for L2→L1 calls.
+        // The L2 composer RPC detects cross-chain calls and queues here;
+        // the driver drains alongside L1→L2 entries (unified intermediate roots).
+        let queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<QueuedL2ToL1Call>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
-        let withdrawals_for_rpc = queued_withdrawals.clone();
+        let l2_to_l1_for_rpc = queued_l2_to_l1_calls.clone();
 
         // Build the node with Ethereum components + our custom consensus
         let handle = builder
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
                     synced_for_rpc,
                     calls_for_rpc,
                     forward_txs_for_rpc,
-                    withdrawals_for_rpc,
+                    l2_to_l1_for_rpc,
                 );
                 ctx.modules.merge_configured(rpc.into_rpc())?;
                 tracing::info!(
@@ -131,7 +131,7 @@ fn main() -> Result<()> {
                 .unwrap_or(alloy_primitives::Address::ZERO);
             let builder_key = rollup_config.builder_private_key.clone();
             tokio::spawn(async move {
-                if let Err(e) = based_rollup::proxy::run_rpc_proxy(
+                if let Err(e) = based_rollup::composer_rpc::l2_to_l1::run_rpc_proxy(
                     proxy_port,
                     upstream_port,
                     bridge_l2_addr,
@@ -172,11 +172,9 @@ fn main() -> Result<()> {
                 .unwrap_or(alloy_primitives::Address::ZERO);
             let builder_private_key = rollup_config.builder_private_key.clone();
             let rollup_id = rollup_config.rollup_id;
-            let bridge_l2_address = rollup_config.bridge_l2_address;
-            let bridge_l1_address = rollup_config.bridge_l1_address;
             let cross_chain_manager_address = rollup_config.cross_chain_manager_address;
             tokio::spawn(async move {
-                if let Err(e) = based_rollup::l1_proxy::run_l1_rpc_proxy(
+                if let Err(e) = based_rollup::composer_rpc::l1_to_l2::run_l1_rpc_proxy(
                     l1_proxy_port,
                     l1_rpc_url,
                     l2_rpc_url,
@@ -184,8 +182,6 @@ fn main() -> Result<()> {
                     builder_address,
                     builder_private_key,
                     rollup_id,
-                    bridge_l2_address,
-                    bridge_l1_address,
                     cross_chain_manager_address,
                 )
                 .await
@@ -230,7 +226,7 @@ fn main() -> Result<()> {
                     synced,
                     queued_cross_chain_calls,
                     pending_l1_forward_txs,
-                    queued_withdrawals,
+                    queued_l2_to_l1_calls,
                 );
 
                 // Spawn the health HTTP server if a port is configured (0 = disabled).

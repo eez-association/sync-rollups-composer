@@ -21,7 +21,7 @@ export const config = {
   l2Rpc: params.get("l2") || (IS_PROXIED ? `${ORIGIN}/rpc/l2` : `${ORIGIN}:9545`),
   /** L1 proxy RPC — used as MetaMask L1 endpoint (routes cross-chain) */
   l1ProxyRpc: params.get("l1proxy") || (IS_PROXIED ? `${ORIGIN}/composer/l1` : `${ORIGIN}:9556`),
-  /** L2 proxy RPC — intercepts eth_sendRawTransaction for withdrawal detection */
+  /** L2 proxy RPC — intercepts eth_sendRawTransaction for L2→L1 cross-chain call detection */
   l2ProxyRpc: params.get("l2proxy") || (IS_PROXIED ? `${ORIGIN}/composer/l2` : `${ORIGIN}:9548`),
 
   /** BasedRollup contract address — loaded from /shared/rollup.env or URL param */
@@ -65,10 +65,10 @@ export const L1_CHAIN = {
 };
 
 /** L2 chain definition for wallet_addEthereumChain — populated at runtime.
- * Uses the L2 proxy RPC (port 9548) so that withdrawals go through the
- * hold-then-forward proxy which detects Bridge.bridgeEther(0) and queues
- * withdrawal entries before forwarding to the builder. Regular L2 txs
- * work identically through the proxy (it only intercepts withdrawals). */
+ * Uses the L2 composer RPC (port 9548) so that L2→L1 cross-chain calls go
+ * through the hold-then-forward composer which detects executeCrossChainCall
+ * and queues entries before forwarding to the builder. Regular L2 txs
+ * work identically through the composer (it only intercepts cross-chain calls). */
 export const L2_CHAIN = {
   chainId: "0xa455", // default 42069, auto-detected on init
   chainName: "Based Rollup L2",

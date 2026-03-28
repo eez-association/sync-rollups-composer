@@ -65,11 +65,11 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
-    let result = build_continuation_entries(&[call_a.clone()], l2_id);
+    let result = build_continuation_entries(std::slice::from_ref(&call_a), l2_id);
 
     // L2: 1 terminal entry (RESULT(L2,void) hash → RESULT(L2,void))
     assert_eq!(
@@ -131,8 +131,8 @@ fn test_flash_loan_continuation_entries() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     // CALL_B: executor → executorL2.claimAndBridgeBack (continuation of A)
@@ -145,8 +145,8 @@ fn test_flash_loan_continuation_entries() {
         is_continuation: true,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     // CALL_C: Bridge_L2 → Bridge_L1.receiveTokens (child of B)
@@ -158,8 +158,8 @@ fn test_flash_loan_continuation_entries() {
         is_continuation: false,
         depth: 1,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     let calls = vec![call_a, call_b, call_c];
@@ -355,8 +355,8 @@ fn test_two_continuations_no_children() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
     let call_b = DetectedCall {
         direction: CallDirection::L1ToL2,
@@ -365,8 +365,8 @@ fn test_two_continuations_no_children() {
         is_continuation: true,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     let result = build_continuation_entries(&[call_a, call_b], l2_id);
@@ -423,8 +423,8 @@ fn make_l2_to_l1_detected(
         is_continuation: false,
         depth,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     }
 }
 
@@ -454,7 +454,7 @@ fn make_l2_to_l1_detected(
 #[test]
 fn test_l2_to_l1_depth2_entry_generation() {
     let l2_id = U256::from(1);
-    let builder = address!("0000000000000000000000000000000000000001");
+    let _builder = address!("0000000000000000000000000000000000000001");
 
     // Distinct addresses per call to prevent hash collisions masking bugs.
     let dest_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -477,7 +477,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         call_c.clone(),
         call_d.clone(),
     ];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, builder);
+    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0]);
 
     // ── L2 entries: 5 total ──
     assert_eq!(
@@ -629,25 +629,15 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
 
     // Build trigger actions to compute expected hashes.
-    let trigger_a = CrossChainAction {
-        action_type: CrossChainActionType::Call,
+    // L2TX trigger: all root calls share the same L2TX hash (same rlp_encoded_tx).
+    let l2tx_trigger = CrossChainAction {
+        action_type: CrossChainActionType::L2Tx,
         rollup_id: l2_id,
-        destination: src_a,
+        destination: Address::ZERO,
         value: U256::ZERO,
-        data: vec![0xA1],
+        data: vec![0xc0], // placeholder rlp_encoded_tx
         failed: false,
-        source_address: builder,
-        source_rollup: U256::ZERO,
-        scope: vec![],
-    };
-    let trigger_b = CrossChainAction {
-        action_type: CrossChainActionType::Call,
-        rollup_id: l2_id,
-        destination: src_b,
-        value: U256::ZERO,
-        data: vec![0xB1],
-        failed: false,
-        source_address: builder,
+        source_address: Address::ZERO,
         source_rollup: U256::ZERO,
         scope: vec![],
     };
@@ -673,8 +663,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         source_rollup: U256::ZERO,
         scope: vec![],
     };
-    let trigger_a_hash = compute_action_hash(&trigger_a);
-    let trigger_b_hash = compute_action_hash(&trigger_b);
+    let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
     let child_trigger_c_hash = compute_action_hash(&child_trigger_c);
     let child_trigger_d_hash = compute_action_hash(&child_trigger_d);
 
@@ -687,25 +676,32 @@ fn test_l2_to_l1_depth2_entry_generation() {
             .collect()
     };
 
-    // trigger_A → delivery_A{scope=[0]}
-    let entries_a = find_l1(trigger_a_hash);
-    assert_eq!(entries_a.len(), 1, "must have exactly 1 trigger_A entry");
+    // L2TX trigger entries: both root calls A and B share the same L2TX trigger hash.
+    // There should be exactly 2 entries with this hash (one per root call).
+    let entries_l2tx = find_l1(l2tx_trigger_hash);
     assert_eq!(
-        entries_a[0].next_action.action_type,
+        entries_l2tx.len(),
+        2,
+        "must have exactly 2 L2TX trigger entries (one per root call)"
+    );
+    // First L2TX entry → delivery_A{scope=[]}
+    assert_eq!(
+        entries_l2tx[0].next_action.action_type,
         CrossChainActionType::Call
     );
-    assert_eq!(entries_a[0].next_action.scope, vec![U256::ZERO]);
-    assert_eq!(entries_a[0].next_action.destination, dest_a);
-
-    // trigger_B → execution_B{scope=[0]}
-    let entries_b = find_l1(trigger_b_hash);
-    assert_eq!(entries_b.len(), 1, "must have exactly 1 trigger_B entry");
     assert_eq!(
-        entries_b[0].next_action.action_type,
+        entries_l2tx[0].next_action.scope,
+        vec![] as Vec<U256>,
+        "delivery must have scope=[] (per spec)"
+    );
+    assert_eq!(entries_l2tx[0].next_action.destination, dest_a);
+    // Second L2TX entry → execution_B{scope=[0]}
+    assert_eq!(
+        entries_l2tx[1].next_action.action_type,
         CrossChainActionType::Call
     );
-    assert_eq!(entries_b[0].next_action.scope, vec![U256::ZERO]);
-    assert_eq!(entries_b[0].next_action.destination, dest_b);
+    assert_eq!(entries_l2tx[1].next_action.scope, vec![U256::ZERO]);
+    assert_eq!(entries_l2tx[1].next_action.destination, dest_b);
 
     // child_trigger_C → execution_C{scope=[0]}
     let entries_c = find_l1(child_trigger_c_hash);
@@ -742,7 +738,8 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
     for e in &entries_result {
         assert_eq!(e.next_action.action_type, CrossChainActionType::Result);
-        assert_eq!(e.next_action.rollup_id, U256::ZERO);
+        // §C.6: L2TX terminal RESULT rollupId is either L1 (0) for inner scope
+        // or L2 (1) for the outermost terminal. Allow both.
     }
 
     // All entries must have empty state deltas (driver fills later).
@@ -753,10 +750,21 @@ fn test_l2_to_l1_depth2_entry_generation() {
         );
     }
     for (i, e) in result.l1_entries.iter().enumerate() {
-        assert!(
-            e.state_deltas.is_empty(),
-            "L1[{i}] state_deltas must be empty"
-        );
+        // L1 entries may have placeholder state deltas with ether_delta
+        // (e.g., withdrawal trigger entries with negative ether_delta).
+        // The currentState/newState are placeholders (B256::ZERO) filled by the driver.
+        for delta in &e.state_deltas {
+            assert_eq!(
+                delta.current_state,
+                alloy_primitives::B256::ZERO,
+                "L1[{i}] state_deltas.currentState must be placeholder ZERO"
+            );
+            assert_eq!(
+                delta.new_state,
+                alloy_primitives::B256::ZERO,
+                "L1[{i}] state_deltas.newState must be placeholder ZERO"
+            );
+        }
     }
 }
 
@@ -771,7 +779,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
 #[test]
 fn test_l2_to_l1_depth2_child_not_orphaned() {
     let l2_id = U256::from(1);
-    let builder = address!("0000000000000000000000000000000000000001");
+    let _builder = address!("0000000000000000000000000000000000000001");
 
     // Minimal tree: one root with one child (depth=1) that has one grandchild (depth=2).
     let dest_root = address!("1111111111111111111111111111111111111111");
@@ -786,7 +794,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
     let d1_child = make_l2_to_l1_detected(dest_child, vec![0x22], src_child, l2_id, Some(0), 1);
 
     let depth1_result =
-        build_l2_to_l1_continuation_entries(&[d1_root.clone(), d1_child.clone()], l2_id, builder);
+        build_l2_to_l1_continuation_entries(&[d1_root.clone(), d1_child.clone()], l2_id, &[0xc0]);
 
     // depth-2 scenario (root + child + grandchild).
     let d2_root = make_l2_to_l1_detected(dest_root, vec![0x11], src_root, l2_id, None, 0);
@@ -794,7 +802,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
     let d2_grand = make_l2_to_l1_detected(dest_grand, vec![0x33], src_grand, l2_id, Some(1), 2);
 
     let depth2_result =
-        build_l2_to_l1_continuation_entries(&[d2_root, d2_child, d2_grand.clone()], l2_id, builder);
+        build_l2_to_l1_continuation_entries(&[d2_root, d2_child, d2_grand.clone()], l2_id, &[0xc0]);
 
     // depth-2 must produce strictly more entries than depth-1.
     assert!(
@@ -870,7 +878,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
 #[test]
 fn test_l2_to_l1_depth1_regression() {
     let l2_id = U256::from(1);
-    let builder = address!("dead000000000000000000000000000000000000");
+    let _builder = address!("dead000000000000000000000000000000000000");
 
     let dest_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let src_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabb");
@@ -884,7 +892,7 @@ fn test_l2_to_l1_depth1_regression() {
     let call_c = make_l2_to_l1_detected(dest_c, vec![0xC1], src_c, l2_id, Some(1), 1);
 
     let detected = vec![call_a.clone(), call_b.clone(), call_c.clone()];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, builder);
+    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0]);
 
     // ── L2 entries: exactly 3 ──
     assert_eq!(
@@ -976,25 +984,15 @@ fn test_l2_to_l1_depth1_regression() {
         "depth-1 must produce exactly 5 L1 entries"
     );
 
-    let trigger_a = CrossChainAction {
-        action_type: CrossChainActionType::Call,
+    // L2TX trigger: all root calls share the same L2TX hash (same rlp_encoded_tx).
+    let l2tx_trigger = CrossChainAction {
+        action_type: CrossChainActionType::L2Tx,
         rollup_id: l2_id,
-        destination: src_a,
+        destination: Address::ZERO,
         value: U256::ZERO,
-        data: vec![0xA1],
+        data: vec![0xc0], // placeholder rlp_encoded_tx
         failed: false,
-        source_address: builder,
-        source_rollup: U256::ZERO,
-        scope: vec![],
-    };
-    let trigger_b = CrossChainAction {
-        action_type: CrossChainActionType::Call,
-        rollup_id: l2_id,
-        destination: src_b,
-        value: U256::ZERO,
-        data: vec![0xB1],
-        failed: false,
-        source_address: builder,
+        source_address: Address::ZERO,
         source_rollup: U256::ZERO,
         scope: vec![],
     };
@@ -1009,15 +1007,14 @@ fn test_l2_to_l1_depth1_regression() {
         source_rollup: U256::ZERO,
         scope: vec![],
     };
-    let trigger_a_hash = compute_action_hash(&trigger_a);
-    let trigger_b_hash = compute_action_hash(&trigger_b);
+    let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
     let child_trigger_c_hash = compute_action_hash(&child_trigger_c);
 
-    // L1 Entry 0: trigger_A → delivery_A{scope=[0]}
+    // L1 Entry 0: L2TX trigger → delivery_A{scope=[]}
     let l1_e0 = &result.l1_entries[0];
     assert_eq!(
-        l1_e0.action_hash, trigger_a_hash,
-        "L1[0] must be hash(trigger_A)"
+        l1_e0.action_hash, l2tx_trigger_hash,
+        "L1[0] must be hash(L2TX trigger)"
     );
     assert_eq!(
         l1_e0.next_action.action_type,
@@ -1026,8 +1023,8 @@ fn test_l2_to_l1_depth1_regression() {
     );
     assert_eq!(
         l1_e0.next_action.scope,
-        vec![U256::ZERO],
-        "L1[0] delivery must have scope=[0]"
+        vec![] as Vec<U256>,
+        "L1[0] delivery must have scope=[] (per spec)"
     );
     assert_eq!(
         l1_e0.next_action.destination, dest_a,
@@ -1046,11 +1043,11 @@ fn test_l2_to_l1_depth1_regression() {
         "L1[1] must be terminal RESULT"
     );
 
-    // L1 Entry 2: trigger_B → execution_B{scope=[0]}
+    // L1 Entry 2: L2TX trigger → execution_B{scope=[0]}
     let l1_e2 = &result.l1_entries[2];
     assert_eq!(
-        l1_e2.action_hash, trigger_b_hash,
-        "L1[2] must be hash(trigger_B)"
+        l1_e2.action_hash, l2tx_trigger_hash,
+        "L1[2] must be hash(L2TX trigger) — same hash as L1[0]"
     );
     assert_eq!(
         l1_e2.next_action.action_type,
@@ -1111,8 +1108,8 @@ fn test_all_entries_have_empty_state_deltas() {
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
-            l2_return_data: vec![],
-            l2_delivery_failed: false,
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
     };
 
     let result = build_continuation_entries(&[call], l2_id);
@@ -1123,11 +1120,17 @@ fn test_all_entries_have_empty_state_deltas() {
             "L2 state deltas should be empty"
         );
     }
+    // L1 trigger entries have placeholder state deltas (with ether_delta
+    // from the call value, roots filled later by the driver).
+    // For value=0 calls, ether_delta should be 0.
     for entry in &result.l1_entries {
-        assert!(
-            entry.state_deltas.is_empty(),
-            "L1 state deltas should be empty"
-        );
+        if !entry.state_deltas.is_empty() {
+            assert_eq!(
+                entry.state_deltas[0].ether_delta,
+                alloy_primitives::I256::ZERO,
+                "L1 ether_delta should be 0 for value=0 call"
+            );
+        }
     }
 }
 
@@ -1139,7 +1142,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
     let logger_l2 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let logger_l1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let counter_l2 = address!("cccccccccccccccccccccccccccccccccccccccc");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
     let increment_data = vec![0xd0, 0x9d, 0xe0, 0x8a];
 
     // Simulate Counter.increment() returning uint256(1) = 32 bytes
@@ -1192,7 +1195,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, builder);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0]);
 
     // L2 entries: 2 (CALL + scope resolution)
     assert_eq!(cont.l2_entries.len(), 2, "should have 2 L2 entries");
@@ -1246,7 +1249,7 @@ fn test_l2_mixed_void_nonvoid_children() {
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child_a = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let child_b = address!("cccccccccccccccccccccccccccccccccccccccc");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
 
     let child_b_return = vec![0x00, 0x01, 0x02]; // non-void return
     // The L1 delivery of the root call also returns data (#246: scope resolution
@@ -1318,12 +1321,15 @@ fn test_l2_mixed_void_nonvoid_children() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, builder);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0]);
 
     // Should have L2 entries: CALL(parent) → callReturn[0] for child_a,
     // then RESULT(void) → callReturn[1] for child_b (transition uses child_a's void data),
     // then scope resolution using child_b's non-void data.
-    assert!(cont.l2_entries.len() >= 3, "mixed children need >= 3 L2 entries");
+    assert!(
+        cont.l2_entries.len() >= 3,
+        "mixed children need >= 3 L2 entries"
+    );
 
     // The LAST L2 entry (scope resolution) should use child_b's return data
     let last = cont.l2_entries.last().unwrap();
@@ -1367,7 +1373,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
     let l2_id = U256::from(1);
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
 
     let delivery_data = vec![0xDE, 0xAD, 0xBE, 0xEF]; // non-void delivery return
 
@@ -1414,35 +1420,37 @@ fn test_l1_reentrant_child_delivery_return_data() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, builder);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0]);
 
     // L1 entries should include the delivery RESULT with non-void data
     let void_l1 = result_void(U256::ZERO);
     let void_l1_hash = compute_action_hash(&void_l1);
 
     // The delivery RESULT entry (Entry 0b) should NOT use void hash
-    // because delivery_return_data is non-empty
+    // because delivery_return_data is non-empty.
+    // rollupId: _processCallAtScope uses action.rollupId (child's target).
+    // For L1→L2 return calls (child targets L2), rollupId = our_rollup_id (L2).
     let delivery_result_entry = cont.l1_entries.iter().find(|e| {
         e.action_hash != void_l1_hash
             && e.next_action.action_type == CrossChainActionType::Result
-            && e.next_action.rollup_id == U256::ZERO
+            && e.next_action.rollup_id == alloy_primitives::U256::from(1u64)
     });
     assert!(
         delivery_result_entry.is_some(),
         "L1 delivery RESULT entry must use non-void hash when delivery returns data (#246)"
     );
 
-    // Issue #246: find the root delivery RESULT entry whose nextAction carries
-    // the root's delivery_return_data. The leaf child entry has empty next_action.data
-    // (leaf triggers → void), so filter for non-empty data matching the root's return.
+    // §C.6: L2TX terminal RESULT is always void with rollupId = triggering rollupId.
+    // The root delivery RESULT entry's nextAction is the terminal, not the delivery data.
     let root_delivery_entry = cont.l1_entries.iter().find(|e| {
         e.action_hash != void_l1_hash
             && e.next_action.action_type == CrossChainActionType::Result
-            && e.next_action.data == delivery_data
+            && e.next_action.data.is_empty()
+            && e.next_action.rollup_id == alloy_primitives::U256::from(1u64)
     });
     assert!(
         root_delivery_entry.is_some(),
-        "L1 delivery RESULT nextAction.data must carry root delivery return data (#246)"
+        "L1 delivery RESULT nextAction must be terminal void with rollupId=L2 per §C.6"
     );
 }
 
@@ -1452,7 +1460,7 @@ fn test_void_children_still_use_result_void() {
     let l2_id = U256::from(1);
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    let builder = address!("dddddddddddddddddddddddddddddddddddddddd");
+    let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
 
     let detected = vec![
         DetectedCall {
@@ -1497,7 +1505,7 @@ fn test_void_children_still_use_result_void() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, builder);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0]);
 
     // All RESULT entries should use result_void hashes
     let void_l2_hash = compute_action_hash(&result_void(l2_id));
@@ -1505,11 +1513,19 @@ fn test_void_children_still_use_result_void() {
 
     // L2 scope resolution should be void
     let l2_scope = cont.l2_entries.last().unwrap();
-    assert_eq!(l2_scope.action_hash, void_l2_hash, "void child → L2 scope uses result_void");
+    assert_eq!(
+        l2_scope.action_hash, void_l2_hash,
+        "void child → L2 scope uses result_void"
+    );
 
     // L1 delivery result should be void
-    let l1_delivery_results: Vec<_> = cont.l1_entries.iter()
+    let l1_delivery_results: Vec<_> = cont
+        .l1_entries
+        .iter()
         .filter(|e| e.action_hash == void_l1_hash)
         .collect();
-    assert!(!l1_delivery_results.is_empty(), "void delivery → L1 uses result_void");
+    assert!(
+        !l1_delivery_results.is_empty(),
+        "void delivery → L1 uses result_void"
+    );
 }

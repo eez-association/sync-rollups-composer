@@ -864,10 +864,8 @@ fn test_proposer_url_synced_on_failover_to_fallback() {
 
     // Simulate: using_fallback=true, config has fallback → target is fallback URL
     let using_fallback = true;
-    let l1_rpc_url_fallback: Option<&str> = Some(fallback_url);
-
     let target_url = if using_fallback {
-        l1_rpc_url_fallback.unwrap_or(primary_url)
+        fallback_url
     } else {
         primary_url
     };
@@ -882,11 +880,9 @@ fn test_proposer_url_synced_on_switch_back_to_primary() {
     let fallback_url = "http://fallback:9545";
 
     let using_fallback = false;
-    let l1_rpc_url_fallback: Option<&str> = Some(fallback_url);
-    let _ = l1_rpc_url_fallback; // suppress unused warning
 
     let target_url = if using_fallback {
-        l1_rpc_url_fallback.unwrap_or(primary_url)
+        fallback_url
     } else {
         primary_url
     };
@@ -900,10 +896,10 @@ fn test_proposer_url_sync_no_fallback_configured() {
     let primary_url = "http://primary:8545";
 
     let using_fallback = true;
-    let l1_rpc_url_fallback: Option<&str> = None;
 
     let target_url = if using_fallback {
-        l1_rpc_url_fallback.unwrap_or(primary_url)
+        // No fallback configured → use primary
+        primary_url
     } else {
         primary_url
     };
@@ -937,6 +933,7 @@ fn test_gap_fill_block_at_block_1_uses_deployment_context() {
         transactions: Bytes::new(),
         is_empty: true,
         execution_entries: vec![],
+        filtering: None,
     };
 
     assert!(gap_block.is_empty);
@@ -995,6 +992,7 @@ fn test_gap_fill_block_still_checks_l1_context() {
         transactions: Bytes::new(),
         is_empty: true,
         execution_entries: vec![],
+        filtering: None,
     };
 
     // Gap-fill blocks are identified by B256::ZERO state root
@@ -1108,12 +1106,15 @@ fn test_rewind_cycle_dampening_delay_caps_at_60_seconds() {
         assert!(delay <= 60, "delay {delay} exceeds cap at cycle {cycles}");
         assert!(delay >= 4, "delay {delay} below minimum at cycle {cycles}");
     }
-    assert_eq!((2u64 << 1u32.min(5)).min(60), 4);
-    assert_eq!((2u64 << 2u32.min(5)).min(60), 8);
-    assert_eq!((2u64 << 3u32.min(5)).min(60), 16);
-    assert_eq!((2u64 << 4u32.min(5)).min(60), 32);
-    assert_eq!((2u64 << 5u32.min(5)).min(60), 60); // 64 capped to 60
-    assert_eq!((2u64 << 6u32.min(5)).min(60), 60); // min(5) → same as 5
+    // Spot-check specific cycles (formula: (2 << cycles.min(5)).min(60))
+    // Use black_box to prevent compile-time constant folding (clippy unnecessary_min_or_max)
+    let bb = std::hint::black_box;
+    assert_eq!((2u64 << bb(1u32).min(5)).min(60), 4); // cycles=1
+    assert_eq!((2u64 << bb(2u32).min(5)).min(60), 8); // cycles=2
+    assert_eq!((2u64 << bb(3u32).min(5)).min(60), 16); // cycles=3
+    assert_eq!((2u64 << bb(4u32).min(5)).min(60), 32); // cycles=4
+    assert_eq!((2u64 << bb(5u32).min(5)).min(60), 60); // cycles=5: 64 capped
+    assert_eq!((2u64 << bb(6u32).min(5)).min(60), 60); // cycles=6: min(5)→5
 }
 
 #[test]
@@ -1412,13 +1413,11 @@ fn test_parent_beacon_block_root_carries_l1_hash() {
     // Driver sets: parent_beacon_block_root: Some(l1_block_hash)
     // EVM config reads: self.inner.ctx.parent_beacon_block_root → Some(hash) → hash
     // No transformation needed — it's a direct B256 passthrough
-    let carried = Some(l1_hash);
-    let decoded = carried.unwrap_or(B256::ZERO);
+    let decoded = l1_hash;
     assert_eq!(decoded, l1_hash);
 
     // None case: falls back to B256::ZERO
-    let none_case: Option<B256> = None;
-    let decoded_none = none_case.unwrap_or(B256::ZERO);
+    let decoded_none = B256::ZERO;
     assert_eq!(decoded_none, B256::ZERO);
 }
 
@@ -1448,6 +1447,7 @@ fn test_gap_fill_l1_context_mismatch_detected() {
         transactions: Bytes::new(),
         is_empty: true,
         execution_entries: vec![],
+        filtering: None,
     };
 
     // The derived L1 context (95) differs from what the builder would have used (100).
@@ -2375,10 +2375,7 @@ fn test_flush_to_l1_single_call() {
     // combines block submission and cross-chain entry posting into
     // a single submit_to_l1 call. This test documents the unified
     // submission approach.
-    let mut call_order: Vec<&str> = Vec::new();
-
-    // Simulate the step_builder flow
-    call_order.push("flush_to_l1");
+    let call_order: Vec<&str> = vec!["flush_to_l1"];
 
     assert_eq!(call_order[0], "flush_to_l1");
     assert_eq!(
@@ -2500,10 +2497,7 @@ fn test_cross_chain_disabled_no_entries_built_even_with_nonzero_tx_count() {
 fn test_flush_ordering_includes_forward_queued_l1_txs() {
     // The driver calls flush_to_l1() which on success calls forward_queued_l1_txs.
     // submit_to_l1 must land BEFORE user L1 txs.
-    let mut call_order: Vec<&str> = Vec::new();
-
-    call_order.push("flush_to_l1");
-    call_order.push("forward_queued_l1_txs");
+    let call_order: Vec<&str> = vec!["flush_to_l1", "forward_queued_l1_txs"];
 
     assert_eq!(call_order[0], "flush_to_l1");
     assert_eq!(call_order[1], "forward_queued_l1_txs");
@@ -2815,7 +2809,7 @@ fn test_flush_to_l1_unified_submission() {
     // flush_to_l1 combines blocks and cross-chain entries into a single
     // submit_to_l1 call. After success, forward_queued_l1_txs is called.
     // This avoids nonce coordination issues between separate submissions.
-    let call_order = vec![
+    let call_order = [
         "flush_to_l1",           // submit_to_l1(blocks, entries, proof) — single nonce
         "forward_queued_l1_txs", // user txs — different signer
     ];
@@ -3445,7 +3439,7 @@ fn test_immutable_ceiling_skips_verification() {
     // After restart, ceiling resets to 0 — no blocks skipped
     let ceiling_after_restart = 0u64;
     assert!(
-        !(1u64 <= ceiling_after_restart),
+        1u64 > ceiling_after_restart,
         "block 1 should NOT be skipped when ceiling is 0 (fresh start)"
     );
 }
@@ -3530,6 +3524,7 @@ fn test_hold_cleared_on_verification_match() {
 fn test_hold_cleared_on_clear_pending_state() {
     // On rewind, clear_pending_state clears the hold.
     let mut hold: Option<u64> = Some(42);
+    assert!(hold.is_some(), "hold starts active");
     // Simulate clear_pending_state
     hold = None;
     assert!(
@@ -3628,6 +3623,8 @@ fn test_full_rewind_cycle_state_transitions() {
     let mut hold: Option<u64> = None;
     let mut mode = DriverMode::Builder;
     let mut pending: VecDeque<PendingBlock> = VecDeque::new();
+    assert_eq!(mode, DriverMode::Builder);
+    assert!(hold.is_none(), "hold starts inactive");
 
     hold = Some(100); // Entry block 100 posted
     assert_eq!(hold, Some(100));
@@ -3649,6 +3646,7 @@ fn test_full_rewind_cycle_state_transitions() {
     // Step 3: Derivation detects mismatch → rewind
     // (verify_local_block_matches_l1 returns Err → mode switches to Sync)
     mode = DriverMode::Sync;
+    assert_eq!(mode, DriverMode::Sync);
 
     // Step 4: clear_pending_state during rewind
     pending.clear();
@@ -3710,6 +3708,7 @@ fn test_consecutive_rewind_backoff_with_hold() {
     // The hold is cleared by clear_pending_state during rewind — no interference.
     let mut consecutive_rewind_cycles: u32 = 0;
     let mut hold: Option<u64> = Some(42);
+    assert!(hold.is_some(), "hold starts active");
 
     // Simulate: mismatch detected, rewind triggered
     consecutive_rewind_cycles = consecutive_rewind_cycles.saturating_add(1);

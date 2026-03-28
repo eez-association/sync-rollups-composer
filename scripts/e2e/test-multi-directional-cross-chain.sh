@@ -103,9 +103,7 @@ start_timer
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SRC="$REPO_ROOT/contracts/test-multi-call/src"
 
-# Deploy MockERC20 token on L1 (using Counter bytecode as a simple test — in real test use proper token)
-# For this test we use cast send --create with precompiled bytecodes
-# Deploy Counter on L2 for the proxy call test
+# Deploy Counter on L2
 COUNTER_BC="0x6080604052348015600f57600080fd5b5061017f8061001f6000396000f3fe608060405234801561001057600080fd5b50600436106100365760003560e01c806361bc221a1461003b578063d09de08a14610059575b600080fd5b610043610077565b60405161005091906100b7565b60405180910390f35b61006161007d565b60405161006e91906100b7565b60405180910390f35b60005481565b600080600081548092919061009190610101565b9190505550600054905090565b6000819050919050565b6100b18161009e565b82525050565b60006020820190506100cc60008301846100a8565b92915050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052601160045260246000fd5b600061010c8261009e565b91507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff820361013e5761013d6100d2565b5b60018201905091905056fea26469706673582212203dcec02a2fe7260919dd7cb86d1128a36e74ee651874f6f0a26f8e688fd7407764736f6c63430008210033"
 
 echo "Deploying L2 Counter..."
@@ -113,12 +111,14 @@ C_L2_RESULT=$(cast send --rpc-url "$L2_RPC" --private-key "$TEST_KEY" --create "
 C_L2=$(echo "$C_L2_RESULT" | grep -oP '"contractAddress"\s*:\s*"\K[^"]+' || echo "")
 echo "  L2 Counter: $C_L2"
 
-# Deploy BridgeWrapper on L1
-echo "Deploying BridgeWrapper..."
-BW_RESULT=$(forge create --rpc-url "$L1_RPC" --private-key "$TEST_KEY" --broadcast \
-    --root "$REPO_ROOT" "contracts/test-multi-call/src/BridgeWrapper.sol:BridgeWrapper" 2>&1)
-BW=$(echo "$BW_RESULT" | grep "Deployed to:" | awk '{print $3}')
-echo "  BridgeWrapper: $BW"
+# Deploy MockERC20 on L1 (1M tokens to deployer)
+echo "Deploying MockERC20 on L1..."
+TOKEN_RESULT=$(forge create --rpc-url "$L1_RPC" --private-key "$TEST_KEY" --broadcast \
+    --root "$REPO_ROOT" \
+    "contracts/test-multi-call/src/MockERC20.sol:MockERC20" \
+    --constructor-args "Test Token" "TT" "1000000000000000000000000" 2>&1)
+TOKEN_L1=$(echo "$TOKEN_RESULT" | grep "Deployed to:" | awk '{print $3}')
+echo "  MockERC20: $TOKEN_L1"
 
 # Deploy BridgeThenCall on L1
 echo "Deploying BridgeThenCall..."
@@ -136,8 +136,12 @@ C_L2_PROXY=$(cast call --rpc-url "$L1_RPC" \
     "$ROLLUPS_ADDRESS" "computeCrossChainProxyAddress(address,uint256)(address)" "$C_L2" "$ROLLUP_ID" 2>/dev/null)
 echo "  L2 Counter proxy: $C_L2_PROXY"
 
-# Mint test token on L1 (use the bridge to create a MockERC20 - actually use bridgeEther pattern)
-# For simplicity, we test with the Counter proxy (cross-chain calls, not token bridge)
+# Approve BridgeThenCall to spend tokens
+BRIDGE_AMOUNT="1000000000000000000"  # 1 token
+echo "Approving BridgeThenCall to spend tokens..."
+cast send --rpc-url "$L1_RPC" --private-key "$TEST_KEY" \
+    "$TOKEN_L1" "approve(address,uint256)" "$BTC" "$BRIDGE_AMOUNT" \
+    --gas-limit 100000 > /dev/null 2>&1
 
 print_elapsed "DEPLOY"
 
@@ -166,16 +170,14 @@ echo "  TEST B: BridgeThenCall (bridge + proxy)"
 echo "========================================"
 start_timer
 
-COUNTER_BEFORE=$(cast call --rpc-url "$L2_RPC" "$C_L2" "counter()(uint256)" 2>/dev/null)
+COUNTER_BEFORE=$(cast call --rpc-url "$L2_RPC" "$C_L2" "counter()(uint256)" 2>/dev/null | awk '{print $1}')
 
+# BridgeThenCall does: transferFrom(token) + approve(bridge) + bridgeTokens + proxy.call(increment)
+# This creates 2 L1→L2 cross-chain calls in one tx: bridge deposit + counter increment
 STATUS_B=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
     "$BTC" "bridgeThenCallProxy(address,uint256,address,uint256,address,address,bytes)" \
-    "0x0000000000000000000000000000000000000000" 0 "$BRIDGE_ADDR" "$ROLLUP_ID" "$TEST_ADDR" "$C_L2_PROXY" "0xd09de08a" \
+    "$TOKEN_L1" "$BRIDGE_AMOUNT" "$BRIDGE_ADDR" "$ROLLUP_ID" "$TEST_ADDR" "$C_L2_PROXY" "0xd09de08a" \
     --gas-limit 3000000 2>&1 | grep "^status" | awk '{print $2}')
-
-# Note: bridging address(0) with amount=0 is just a no-op bridge, the point is the proxy call
-# Actually BridgeThenCall requires bridgeAmount > 0 for transferFrom. Let me use bridgeEther approach.
-# For now just test the proxy call works via direct cast send
 
 echo "  TX status: $STATUS_B"
 
@@ -183,7 +185,7 @@ wait_for_pending_zero 60 >/dev/null || true
 L2_BLK=$(get_block_number "$L2_RPC")
 wait_for_block_advance "$L2_RPC" "$L2_BLK" 3 60 >/dev/null || true
 
-COUNTER_AFTER=$(cast call --rpc-url "$L2_RPC" "$C_L2" "counter()(uint256)" 2>/dev/null)
+COUNTER_AFTER=$(cast call --rpc-url "$L2_RPC" "$C_L2" "counter()(uint256)" 2>/dev/null | awk '{print $1}')
 echo "  Counter: $COUNTER_BEFORE → $COUNTER_AFTER"
 assert "TEST_B: Counter incremented" '[ "$COUNTER_AFTER" -gt "$COUNTER_BEFORE" ]'
 

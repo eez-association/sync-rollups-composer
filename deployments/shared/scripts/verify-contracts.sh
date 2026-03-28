@@ -13,7 +13,7 @@ SHARED_DIR="${SHARED_DIR:-/shared}"
 L1_EXPLORER="${L1_EXPLORER:-http://l1-explorer:4000}"
 L2_EXPLORER="${L2_EXPLORER:-http://l2-explorer:4000}"
 CONTRACTS_DIR="${CONTRACTS_DIR:-/app/contracts}"
-SYNC_DIR="$CONTRACTS_DIR/sync-rollups"
+SYNC_DIR="$CONTRACTS_DIR/sync-rollups-protocol"
 
 log() { echo "[verify] $*"; }
 
@@ -124,7 +124,7 @@ if [ -n "$BRIDGE_ADDRESS" ] && [ "$BRIDGE_ADDRESS" != "0x00000000000000000000000
     verify_with_retry "Bridge (L1)" \
         forge verify-contract --chain-id "$L1_CHAIN_ID" --verifier blockscout \
         --verifier-url "$L1_EXPLORER/api/" \
-        "$BRIDGE_ADDRESS" sync-rollups/src/periphery/Bridge.sol:Bridge
+        "$BRIDGE_ADDRESS" sync-rollups-protocol/src/periphery/Bridge.sol:Bridge
     cd "$SYNC_DIR"
 fi
 
@@ -158,7 +158,7 @@ if [ -n "$BRIDGE_L2_ADDRESS" ] && [ "$BRIDGE_L2_ADDRESS" != "0x00000000000000000
     verify_with_retry "Bridge (L2)" \
         forge verify-contract --chain-id 42069 --verifier blockscout \
         --verifier-url "$L2_EXPLORER/api/" \
-        "$BRIDGE_L2_ADDRESS" sync-rollups/src/periphery/Bridge.sol:Bridge
+        "$BRIDGE_L2_ADDRESS" sync-rollups-protocol/src/periphery/Bridge.sol:Bridge
     cd "$SYNC_DIR"
 fi
 

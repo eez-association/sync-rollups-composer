@@ -63,8 +63,6 @@ export interface FlashLoanState {
 const EXECUTE_SELECTOR = "0x61461954";
 // balanceOf(address) selector
 const BALANCE_OF_SELECTOR = "0x70a08231";
-// totalSupply() selector — keccak256("totalSupply()")[0:4]
-const TOTAL_SUPPLY_SELECTOR = "0x18160ddd";
 // 2,000,000 gas in hex
 const FLASH_LOAN_GAS = "0x1E8480";
 
@@ -191,12 +189,14 @@ async function loadClaimInfo(
       l1LogPromise,
     ]);
 
-    // Extract mint info from the first Transfer log (L2)
+    // Extract mint info from the LAST Transfer log (L2).
+    // Multiple flash loans may have been executed by different users.
+    // Use the last mint event (most recent) — it's the current user's NFT.
     let claimL2Block: number | null = null;
     let claimL2TxHash: string | null = null;
     let nftTokenId: string | null = null;
     if (nftLogs && nftLogs.length > 0) {
-      const log = nftLogs[0]!;
+      const log = nftLogs[nftLogs.length - 1]!;
       if (log.blockNumber) claimL2Block = parseInt(log.blockNumber, 16);
       if (log.transactionHash) claimL2TxHash = log.transactionHash;
       if (log.topics && log.topics.length >= 4) {
@@ -256,6 +256,7 @@ async function loadClaimInfo(
 export function useFlashLoan(
   log: Logger,
   sendL1ProxyTx: SendTx,
+  walletAddress?: string,
   overrides?: { executorL1?: string; executorL2?: string },
 ) {
   const [state, setState] = useState<FlashLoanState>(() => ({
@@ -332,16 +333,17 @@ export function useFlashLoan(
 
         // If deployed, check if the NFT was already claimed (totalSupply > 0 means minted).
         // The NFT is minted to the original L1 caller (via the cross-chain proxy's
-        // originalAddress), NOT to the ExecutorL2 contract — so balanceOf(executorL2)
-        // is always 0. Use totalSupply() instead to detect any mint.
-        if (deployed && nftAddress && nftAddress !== ZERO_ADDR) {
+        // Check if the CURRENT USER already has an NFT (not global totalSupply).
+        // The NFT is minted to ExecutorL2, then transferred to the user via transferFrom.
+        // Multiple users can each get their own NFT.
+        if (deployed && nftAddress && nftAddress !== ZERO_ADDR && walletAddress) {
           try {
             const nftResult = (await rpcCall(config.l2Rpc, "eth_call", [
-              { to: nftAddress, data: TOTAL_SUPPLY_SELECTOR },
+              { to: nftAddress, data: BALANCE_OF_SELECTOR + pad32(walletAddress) },
               "latest",
             ])) as string;
-            const supply = decodeUint256(nftResult);
-            if (!cancelled && supply > 0n) {
+            const balance = decodeUint256(nftResult);
+            if (!cancelled && balance > 0n) {
               setState((s) => ({ ...s, alreadyClaimed: true, nftMinted: true }));
               // Load claim details — pool balance, state roots, and NFT mint block/tx
               loadClaimInfo(tokenAddress, poolAddress, nftAddress, cancelled).then(info => {
@@ -404,6 +406,49 @@ export function useFlashLoan(
     };
   }, []);
 
+  // Re-check NFT ownership when wallet connects OR contracts become available.
+  // On page refresh: wallet may reconnect before config loads (contractsDeployed=false),
+  // so we need both deps to catch whichever arrives last.
+  const contractsDeployed = state.contractsDeployed;
+  useEffect(() => {
+    if (!walletAddress || !contractsDeployed) return;
+    const nftAddress = stateRef.current.nftAddress;
+    if (!nftAddress || nftAddress === "0x" + "0".repeat(40)) return;
+    if (stateRef.current.alreadyClaimed) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const nftResult = (await rpcCall(config.l2Rpc, "eth_call", [
+          { to: nftAddress, data: BALANCE_OF_SELECTOR + pad32(walletAddress) },
+          "latest",
+        ])) as string;
+        const balance = decodeUint256(nftResult);
+        if (!cancelled && balance > 0n) {
+          setState((s) => ({ ...s, alreadyClaimed: true, nftMinted: true, phase: "idle" }));
+          const { tokenAddress, poolAddress } = stateRef.current;
+          loadClaimInfo(tokenAddress, poolAddress, nftAddress, cancelled).then(info => {
+            if (!cancelled && info) {
+              setState((s) => ({
+                ...s,
+                poolBalanceAfter: info.poolBalance,
+                builderStateRoot: info.builderRoot,
+                fullnodeStateRoot: info.fullnodeRoot,
+                stateRootsMatch: info.builderRoot !== null && info.fullnodeRoot !== null && info.builderRoot === info.fullnodeRoot,
+                claimL1Block: info.claimL1Block,
+                claimL1TxHash: info.claimL1TxHash,
+                claimL2Block: info.claimL2Block,
+                claimL2TxHash: info.claimL2TxHash,
+                nftTokenId: info.nftTokenId,
+              }));
+            }
+          });
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [walletAddress, contractsDeployed]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function readPoolBalance(tokenAddr: string, poolAddr: string): Promise<string | null> {
     if (!tokenAddr || !poolAddr) return null;
     try {
@@ -443,13 +488,15 @@ export function useFlashLoan(
   // not the ExecutorL2 contract — so balanceOf(executorL2) is always 0.
   async function checkNftMinted(nftAddr: string): Promise<boolean> {
     if (!nftAddr || nftAddr === "0x" + "0".repeat(40)) return false;
+    // Check if the current user owns an NFT (balanceOf), not global totalSupply.
+    const userAddr = walletAddress || ESTIMATION_SENDER;
     try {
       const result = (await rpcCall(config.l2Rpc, "eth_call", [
-        { to: nftAddr, data: TOTAL_SUPPLY_SELECTOR },
+        { to: nftAddr, data: BALANCE_OF_SELECTOR + pad32(userAddr) },
         "latest",
       ])) as string;
-      const supply = decodeUint256(result);
-      return supply > 0n;
+      const balance = decodeUint256(result);
+      return balance > 0n;
     } catch {
       return false;
     }
@@ -459,7 +506,8 @@ export function useFlashLoan(
     const { executorL1, tokenAddress, poolAddress, nftAddress, alreadyClaimed } = stateRef.current;
     if (!executorL1 || !stateRef.current.contractsDeployed) return;
     if (alreadyClaimed) {
-      log("Flash loan already executed — the NFT was minted to the L2 executor contract. This demo can only run once per deployment.", "info");
+      log("Flash loan already executed — you already own an NFT from a previous run.", "info");
+      return;
     }
 
     const startTime = Date.now();
@@ -529,9 +577,6 @@ export function useFlashLoan(
 
     const poll = { receipt: null as TxReceipt | null };
     let l1PollError: string | null = null;
-    let l2PollError: string | null = null;
-
-    const targetL2Block = (l2BlockBefore ?? 0) + 3;
 
     const pollL1 = async () => {
       for (let i = 0; i < 30; i++) {
@@ -560,34 +605,22 @@ export function useFlashLoan(
       l1PollError = "L1 transaction not confirmed after 60s — check composer health";
     };
 
-    const pollL2 = async () => {
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const current = await readL2BlockNumber();
-        if (current !== null) {
-          setState((s) => ({ ...s, l2BlockAfter: current }));
-          if (current >= targetL2Block) {
-            setState((s) => ({ ...s, l2Done: true }));
-            log(`L2 advanced to block ${current} — cross-chain entries processed.`);
-            return;
-          }
-        }
-      }
-      l2PollError = "L2 did not advance 3 blocks within 90s — composer may be stuck";
-    };
+    // Flash loan is atomic on L1: postBatch + execute() in the same block.
+    // Once L1 confirms, the L2 delivery (loadTable + executeIncomingCrossChainCall)
+    // is deterministic and will happen in the next L2 block. No need to poll L2
+    // separately — just wait for L1 confirmation.
+    await pollL1();
 
-    // Run both polls concurrently
-    await Promise.all([pollL1(), pollL2()]);
+    // Mark L2 as done once L1 is confirmed (atomic guarantee).
+    if (!l1PollError && poll.receipt?.status === "0x1") {
+      const current = await readL2BlockNumber();
+      setState((s) => ({ ...s, l2Done: true, l2BlockAfter: current }));
+      log("L1 confirmed — L2 delivery guaranteed (atomic flash loan).");
+    }
 
     if (l1PollError) {
       setState((s) => ({ ...s, phase: "failed", error: l1PollError! }));
       log(l1PollError, "err");
-      return;
-    }
-
-    if (l2PollError) {
-      setState((s) => ({ ...s, phase: "failed", error: l2PollError! }));
-      log(l2PollError, "err");
       return;
     }
 
@@ -639,7 +672,8 @@ export function useFlashLoan(
       fullnodeStateRoot,
       stateRootsMatch,
       nftMinted,
-      nftTokenId: null, // token ID not discoverable without event log scanning
+      alreadyClaimed: nftMinted || s.alreadyClaimed,
+      nftTokenId: null,
       endTime,
     }));
 

@@ -2,8 +2,8 @@
 target/
 contracts/out/
 contracts/cache/
-contracts/sync-rollups/out/
-contracts/sync-rollups/cache/
+contracts/sync-rollups-protocol/out/
+contracts/sync-rollups-protocol/cache/
 
 # Git
 .git/

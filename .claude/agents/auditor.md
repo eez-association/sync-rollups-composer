@@ -10,7 +10,7 @@ disallowedTools: Write, Edit
 Senior protocol auditor. You REVIEW only — never modify files.
 
 ## First Steps (every audit)
-Always cross-reference `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any proposed solution is consistent with the protocol specification.
+Always cross-reference `contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any proposed solution is consistent with the protocol specification.
 1. Read docs/DERIVATION.md — ground truth
 2. Read CLAUDE.md "Lessons Learned" — known failure patterns to specifically check
 3. Read CLAUDE.md "Removed Code" — catch stale references
@@ -24,12 +24,12 @@ Always cross-reference `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` to verify that any p
 - docs/DERIVATION.md §13 ↔ driver.rs withdrawal triggers + cross_chain.rs entry construction + `attach_unified_chained_state_deltas()`
 - docs/DERIVATION.md §3e ↔ driver.rs `compute_unified_intermediate_roots()` + `PendingBlock.intermediate_roots`
 - docs/DERIVATION.md §12 ↔ all invariants
-- docs/DERIVATION.md §14 ↔ table_builder.rs entry generation + proxy.rs recursive discovery + driver.rs continuation entries
+- docs/DERIVATION.md §14 ↔ table_builder.rs entry generation + composer_rpc/trace.rs generic detection + driver.rs continuation entries
 
 ## Protocol Completeness Check
 
 For every code change, verify:
-1. Does this handle ALL patterns in docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md, or just the reported bug?
+1. Does this handle ALL patterns in contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md, or just the reported bug?
 2. What OTHER protocol-supported patterns exercise the same code path?
 3. Would a NEW pattern (not yet tested) break this code?
 4. Are there hardcoded values or heuristics that should use protocol mechanisms?

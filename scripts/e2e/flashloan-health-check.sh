@@ -117,7 +117,7 @@ fi
 # ── Step 0b: Build contracts ──
 echo ""
 echo "=== Step 0b: Building contracts ==="
-cd "$CONTRACTS_DIR/sync-rollups"
+cd "$CONTRACTS_DIR/sync-rollups-protocol"
 # Build ALL contracts including test (TestToken is in test/IntegrationTestFlashLoan.t.sol)
 forge build 2>&1 | tail -3
 echo "Contracts built."

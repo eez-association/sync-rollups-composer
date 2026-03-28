@@ -15,9 +15,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── Fast lint (no compilation) ─────────────────────────────────
+  # ── Phase 1: parallel, no dependencies ──────────────────────────
+
+  # Fast lint (no compilation, ~12s)
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -28,23 +31,31 @@ jobs:
           components: rustfmt
       - run: cargo +nightly fmt --all --check
 
-  # ── Build once, reuse across test jobs ─────────────────────────
-  build:
-    name: Build
+  # Build + Clippy + Unit Tests in ONE job (clippy = full build + lint)
+  build-and-lint:
+    name: Build, Lint & Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Build workspace
-        run: cargo build --workspace --all-targets
-      - name: Save build artifacts
+      - name: Clippy (includes full build)
+        run: cargo clippy --workspace --all-targets --all-features --release -- -D warnings
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Unit tests
+        run: cargo nextest run --workspace --lib
+      - name: Build release binary
+        run: cargo build --release
+      - name: Save build cache
         uses: actions/cache/save@v4
         with:
           path: |
@@ -52,184 +63,178 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
           key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: based-rollup-binary
+          path: target/release/based-rollup
+          retention-days: 1
 
-  clippy:
-    name: Clippy
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - run: cargo clippy --workspace --all-features -- -D warnings
-
-  # ── Unit tests (no external deps) ─────────────────────────────
-  unit-tests:
-    name: Unit Tests
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --lib
-
-  # ── Integration tests (need anvil + contract artifacts) ────────
-  integration-tests:
-    name: Integration Tests (EVM Executor)
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-      - name: Compile contracts
-        run: |
-          cd contracts && forge build
-          cd sync-rollups && forge build
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --test evm_executor
-
-  # ── E2E tests (need anvil + contract artifacts) ────────────────
-  e2e-tests:
-    name: E2E Tests
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-      - name: Compile contracts
-        run: |
-          cd contracts && forge build
-          cd sync-rollups && forge build
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --test e2e_anvil
-
-  # ── Docker build (validates Dockerfile, GHA cache) ─────────────
+  # Docker Build & Push — uses pre-built binary from build-and-lint (~30s vs ~15m).
+  # Fork PRs cannot push to GHCR — images are loaded locally instead.
   docker-build:
-    name: Docker Build
+    name: Docker Build & Push
+    needs: build-and-lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      rollup-image: ghcr.io/${{ github.repository }}:${{ github.sha }}
+      deploy-image: ghcr.io/${{ github.repository }}:${{ github.sha }}-deploy
     steps:
       - uses: actions/checkout@v4
+      - name: Download release binary
+        uses: actions/download-artifact@v4
         with:
-          submodules: recursive
+          name: based-rollup-binary
+          path: target/release/
+      - run: chmod +x target/release/based-rollup
       - uses: docker/setup-buildx-action@v3
-      - name: Build Docker image
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push runtime image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deployments/shared/Dockerfile
-          push: false
-          tags: sync-rollup-composer:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          file: deployments/shared/Dockerfile.ci
+          target: runtime
+          build-contexts: binary=target/release
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          load: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:latest', github.repository) || '' }}
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=runtime
+      - name: Build & push deploy image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployments/shared/Dockerfile.ci
+          target: deploy
+          build-contexts: binary=target/release
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          load: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}-deploy
+            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:deploy-latest', github.repository) || '' }}
+          cache-from: type=gha,scope=deploy
+          cache-to: type=gha,mode=max,scope=deploy
 
-  # ── Docker E2E (full stack: L1 + builder + fullnodes) ──────────
-  # Runs on push to main or manual trigger. Tests bridge deposits,
-  # cross-chain calls, and state root convergence across nodes.
+  # ── Phase 2: needs build-and-lint ───────────────────────────────
+
+  # Integration tests (need anvil + contract artifacts)
+  integration-tests:
+    name: Integration Tests (EVM Executor)
+    needs: build-and-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Restore build artifacts
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Compile contracts
+        run: |
+          rm -rf contracts/sync-rollups-protocol/lib/openzeppelin-contracts/fv/harnesses
+          cd contracts/sync-rollups-protocol && forge build --skip "fv/*"
+          cd ../.. && cd contracts && forge build --skip "fv/*" --skip "sync-rollups-protocol/visualizator/*"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run integration tests
+        run: cargo nextest run --workspace --test evm_executor
+
+  # E2E tests (need anvil + contract artifacts)
+  e2e-tests:
+    name: E2E Tests
+    needs: build-and-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Restore build artifacts
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Compile contracts
+        run: |
+          rm -rf contracts/sync-rollups-protocol/lib/openzeppelin-contracts/fv/harnesses
+          cd contracts/sync-rollups-protocol && forge build --skip "fv/*"
+          cd ../.. && cd contracts && forge build --skip "fv/*" --skip "sync-rollups-protocol/visualizator/*"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run E2E tests
+        run: cargo nextest run --workspace --test e2e_anvil
+
+  # Docker E2E (full stack: L1 + builder + fullnodes)
+  # Uses GHCR images from docker-build — no local cargo build needed.
   docker-e2e:
     name: Docker E2E
-    needs: build
+    needs: docker-build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' && inputs.run_docker_e2e
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Restore build artifacts
-        uses: actions/cache/restore@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libssl-dev cmake
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Start Docker stack
+      - name: Start Docker stack (core services only — no explorers, no crosschain-tx-sender)
         run: |
           docker compose -f deployments/testnet-eez/docker-compose.yml \
-                         -f deployments/testnet-eez/docker-compose.dev.yml up -d
+            up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender \
+            deploy-reverse-flash-loan complex-tx-sender
         env:
           COMPOSE_PROJECT_NAME: ci-e2e
+          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
+          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
       - name: Wait for builder to be healthy
         run: |
@@ -244,39 +249,210 @@ jobs:
             sleep 5
           done
           echo "FATAL: builder did not become healthy in 5 minutes"
-          docker compose -f deployments/testnet-eez/docker-compose.yml \
-                         -f deployments/testnet-eez/docker-compose.dev.yml logs builder --tail 50
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs builder --tail 50
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs deploy --tail 50
           exit 1
+        env:
+          COMPOSE_PROJECT_NAME: ci-e2e
+          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
+          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
-      - name: Wait for blocks to stabilize
-        run: sleep 30
+      - name: Wait for initial blocks
+        run: sleep 10
+
+      - name: Extract rollup.env from Docker
+        run: |
+          docker compose -f deployments/testnet-eez/docker-compose.yml \
+            exec -T builder cat /shared/rollup.env > /tmp/rollup.env
+          echo "Loaded rollup.env:"
+          head -5 /tmp/rollup.env
+        env:
+          COMPOSE_PROJECT_NAME: ci-e2e
+          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
+          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
+
+      # ── Protocol submodule forge E2E tests (run first — faster, spec-level) ──
+      # These tests are defined in contracts/sync-rollups-protocol/script/e2e/
+      # and verify that the system produces correct batch entries matching the spec.
+      # They deploy contracts, send user txs through the composer RPCs, and verify
+      # the postBatch entries and L2 execution table entries.
+
+      - name: Compile protocol contracts for forge E2E
+        run: |
+          cd contracts/sync-rollups-protocol
+          rm -rf lib/openzeppelin-contracts/fv/harnesses
+          sudo rm -rf cache out  # Docker deploy container leaves root-owned files
+          forge build --skip "fv/*"
+
+      - name: Prepare protocol E2E environment
+        run: |
+          # Extract addresses from rollup.env (already copied to /tmp/rollup.env)
+          ROLLUPS=$(grep '^ROLLUPS_ADDRESS=' /tmp/rollup.env | cut -d= -f2)
+          MANAGER_L2=$(grep '^CROSS_CHAIN_MANAGER_ADDRESS=' /tmp/rollup.env | cut -d= -f2)
+          PK="0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897"
+
+          echo "ROLLUPS=$ROLLUPS"
+          echo "MANAGER_L2=$MANAGER_L2"
+
+          if [ -z "$ROLLUPS" ] || [ -z "$MANAGER_L2" ]; then
+            echo "ERROR: Could not extract ROLLUPS or MANAGER_L2 from rollup.env"
+            exit 1
+          fi
+
+          # Persist for subsequent steps
+          echo "PROTOCOL_E2E_ROLLUPS=$ROLLUPS" >> "$GITHUB_ENV"
+          echo "PROTOCOL_E2E_MANAGER_L2=$MANAGER_L2" >> "$GITHUB_ENV"
+          echo "PROTOCOL_E2E_PK=$PK" >> "$GITHUB_ENV"
+
+          # Fund dev#10 on L1 (may already be funded by deploy.sh, but ensure it)
+          FUNDER_KEY="0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6"
+          SENDER_ADDR="0xBcd4042DE499D14e55001CcbB24a551F3b954096"
+          L1_BALANCE=$(cast balance "$SENDER_ADDR" --rpc-url http://localhost:9556 2>/dev/null || echo "0")
+          echo "Dev#10 L1 balance: $L1_BALANCE"
+          if [ "$L1_BALANCE" = "0" ]; then
+            echo "Funding dev#10 on L1..."
+            cast send --rpc-url http://localhost:9556 --private-key "$FUNDER_KEY" \
+              --value 100ether "$SENDER_ADDR" > /dev/null 2>&1
+          fi
+
+          # Run prepare-network.sh (deploys CREATE2 factories, bridges ETH to L2)
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/prepare-network.sh \
+            --l1-rpc http://localhost:9556 \
+            --l2-rpc http://localhost:9548 \
+            --pk "$PK" \
+            --rollups "$ROLLUPS"
+
+      - name: "Protocol E2E: counter (L1\u2192L2 simple)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/counter/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: counterL2 (L2\u2192L1 simple)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/counterL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: bridge (L1\u2192L2 with ETH)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/bridge/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: multi-call-twice (L1\u2192L2 two calls, same target)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/multi-call-twice/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: multi-call-two-diff (L1\u2192L2 two calls, different targets)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/multi-call-two-diff/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: nestedCounter (L1\u2192L2\u2192L1 nested scope)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/nestedCounter/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: nestedCounterL2 (L2\u2192L1\u2192L2 nested scope)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/nestedCounterL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: flash-loan (L1\u2192L2\u2192L1 with tokens)"
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/flash-loan/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      # ── Bash E2E tests (longer, integration-level) ──────────────────
 
       - name: Run bridge E2E test
         run: bash scripts/e2e/bridge-health-check.sh
+        env:
+          SHARED_DIR: /tmp
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
       - name: Run cross-chain E2E test
         run: bash scripts/e2e/crosschain-health-check.sh
+        env:
+          SHARED_DIR: /tmp
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
       - name: Run multi-call E2E test
         run: bash scripts/e2e/test-multi-call-cross-chain.sh
+        env:
+          SHARED_DIR: /tmp
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
+
+      - name: Run depth-2 generic E2E test
+        run: bash scripts/e2e/test-depth2-generic.sh
+        env:
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
+
+      - name: Run L2→L1 return data E2E test
+        run: bash scripts/e2e/test-l2-to-l1-return-data.sh
+        env:
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
+
+      - name: Run cross-chain atomicity E2E test (issue #272 — needs REVERT_CONTINUE)
+        continue-on-error: true  # Requires feature/reverts protocol support (not yet implemented)
+        run: bash scripts/e2e/test-cross-chain-atomicity.sh
+        env:
+          DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
       - name: Collect logs on failure
         if: failure()
         run: |
           echo "=== Builder logs ==="
-          docker compose -f deployments/testnet-eez/docker-compose.yml \
-                         -f deployments/testnet-eez/docker-compose.dev.yml logs builder --tail 100
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs builder --tail 100
           echo "=== Fullnode1 logs ==="
-          docker compose -f deployments/testnet-eez/docker-compose.yml \
-                         -f deployments/testnet-eez/docker-compose.dev.yml logs fullnode1 --tail 50
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs fullnode1 --tail 50
           echo "=== Deploy logs ==="
-          docker compose -f deployments/testnet-eez/docker-compose.yml \
-                         -f deployments/testnet-eez/docker-compose.dev.yml logs deploy --tail 50
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs deploy --tail 50
           echo "=== Health ==="
           curl -s http://localhost:9560/health || echo "unreachable"
+        env:
+          COMPOSE_PROJECT_NAME: ci-e2e
+          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
+          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
 
       - name: Tear down
         if: always()
         run: |
-          docker compose -f deployments/testnet-eez/docker-compose.yml \
-                         -f deployments/testnet-eez/docker-compose.dev.yml down -v
+          docker compose -f deployments/testnet-eez/docker-compose.yml down -v
+        env:
+          COMPOSE_PROJECT_NAME: ci-e2e
+          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
+          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}

@@ -1,5 +1,11 @@
 use super::*;
 
+// Bridge selectors for legacy tests — the main detection code no longer uses
+// contract-specific selectors (replaced by generic trace::walk_trace_tree), but
+// these tests validate ABI parsing and are still useful.
+const BRIDGE_ETHER_SELECTOR: [u8; 4] = [0xf4, 0x02, 0xd9, 0xf3];
+const BRIDGE_TOKENS_SELECTOR: [u8; 4] = [0x33, 0xb1, 0x5a, 0xad];
+
 #[test]
 fn test_extract_methods_single() {
     let json: Value = serde_json::json!({
@@ -220,7 +226,7 @@ fn test_cross_chain_rpc_request_structure() {
             "destination": format!("{destination}"),
             "data": calldata_hex,
             "sourceAddress": format!("{from_addr}"),
-            "sourceRollup": format!("{}", U256::from(MAINNET_ROLLUP_ID)),
+            "sourceRollup": format!("{}", U256::from(0u64)),
             "gasPrice": gas_price,
             "rawL1Tx": raw_tx
         }],
@@ -356,7 +362,7 @@ fn test_bridge_selector_mismatch_returns_early() {
 #[test]
 fn test_bridge_calldata_too_short() {
     // bridgeEther needs at least 68 bytes (4 selector + 32 rollupId + 32 destinationAddress)
-    let short_calldata = vec![0xf4, 0x02, 0xd9, 0xf3, 0x00, 0x01]; // only 6 bytes
+    let short_calldata = [0xf4, 0x02, 0xd9, 0xf3, 0x00, 0x01]; // only 6 bytes
     assert!(short_calldata.len() < 68);
 
     // bridgeTokens needs at least 132 bytes (4 selector + 32×4 args)

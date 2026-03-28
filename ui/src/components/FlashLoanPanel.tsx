@@ -186,8 +186,8 @@ function FlowDiagram({ direction, phase }: { direction: FlashLoanDirection; phas
     { label: "Loan Repaid", chain: "L1", desc: "FlashPool.onFlashLoan callback" },
   ] : [
     { label: "execute()", chain: "L2", desc: "ReverseExecutorL2" },
-    { label: "L2 Proxy", chain: "Proxy", desc: "Detect withdrawal trigger" },
-    { label: "Composer", chain: "Builder", desc: "PostBatch with withdrawal entries" },
+    { label: "L2 Composer", chain: "Proxy", desc: "Detect L2→L1 cross-chain call" },
+    { label: "Composer", chain: "Builder", desc: "PostBatch with L2→L1 entries" },
     { label: "NFT Claimed", chain: "L1", desc: "executeIncomingCrossChainCall" },
     { label: "Bridge Back", chain: "L2", desc: "Tokens return to L2 pool" },
   ];
@@ -512,7 +512,7 @@ function buildL2toL1Steps(state: ReverseFlashLoanState): ExecutionStep[] {
     },
     {
       id: "l2",
-      label: "L2 confirms + withdrawal queued",
+      label: "L2 confirms + L2→L1 call queued",
       detail: state.l2BlockNumber !== null ? (
         <span>Block {state.l2BlockNumber}{state.l2GasUsed ? ` · ${state.l2GasUsed} gas` : ""}{state.l2TxStatus === 0 ? " · REVERTED" : ""}</span>
       ) : phase === "processing" ? <span>Waiting for L2 receipt...</span> : null,
@@ -522,7 +522,7 @@ function buildL2toL1Steps(state: ReverseFlashLoanState): ExecutionStep[] {
       id: "l1",
       label: "L1 trigger fires (postBatch)",
       detail: (() => {
-        if (state.l1Done) return <span>L1 withdrawal delivery complete</span>;
+        if (state.l1Done) return <span>L1 cross-chain delivery complete</span>;
         if (phase === "processing") return <span>Waiting for builder to post batch + trigger...</span>;
         return null;
       })(),
@@ -931,11 +931,11 @@ const L1_TO_L2_SWIM: SwimEntry[] = [
 const L2_TO_L1_SWIM: SwimEntry[] = [
   { type: "step", step: { col: "l2", label: "execute()", desc: "User calls ReverseExecutorL2" } },
   { type: "arrow", arrow: { from: "l2", to: "proxy", label: "tx sent to L2 proxy" } },
-  { type: "step", step: { col: "proxy", label: "Detect Withdrawal", desc: "Intercepts Bridge.bridgeEther(0)" } },
-  { type: "arrow", arrow: { from: "proxy", to: "builder", label: "withdrawal entries + forward" } },
-  { type: "step", step: { col: "builder", label: "Build L2 block", desc: "Include withdrawal protocol tx" } },
-  { type: "arrow", arrow: { from: "builder", to: "l1", label: "postBatch + trigger" } },
-  { type: "step", step: { col: "l1", label: "executeIncomingCrossChainCall", desc: "L1 receives withdrawal trigger" } },
+  { type: "step", step: { col: "proxy", label: "Detect L2→L1 Call", desc: "Traces tx for executeCrossChainCall" } },
+  { type: "arrow", arrow: { from: "proxy", to: "builder", label: "L2→L1 entries + forward" } },
+  { type: "step", step: { col: "builder", label: "Build L2 block", desc: "Include cross-chain protocol tx" } },
+  { type: "arrow", arrow: { from: "builder", to: "l1", label: "postBatch + executeL2TX" } },
+  { type: "step", step: { col: "l1", label: "executeL2TX", desc: "L1 receives L2→L1 trigger" } },
   { type: "step", step: { col: "l1", label: "NFT Claimed on L1", desc: "ReverseNFT minted to executor" } },
   { type: "step", step: { col: "l1", label: "Complete", desc: "Cross-chain delivery verified." } },
 ];
@@ -1027,7 +1027,7 @@ function HowItWorksExpander({ direction }: { direction: FlashLoanDirection }) {
   const entries = isL1toL2 ? L1_TO_L2_SWIM : L2_TO_L1_SWIM;
   const techNote = isL1toL2
     ? "The L1 proxy simulates the tx on the L1 node to discover cross-chain calls before anything is submitted. It sends entries to the composer, which processes them on L2 before forwarding the original tx to L1. L2 executes the continuation chain before L1 even confirms."
-    : "The L2 proxy intercepts Bridge.bridgeEther(0) to detect withdrawal triggers. It queues entries via syncrollups_initiateWithdrawal BEFORE forwarding the user tx (hold-then-forward). After the L2 block is built, the builder posts a batch to L1 and fires the withdrawal trigger, which executes the cross-chain call on L1.";
+    : "The L2 composer traces the tx to detect cross-chain proxy calls (executeCrossChainCall). It queues entries BEFORE forwarding the user tx (hold-then-forward). After the L2 block is built, the builder posts a batch to L1 and fires the executeL2TX trigger, which executes the cross-chain call on L1.";
 
   return (
     <div className={`${styles.expandable} ${open ? styles.expandableOpen : ""}`}>
@@ -1247,7 +1247,7 @@ export function FlashLoanPanel({
   }
 
   const steps = isL1toL2 ? buildL1toL2Steps(state) : buildL2toL1Steps(reverseState);
-  const showSteps = activeState.phase !== "idle" || alreadyClaimed;
+  const showSteps = activeState.phase !== "idle";
   const showNft = activeState.nftMinted && (complete || alreadyClaimed);
 
   const directionLabel = isL1toL2 ? "L1 → L2" : "L2 → L1";
@@ -1323,25 +1323,27 @@ export function FlashLoanPanel({
               {isL1toL2 ? "NFT already claimed on L2" : "NFT already claimed on L1"}
             </div>
             <div className={styles.claimedDesc}>
-              This demo can only run once per deployment. See results below for details.
+              You already own a FlashLoaners NFT. See results below for details.
             </div>
           </div>
         </div>
       )}
 
-      {/* Execute button */}
-      <button
-        className={btnClass}
-        onClick={handleExecute}
-        disabled={busy || !contractsDeployed}
-        style={{ fontSize: 14, padding: "14px 20px", fontWeight: 700 }}
-      >
-        {busy ? (
-          <><span className="btn-spinner" /> {busyLabel}</>
-        ) : (
-          <><IconLightning size={15} /> {buttonLabel} ({directionLabel})</>
-        )}
-      </button>
+      {/* Execute button — hidden when NFT already claimed */}
+      {!alreadyClaimed && (
+        <button
+          className={btnClass}
+          onClick={handleExecute}
+          disabled={busy || !contractsDeployed}
+          style={{ fontSize: 14, padding: "14px 20px", fontWeight: 700 }}
+        >
+          {busy ? (
+            <><span className="btn-spinner" /> {busyLabel}</>
+          ) : (
+            <><IconLightning size={15} /> {buttonLabel} ({directionLabel})</>
+          )}
+        </button>
+      )}
 
       {/* Step tracker (only shown when active or complete) */}
       {showSteps && (

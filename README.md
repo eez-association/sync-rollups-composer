@@ -114,9 +114,10 @@ cast block --rpc-url http://localhost:9546 latest --field hash
 sync-rollup-composer/
 ├── docs/
 │   ├── DERIVATION.md                   # Normative consensus & derivation spec
-│   └── SYNC_ROLLUPS_PROTOCOL_SPEC.md   # Formal protocol spec (data model, flows)
+│   └── architecture.excalidraw         # Architecture diagram
 ├── CLAUDE.md                           # Development guide (architecture, lessons)
 ├── .claude/agents/                     # Subagent definitions
+├── contracts/sync-rollups-protocol/    # Solidity contracts submodule (includes docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md)
 ├── deployments/
 │   ├── shared/                         # Shared Dockerfiles, genesis, explorer compose, service scripts
 │   ├── testnet-eez/                    # Local devnet (reth --dev L1, chain 42069 L2)
@@ -124,7 +125,6 @@ sync-rollup-composer/
 │   ├── chiado-10200/                   # Chiado testnet deployment
 │   ├── kurtosis-1337/                  # Kurtosis PoS devnet
 │   └── ethereum-1/                     # Mainnet placeholder
-├── contracts/sync-rollups/             # Solidity contracts submodule
 ├── scripts/                            # Host-only: E2E tests, tooling
 ├── ui/                                 # React dashboard (port 8080)
 └── crates/sync-rollup-composer/src/
@@ -167,7 +167,7 @@ cargo clippy --workspace --all-features
 cargo +nightly fmt --all
 ```
 
-The 81 `e2e_anvil` tests and 9 `evm_executor` tests require `anvil` running locally and compiled contract artifacts in `contracts/sync-rollups/out/`. ~439 unit tests pass standalone.
+The 81 `e2e_anvil` tests and 9 `evm_executor` tests require `anvil` running locally and compiled contract artifacts in `contracts/sync-rollups-protocol/out/`. ~439 unit tests pass standalone.
 
 ## L1 Contracts
 
@@ -194,7 +194,7 @@ Deployed by the builder in block 1 protocol transactions (deterministic CREATE a
 | Document | Purpose |
 |----------|---------|
 | [DERIVATION.md](docs/DERIVATION.md) | Normative spec — consensus rules, block timing, derivation, §4f filtering |
-| [SYNC_ROLLUPS_PROTOCOL_SPEC.md](docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md) | Formal protocol spec — data model, entry lifecycle, scope navigation, bridge flows |
+| [SYNC_ROLLUPS_PROTOCOL_SPEC.md](contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md) | Formal protocol spec — data model, entry lifecycle, scope navigation, bridge flows |
 | [CLAUDE.md](CLAUDE.md) | Development guide — architecture, Docker workflow, dev accounts, lessons learned |
 | [deployments/testnet-eez/README.md](deployments/testnet-eez/README.md) | Devnet setup and port reference |
 
