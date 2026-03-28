@@ -129,6 +129,19 @@ if [ "$L1_BAL" = "0" ] || [ "$L1_BAL" = "0x0" ]; then
     sleep 2
 fi
 
+L2_BAL=$(cast balance --rpc-url "$L2_RPC" "$TEST_ADDR" 2>/dev/null || echo "0")
+MIN_BAL=50000000000000000
+if [ "$(printf '%d' "$L2_BAL" 2>/dev/null || echo 0)" -lt "$MIN_BAL" ] 2>/dev/null; then
+    echo "Bridging 0.5 ETH to L2..."
+    DEPOSIT_STATUS=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
+        "$BRIDGE_ADDR" "bridgeEther(uint256,address)" "$ROLLUP_ID" "$TEST_ADDR" \
+        --value 0.5ether --gas-limit 800000 2>&1 | grep "^status" | awk '{print $2}')
+    assert "Bridge deposit succeeded" '[ "$DEPOSIT_STATUS" = "1" ]'
+    L2_BLK=$(get_block_number "$L2_RPC")
+    wait_for_block_advance "$L2_RPC" "$L2_BLK" 3 60 >/dev/null || true
+    wait_for_pending_zero 60 >/dev/null || true
+fi
+
 print_elapsed "PRE-FLIGHT"
 echo ""
 

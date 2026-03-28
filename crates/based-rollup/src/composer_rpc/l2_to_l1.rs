@@ -1937,7 +1937,7 @@ async fn simulate_l1_delivery(
         let tx1_trace_str: String = serde_json::to_string(&bundle_traces[1])
             .unwrap_or_default()
             .chars()
-            .take(2000)
+            .take(8000)
             .collect();
         tracing::info!(
             target: "based_rollup::proxy",
