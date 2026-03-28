@@ -281,6 +281,7 @@ jobs:
         run: |
           cd contracts/sync-rollups-protocol
           rm -rf lib/openzeppelin-contracts/fv/harnesses
+          rm -rf cache out  # Docker deploy container may leave root-owned cache files
           forge build --skip "fv/*"
 
       - name: Prepare protocol E2E environment
