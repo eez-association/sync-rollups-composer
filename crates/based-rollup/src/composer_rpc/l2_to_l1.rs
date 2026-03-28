@@ -3130,6 +3130,7 @@ async fn extract_l1_to_l2_return_calls(
         &mut proxy_cache,
         &mut ephemeral_proxies,
         &mut detected_calls,
+        &mut std::collections::HashSet::new(),
     )
     .await;
 
@@ -3272,6 +3273,7 @@ async fn walk_l2_trace_generic(
         proxy_cache,
         &mut ephemeral_proxies,
         &mut detected_calls,
+        &mut std::collections::HashSet::new(),
     )
     .await;
 
@@ -3321,6 +3323,7 @@ async fn walk_l2_trace_for_discovered_proxy_calls(
         proxy_cache,
         &mut ephemeral_proxies,
         &mut detected_calls,
+        &mut std::collections::HashSet::new(),
     )
     .await;
 

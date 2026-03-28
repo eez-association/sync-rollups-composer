@@ -806,7 +806,7 @@ async fn simulate_l1_to_l2_call_on_l2(
 
     // Step 4: Walk trace for child L2→L1 proxy calls.
     let children = if !cross_chain_manager_address.is_zero() {
-        walk_l2_simulation_trace(
+        let (calls, _unresolved) = walk_l2_simulation_trace(
             client,
             l2_rpc_url,
             cross_chain_manager_address,
@@ -814,7 +814,8 @@ async fn simulate_l1_to_l2_call_on_l2(
             rollup_id,
             None, // no prior bundle traces for independent simulation
         )
-        .await
+        .await;
+        calls
     } else {
         Vec::new()
     };
@@ -870,7 +871,7 @@ async fn simulate_l1_to_l2_call_on_l2(
         )
         .await
         {
-            let retry_children = walk_l2_simulation_trace(
+            let (retry_children, _unresolved) = walk_l2_simulation_trace(
                 client,
                 l2_rpc_url,
                 cross_chain_manager_address,
@@ -975,7 +976,7 @@ async fn simulate_l1_to_l2_call_on_l2(
     .await
     {
         let retry_data = extract_return_data_from_trace(&retry_trace);
-        let retry_children = walk_l2_simulation_trace(
+        let (retry_children, _unresolved) = walk_l2_simulation_trace(
             client,
             l2_rpc_url,
             cross_chain_manager_address,
@@ -1237,9 +1238,8 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
 
     let current_trace = &traces[traces.len() - 1];
 
-    // Scan ALL prior traces in the bundle for createCrossChainProxy calls.
-    // A proxy created in tx[1] (e.g., by receiveTokens deploying BridgeL1 proxy)
-    // must be visible when walking tx[2]'s trace for child detection.
+    // Scan prior traces for external createCrossChainProxy calls
+    // (e.g., if user code explicitly creates proxies during delivery).
     let mut bundle_ephemeral_proxies: HashMap<Address, super::trace::ProxyInfo> = HashMap::new();
     for prior_trace in &traces[..traces.len() - 1] {
         super::trace::extract_ephemeral_proxies_from_trace(
@@ -1251,13 +1251,28 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
 
     // Walk trace for child L2→L1 proxy calls, passing ephemeral proxies
     // from prior bundle traces for cross-bundle visibility.
+    //
+    // Two-pass proxy resolution:
+    // Pass 1: Walk the trace. Proxies created by CCM's internal
+    //   _createCrossChainProxyInternal during executeIncomingCrossChainCall are
+    //   NOT visible via callTracer (internal calls). The ProxyLookup queries
+    //   authorizedProxies at "latest" (real L2 state), which doesn't see
+    //   simulation-only state. Unresolved proxies are collected.
+    // Pass 2: If unresolved proxies exist, re-run the SAME bundle via
+    //   debug_traceCallMany with extra authorizedProxies(addr) query txs
+    //   appended. These queries execute within the simulation state (after
+    //   loadTable + prior execs + current exec), so they see proxies created
+    //   during delivery. Parse the query results and re-walk the trace with
+    //   the resolved identities pre-populated.
     let children = if !cross_chain_manager_address.is_zero() {
         let pre = if bundle_ephemeral_proxies.is_empty() {
             None
         } else {
             Some(&bundle_ephemeral_proxies)
         };
-        walk_l2_simulation_trace(
+
+        // Pass 1: initial walk.
+        let (pass1_children, unresolved) = walk_l2_simulation_trace(
             client,
             l2_rpc_url,
             cross_chain_manager_address,
@@ -1265,7 +1280,166 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
             rollup_id,
             pre,
         )
-        .await
+        .await;
+
+        if unresolved.is_empty() {
+            // All proxies resolved on first pass — no second RPC call needed.
+            pass1_children
+        } else {
+            // Pass 2: re-run bundle with authorizedProxies queries appended.
+            tracing::info!(
+                target: "based_rollup::l1_proxy",
+                count = unresolved.len(),
+                addrs = ?unresolved,
+                "chained L2 sim: pass 2 — resolving unresolved proxies via debug_traceCallMany"
+            );
+
+            // Build the same bundle as pass 1, plus one authorizedProxies(addr)
+            // query tx per unresolved proxy address.
+            let unresolved_addrs: Vec<Address> = unresolved.into_iter().collect();
+            let mut resolution_txs = transactions.clone();
+            for addr in &unresolved_addrs {
+                let calldata = super::common::encode_authorized_proxies_calldata(*addr);
+                resolution_txs.push(serde_json::json!({
+                    "from": sys_addr_hex,
+                    "to": ccm_hex,
+                    "data": calldata,
+                    "gas": "0x100000"
+                }));
+            }
+
+            let trace_req2 = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "debug_traceCallMany",
+                "params": [[{
+                    "transactions": resolution_txs
+                }], null, { "tracer": "callTracer" }],
+                "id": 99963
+            });
+
+            let mut resolved_proxies = bundle_ephemeral_proxies.clone();
+            if let Ok(resp2) = client.post(l2_rpc_url).json(&trace_req2).send().await {
+                if let Ok(body2) = resp2.json::<serde_json::Value>().await {
+                    if let Some(traces2) = body2
+                        .get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                    {
+                        // The resolution query traces start after the original bundle txs.
+                        let resolution_start = transactions.len();
+                        for (i, addr) in unresolved_addrs.iter().enumerate() {
+                            let trace_idx = resolution_start + i;
+                            if trace_idx >= traces2.len() {
+                                tracing::warn!(
+                                    target: "based_rollup::l1_proxy",
+                                    %addr,
+                                    trace_idx,
+                                    total_traces = traces2.len(),
+                                    "pass 2: resolution trace missing for address"
+                                );
+                                continue;
+                            }
+                            // The authorizedProxies view call returns data in the
+                            // trace's `output` field: ABI-encoded (address, uint256).
+                            let resolution_trace = &traces2[trace_idx];
+                            let output_hex = resolution_trace
+                                .get("output")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("0x");
+                            let output_clean =
+                                output_hex.strip_prefix("0x").unwrap_or(output_hex);
+                            if output_clean.len() < 128 {
+                                tracing::debug!(
+                                    target: "based_rollup::l1_proxy",
+                                    %addr,
+                                    output_len = output_clean.len(),
+                                    "pass 2: authorizedProxies output too short — proxy not found"
+                                );
+                                continue;
+                            }
+                            // First 32 bytes: originalAddress (address in last 20 bytes)
+                            if let Ok(addr_bytes) = hex::decode(&output_clean[..64]) {
+                                if addr_bytes.len() >= 32 {
+                                    let original_address =
+                                        Address::from_slice(&addr_bytes[12..32]);
+                                    if original_address.is_zero() {
+                                        continue;
+                                    }
+                                    // Second 32 bytes: originalRollupId (uint256, last 8 bytes as u64)
+                                    if let Ok(rid_bytes) = hex::decode(&output_clean[64..128]) {
+                                        if rid_bytes.len() >= 32 {
+                                            let start = rid_bytes.len().saturating_sub(8);
+                                            let mut rid: u64 = 0;
+                                            for b in &rid_bytes[start..] {
+                                                rid = (rid << 8) | (*b as u64);
+                                            }
+                                            tracing::info!(
+                                                target: "based_rollup::l1_proxy",
+                                                proxy = %addr,
+                                                %original_address,
+                                                rid,
+                                                "pass 2: resolved proxy identity from simulation state"
+                                            );
+                                            resolved_proxies.insert(
+                                                *addr,
+                                                super::trace::ProxyInfo {
+                                                    original_address,
+                                                    original_rollup_id: rid,
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Re-walk the current trace (from the pass 2 bundle, same index)
+                        // with resolved proxies pre-populated.
+                        if !resolved_proxies.is_empty() {
+                            let pass2_current_trace = &traces2[traces2.len() - 1 - unresolved_addrs.len()];
+                            let (pass2_children, pass2_unresolved) =
+                                walk_l2_simulation_trace(
+                                    client,
+                                    l2_rpc_url,
+                                    cross_chain_manager_address,
+                                    pass2_current_trace,
+                                    rollup_id,
+                                    Some(&resolved_proxies),
+                                )
+                                .await;
+                            if !pass2_unresolved.is_empty() {
+                                tracing::warn!(
+                                    target: "based_rollup::l1_proxy",
+                                    still_unresolved = pass2_unresolved.len(),
+                                    "pass 2: some proxies still unresolved after resolution attempt"
+                                );
+                            }
+                            pass2_children
+                        } else {
+                            pass1_children
+                        }
+                    } else {
+                        tracing::warn!(
+                            target: "based_rollup::l1_proxy",
+                            "pass 2: no traces in debug_traceCallMany response"
+                        );
+                        pass1_children
+                    }
+                } else {
+                    tracing::warn!(
+                        target: "based_rollup::l1_proxy",
+                        "pass 2: failed to parse debug_traceCallMany response"
+                    );
+                    pass1_children
+                }
+            } else {
+                tracing::warn!(
+                    target: "based_rollup::l1_proxy",
+                    "pass 2: debug_traceCallMany request failed"
+                );
+                pass1_children
+            }
+        }
     } else {
         Vec::new()
     };
@@ -1422,7 +1596,7 @@ async fn walk_l2_simulation_trace(
     trace_node: &Value,
     our_rollup_id: u64,
     pre_populated_ephemeral_proxies: Option<&HashMap<Address, super::trace::ProxyInfo>>,
-) -> Vec<super::common::DiscoveredProxyCall> {
+) -> (Vec<super::common::DiscoveredProxyCall>, std::collections::HashSet<Address>) {
     let lookup = L2ProxyLookup {
         client,
         l2_rpc_url,
@@ -1437,6 +1611,7 @@ async fn walk_l2_simulation_trace(
     }
 
     let mut detected_calls = Vec::new();
+    let mut unresolved_proxies = std::collections::HashSet::new();
 
     // The L2 CCM is the manager contract on L2.
     super::trace::walk_trace_tree(
@@ -1446,12 +1621,13 @@ async fn walk_l2_simulation_trace(
         &mut proxy_cache,
         &mut ephemeral_proxies,
         &mut detected_calls,
+        &mut unresolved_proxies,
     )
     .await;
 
     // Convert trace::DetectedCall to DiscoveredProxyCall, filtering out calls
     // that target our own rollup (we only want L2→L1 calls).
-    detected_calls
+    let calls = detected_calls
         .into_iter()
         .filter_map(|c| {
             // Recover rollup_id from proxy_cache or ephemeral_proxies.
@@ -1498,7 +1674,9 @@ async fn walk_l2_simulation_trace(
                 }
             }
         })
-        .collect()
+        .collect();
+
+    (calls, unresolved_proxies)
 }
 
 /// Walk an L1 trace using the generic `trace::walk_trace_tree` and convert
@@ -1531,6 +1709,7 @@ async fn walk_l1_trace_generic(
         proxy_cache,
         &mut ephemeral_proxies,
         &mut detected_calls,
+        &mut std::collections::HashSet::new(),
     )
     .await;
 
@@ -1723,6 +1902,8 @@ async fn trace_and_detect_internal_calls(
                 // Subsequent call: chained simulation via debug_traceCallMany bundle
                 // where prior calls execute first (with their RESULT entries loaded),
                 // so this call sees their state effects.
+                // Proxy resolution for internally-created proxies is handled by
+                // the two-pass approach inside simulate_l1_to_l2_call_chained_on_l2.
                 simulate_l1_to_l2_call_chained_on_l2(
                     client,
                     l2_rpc_url,
@@ -2431,6 +2612,9 @@ async fn trace_and_detect_internal_calls(
                                     .await
                                 } else {
                                     // Chained simulation: prior calls execute first.
+                                    // Proxy resolution for internally-created proxies
+                                    // is handled by the two-pass approach inside
+                                    // simulate_l1_to_l2_call_chained_on_l2.
                                     simulate_l1_to_l2_call_chained_on_l2(
                                         client,
                                         l2_rpc_url,

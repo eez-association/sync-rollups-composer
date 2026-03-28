@@ -18,7 +18,7 @@
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::{SolCall, sol};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -281,6 +281,7 @@ pub async fn walk_trace_tree(
     proxy_cache: &mut HashMap<Address, Option<ProxyInfo>>,
     ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
     detected_calls: &mut Vec<DetectedCall>,
+    unresolved_proxies: &mut HashSet<Address>,
 ) {
     walk_trace_tree_inner(
         node,
@@ -289,6 +290,7 @@ pub async fn walk_trace_tree(
         proxy_cache,
         ephemeral_proxies,
         detected_calls,
+        unresolved_proxies,
     )
     .await;
 }
@@ -340,6 +342,7 @@ async fn walk_trace_tree_inner(
     proxy_cache: &mut HashMap<Address, Option<ProxyInfo>>,
     ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
     detected_calls: &mut Vec<DetectedCall>,
+    unresolved_proxies: &mut HashSet<Address>,
 ) {
     let parsed = match parse_trace_node(node) {
         Some(p) => p,
@@ -353,6 +356,7 @@ async fn walk_trace_tree_inner(
                 proxy_cache,
                 ephemeral_proxies,
                 detected_calls,
+                unresolved_proxies,
             )
             .await;
             return;
@@ -373,6 +377,7 @@ async fn walk_trace_tree_inner(
             proxy_cache,
             ephemeral_proxies,
             detected_calls,
+            unresolved_proxies,
         )
         .await;
         return;
@@ -396,6 +401,7 @@ async fn walk_trace_tree_inner(
             proxy_cache,
             ephemeral_proxies,
             detected_calls,
+            unresolved_proxies,
         )
         .await;
         return;
@@ -427,15 +433,16 @@ async fn walk_trace_tree_inner(
                 source_address: parsed.from,
             });
         } else {
-            // Proxy identity not found — this could be a contract that directly
-            // calls the manager (not a real proxy). Recurse into children to find
-            // any real proxy calls in sibling frames.
+            // Proxy identity not found — record as unresolved so callers can
+            // attempt a second-pass resolution via debug_traceCallMany with
+            // authorizedProxies queries in the same bundle (seeing simulation state).
             tracing::warn!(
                 target: "based_rollup::trace",
                 proxy = %parsed.to,
                 source = %parsed.from,
-                "node has executeCrossChainCall child but proxy identity not found — recursing"
+                "node has executeCrossChainCall child but proxy identity not found — marking unresolved"
             );
+            unresolved_proxies.insert(parsed.to);
             recurse_children(
                 node,
                 manager_addresses,
@@ -443,6 +450,7 @@ async fn walk_trace_tree_inner(
                 proxy_cache,
                 ephemeral_proxies,
                 detected_calls,
+                unresolved_proxies,
             )
             .await;
         }
@@ -460,6 +468,7 @@ async fn walk_trace_tree_inner(
         proxy_cache,
         ephemeral_proxies,
         detected_calls,
+        unresolved_proxies,
     )
     .await;
 }
@@ -476,6 +485,7 @@ async fn recurse_children(
     proxy_cache: &mut HashMap<Address, Option<ProxyInfo>>,
     ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
     detected_calls: &mut Vec<DetectedCall>,
+    unresolved_proxies: &mut HashSet<Address>,
 ) {
     if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
         for child in calls {
@@ -486,6 +496,7 @@ async fn recurse_children(
                 proxy_cache,
                 ephemeral_proxies,
                 detected_calls,
+                unresolved_proxies,
             ))
             .await;
         }
@@ -653,6 +664,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -712,6 +724,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -804,6 +817,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -913,6 +927,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -979,6 +994,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -1052,6 +1068,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -1167,6 +1184,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -1217,6 +1235,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
@@ -1275,6 +1294,7 @@ mod tests {
             &mut cache,
             &mut ephemeral,
             &mut detected,
+            &mut HashSet::new(),
         )
         .await;
 
