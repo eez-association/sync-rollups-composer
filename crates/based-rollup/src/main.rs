@@ -8,7 +8,7 @@ use based_rollup::driver::Driver;
 use based_rollup::evm_config::RollupExecutorBuilder;
 use based_rollup::health;
 use based_rollup::rpc::{
-    QueuedCrossChainCall, QueuedWithdrawal, SyncRollupsApiServer, SyncRollupsRpc,
+    QueuedCrossChainCall, QueuedL2ToL1Call, SyncRollupsApiServer, SyncRollupsRpc,
 };
 use clap::Parser;
 use eyre::Result;
@@ -71,12 +71,12 @@ fn main() -> Result<()> {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let forward_txs_for_rpc = pending_l1_forward_txs.clone();
 
-        // Shared queue for L2→L1 withdrawals.
-        // The L2 RPC proxy detects Bridge.bridgeEther(0) and queues here;
-        // the driver drains alongside deposits (unified intermediate roots).
-        let queued_withdrawals: Arc<std::sync::Mutex<Vec<QueuedWithdrawal>>> =
+        // Shared queue for L2→L1 calls.
+        // The L2 composer RPC detects cross-chain calls and queues here;
+        // the driver drains alongside L1→L2 entries (unified intermediate roots).
+        let queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<QueuedL2ToL1Call>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
-        let withdrawals_for_rpc = queued_withdrawals.clone();
+        let l2_to_l1_for_rpc = queued_l2_to_l1_calls.clone();
 
         // Build the node with Ethereum components + our custom consensus
         let handle = builder
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
                     synced_for_rpc,
                     calls_for_rpc,
                     forward_txs_for_rpc,
-                    withdrawals_for_rpc,
+                    l2_to_l1_for_rpc,
                 );
                 ctx.modules.merge_configured(rpc.into_rpc())?;
                 tracing::info!(
@@ -226,7 +226,7 @@ fn main() -> Result<()> {
                     synced,
                     queued_cross_chain_calls,
                     pending_l1_forward_txs,
-                    queued_withdrawals,
+                    queued_l2_to_l1_calls,
                 );
 
                 // Spawn the health HTTP server if a port is configured (0 = disabled).

@@ -118,34 +118,21 @@ pub struct Driver<P, Pool> {
     last_balance_check: std::time::Instant,
     /// Shared sync status flag (true when caught up, readable by RPC handlers).
     synced: Arc<std::sync::atomic::AtomicBool>,
-    /// Cross-chain execution entries pending L1 submission via `Rollups.postBatch()`.
-    /// Only populated in builder mode when `rollups_address` is configured.
-    pending_cross_chain_entries: Vec<CrossChainExecutionEntry>,
     /// Unified queue for cross-chain calls (entry pairs + gas price + raw L1 tx).
     /// The RPC pushes here; the driver drains, sorts by gas price, then submits.
     queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
     /// Legacy queue for raw signed L1 transactions to forward after `postBatch`.
     /// Kept for backward compatibility with `queueL1ForwardTx` RPC method.
     pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
-    /// Queue for L2→L1 withdrawals. The RPC pushes here; the driver drains
-    /// into builder_execution_entries alongside deposits (unified intermediate roots).
-    queued_withdrawals: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedWithdrawal>>>,
-    /// Pre-built L1 entries for multi-call continuation patterns.
-    /// When non-empty, these are used AS-IS in `flush_to_l1` instead of
-    /// converting CALL+RESULT pairs. Appended after deposit entries.
-    pending_continuation_l1_entries: Vec<CrossChainExecutionEntry>,
-    /// L1 deferred entries for pending withdrawals (stashed during block building,
-    /// posted via postBatch in flush_to_l1).
-    pending_withdrawal_l1_entries: Vec<CrossChainExecutionEntry>,
-    /// Metadata for pending withdrawals (user addresses + amounts) for trigger txs.
-    pending_withdrawal_metadata: Vec<WithdrawalMetadata>,
-    /// Unified queue: all pending L1 deferred entries, in submission order.
-    /// Dual-written alongside the legacy queues during the transition period.
+    /// Queue for L2→L1 calls. The RPC pushes here; the driver drains
+    /// into builder_execution_entries alongside L1→L2 entries (unified intermediate roots).
+    queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedL2ToL1Call>>>,
+    /// All pending L1 deferred entries, in submission order.
     /// Entries are already in L1 format (no pair conversion needed).
     pending_l1_entries: Vec<CrossChainExecutionEntry>,
-    /// Unified queue: index of the first entry in each trigger group.
+    /// Index of the first entry in each trigger group within `pending_l1_entries`.
     pending_l1_group_starts: Vec<usize>,
-    /// Unified queue: trigger metadata for groups that need L1 trigger txs.
+    /// Trigger metadata for groups that need L1 trigger txs (`executeL2TX`).
     /// Indexed by group. `None` for protocol-triggered groups (deposits).
     pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>,
     /// The L2 head at the time of the last health status update (for staleness tracking).
@@ -201,26 +188,9 @@ struct L1ConfirmedAnchor {
     l1_block_number: u64,
 }
 
-/// Metadata for a pending L2→L1 withdrawal, used to construct trigger txs on L1.
-#[derive(Debug, Clone)]
-struct WithdrawalMetadata {
-    /// User address (withdrawal recipient on L1).
-    user: Address,
-    /// Withdrawal amount in wei.
-    amount: U256,
-    /// RLP-encoded L2 transaction for the L2TX trigger on L1.
-    /// The driver calls `Rollups.executeL2TX(rollupId, rlpEncodedTx)` to trigger
-    /// consumption of the L1 deferred entries.
-    rlp_encoded_tx: Vec<u8>,
-    /// Number of `executeL2TX` calls needed for this withdrawal.
-    /// Simple withdrawals = 1. Multi-call patterns with N root L2→L1 calls need
-    /// N invocations since each `executeL2TX` consumes one entry via `_findAndApplyExecution`.
-    trigger_count: usize,
-}
-
-/// Generic trigger metadata for L1 trigger groups. Replaces `WithdrawalMetadata`
-/// in the unified queue. Groups that need L1 trigger txs (`executeL2TX`) carry
-/// `Some(TriggerMetadata)`; protocol-triggered groups (deposits) carry `None`.
+/// Trigger metadata for L1 trigger groups. Groups that need L1 trigger txs
+/// (`executeL2TX`) carry `Some(TriggerMetadata)`; protocol-triggered groups
+/// (deposits) carry `None`.
 #[derive(Debug, Clone)]
 pub struct TriggerMetadata {
     /// User address (trigger initiator on L1).
@@ -386,7 +356,7 @@ where
         synced: Arc<std::sync::atomic::AtomicBool>,
         queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
         pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
-        queued_withdrawals: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedWithdrawal>>>,
+        queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedL2ToL1Call>>>,
     ) -> (Self, watch::Receiver<HealthStatus>) {
         let derivation = DerivationPipeline::new(config.clone());
         let proposer = if config.builder_mode && config.builder_private_key.is_some() {
@@ -464,13 +434,9 @@ where
             consecutive_rewind_cycles: 0,
             last_balance_check: std::time::Instant::now(),
             synced,
-            pending_cross_chain_entries: Vec::new(),
             queued_cross_chain_calls,
             pending_l1_forward_txs,
-            queued_withdrawals,
-            pending_continuation_l1_entries: Vec::new(),
-            pending_withdrawal_l1_entries: Vec::new(),
-            pending_withdrawal_metadata: Vec::new(),
+            queued_l2_to_l1_calls,
             pending_l1_entries: Vec::new(),
             pending_l1_group_starts: Vec::new(),
             pending_l1_trigger_metadata: Vec::new(),
@@ -1197,7 +1163,7 @@ where
         // Drain unified cross-chain call queue, sort by gas price descending
         // (matching L1 miner ordering), then merge for same-block execution.
         // These entries are executed immediately in the next built block, then also
-        // posted to L1 (via pending_cross_chain_entries) so fullnodes can derive
+        // posted to L1 (via pending_l1_entries) so fullnodes can derive
         // identical blocks from L1 events.
         //
         // Sorting MUST happen before entries flow to `attach_chained_state_deltas`,
@@ -1207,17 +1173,13 @@ where
         // NOTE: stale entry guard was removed — loadExecutionTable now deletes
         // existing entries per actionHash before pushing new ones, so stale entries
         // from prior blocks are automatically cleared on the next load.
-        // Save pre-drain lengths so we can truncate self.pending_* on build
+        // Save pre-drain lengths so we can truncate self.pending_l1_* on build
         // failure and re-push drained entries back to the shared queues. Without
         // this, entries are permanently lost when clear_internal_state() runs
         // during the Sync transition. See issue #237.
-        let pre_drain_cc_len = self.pending_cross_chain_entries.len();
-        let pre_drain_cont_len = self.pending_continuation_l1_entries.len();
-        let pre_drain_wl_len = self.pending_withdrawal_l1_entries.len();
-        let pre_drain_wm_len = self.pending_withdrawal_metadata.len();
-        let pre_drain_unified_len = self.pending_l1_entries.len();
-        let pre_drain_unified_groups = self.pending_l1_group_starts.len();
-        let pre_drain_unified_meta = self.pending_l1_trigger_metadata.len();
+        let pre_drain_l1_len = self.pending_l1_entries.len();
+        let pre_drain_l1_groups = self.pending_l1_group_starts.len();
+        let pre_drain_l1_meta = self.pending_l1_trigger_metadata.len();
 
         let mut queued_l1_txs_for_block: Vec<Bytes> = Vec::new();
         // Saved originals for re-push on build failure. These are the
@@ -1244,7 +1206,7 @@ where
                 // One continuation per cycle: if a call has non-empty l1_entries
                 // (multi-call continuation), only process the FIRST such call.
                 // Re-queue the rest to prevent multiple continuations'
-                // entries from being mixed in pending_continuation_l1_entries.
+                // entries from being mixed in pending_l1_entries.
                 let mut had_continuation = false;
                 let mut rpc_entries: Vec<CrossChainExecutionEntry> = Vec::new();
                 for call in calls {
@@ -1270,14 +1232,8 @@ where
                     if !call.raw_l1_tx.is_empty() {
                         queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
                     }
-                    // Pre-built L1 entries (multi-call continuations): stash separately.
-                    // flush_to_l1 will use these AS-IS instead of converting pairs.
-                    if is_continuation {
-                        self.pending_continuation_l1_entries
-                            .extend(call.l1_entries.iter().cloned());
-                    }
 
-                    // === Unified queue population (dual-write) ===
+                    // Populate L1 entry queue
                     let group_start = self.pending_l1_entries.len();
                     if !call.l1_entries.is_empty() {
                         // Continuation: use pre-built L1 entries directly
@@ -1297,38 +1253,37 @@ where
                     calls_for_repush.push(call);
                 }
                 rpc_entry_count_in_builder = rpc_entries.len();
-                builder_execution_entries.extend(rpc_entries.iter().cloned());
-                self.pending_cross_chain_entries.extend(rpc_entries);
+                builder_execution_entries.extend(rpc_entries);
             }
         }
         // L1 forward txs are NOT committed to pending_l1_forward_txs yet.
         // They are committed after the block build loop succeeds to avoid
         // orphaned txs stuck in the queue on build failure. See issue #237.
 
-        // Drain withdrawal queue — no mutual exclusion, deposits and withdrawals
+        // Drain L2→L1 call queue — no mutual exclusion, deposits and L2→L1 calls
         // can coexist in the same block. The unified intermediate root chain
-        // (D+W+1 roots) handles mixed blocks correctly.
+        // handles mixed blocks correctly.
         let mut held_l2_txs: Vec<Bytes> = Vec::new();
         // Saved originals for re-push on build failure. See issue #237.
-        let mut withdrawals_for_repush: Vec<crate::rpc::QueuedWithdrawal> = Vec::new();
+        let mut l2_to_l1_for_repush: Vec<crate::rpc::QueuedL2ToL1Call> = Vec::new();
         {
             let mut queue = self
-                .queued_withdrawals
+                .queued_l2_to_l1_calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if !queue.is_empty() {
-                let withdrawals: Vec<_> = queue.drain(..).collect();
+                let l2_to_l1_calls: Vec<_> = queue.drain(..).collect();
                 info!(
                     target: "based_rollup::driver",
-                    count = withdrawals.len(),
-                    deposit_entries = rpc_entry_count_in_builder,
-                    "draining withdrawal queue (unified intermediate roots)"
+                    count = l2_to_l1_calls.len(),
+                    protocol_entries = rpc_entry_count_in_builder,
+                    "draining L2→L1 call queue (unified intermediate roots)"
                 );
-                // Save a clone of the drained withdrawals BEFORE processing
+                // Save a clone of the drained calls BEFORE processing
                 // so they can be re-pushed to the shared queue if block
                 // building fails. This prevents permanent entry loss.
-                withdrawals_for_repush = withdrawals.clone();
-                for w in withdrawals {
+                l2_to_l1_for_repush = l2_to_l1_calls.clone();
+                for w in l2_to_l1_calls {
                     // Collect held L2 txs for pool injection (hold-then-forward)
                     if !w.raw_l2_tx.is_empty() {
                         held_l2_txs.push(w.raw_l2_tx);
@@ -1336,13 +1291,11 @@ where
                     // L2 table entries → loaded via loadExecutionTable in this block
                     let w_entry_count = w.l2_table_entries.len();
                     builder_execution_entries.extend(w.l2_table_entries.iter().cloned());
-                    // Count withdrawal entries as RPC entries so the position-based
+                    // Count L2→L1 entries as RPC entries so the position-based
                     // split (base vs RPC) correctly includes them in rpc_entries_for_block.
-                    // Without this, num_deposits miscounts when deposits+withdrawals coexist.
                     rpc_entry_count_in_builder += w_entry_count;
-                    // === Unified queue population (dual-write) ===
-                    // Must happen before the old stash because l1_deferred_entries
-                    // is moved into the legacy queues below.
+
+                    // Populate L1 entry queue
                     let group_start = self.pending_l1_entries.len();
                     self.pending_l1_entries
                         .extend(w.l1_deferred_entries.iter().cloned());
@@ -1353,28 +1306,6 @@ where
                         rlp_encoded_tx: w.rlp_encoded_tx.clone(),
                         trigger_count: w.trigger_count,
                     }));
-
-                    // L1 deferred entries → stashed for flush_to_l1 (legacy path).
-                    // Multi-call continuations use the continuation path instead of the
-                    // withdrawal path, because their 5-entry structure is not pair-based
-
-                    //
-                    // Detect continuation by L1 entry count: simple withdrawals produce
-                    // exactly 2 L1 entries (L2TX trigger + RESULT); continuations produce
-                    // more (trigger + delivery + reentrant + scope resolution entries).
-                    if w.l1_deferred_entries.len() <= 2 {
-                        self.pending_withdrawal_l1_entries
-                            .extend(w.l1_deferred_entries);
-                    } else {
-                        self.pending_continuation_l1_entries
-                            .extend(w.l1_deferred_entries);
-                    }
-                    self.pending_withdrawal_metadata.push(WithdrawalMetadata {
-                        user: w.user,
-                        amount: w.amount,
-                        rlp_encoded_tx: w.rlp_encoded_tx,
-                        trigger_count: w.trigger_count,
-                    });
                 }
             }
         }
@@ -1489,16 +1420,10 @@ where
                     );
                     // Re-push drained entries back to shared queues so they are
                     // not lost when clear_internal_state() runs. See issue #237.
-                    self.pending_cross_chain_entries.truncate(pre_drain_cc_len);
-                    self.pending_continuation_l1_entries
-                        .truncate(pre_drain_cont_len);
-                    self.pending_withdrawal_l1_entries
-                        .truncate(pre_drain_wl_len);
-                    self.pending_withdrawal_metadata.truncate(pre_drain_wm_len);
-                    self.pending_l1_entries.truncate(pre_drain_unified_len);
-                    self.pending_l1_group_starts.truncate(pre_drain_unified_groups);
+                    self.pending_l1_entries.truncate(pre_drain_l1_len);
+                    self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
                     self.pending_l1_trigger_metadata
-                        .truncate(pre_drain_unified_meta);
+                        .truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1511,17 +1436,17 @@ where
                         );
                         q.extend(calls_for_repush.iter().cloned());
                     }
-                    if !withdrawals_for_repush.is_empty() {
+                    if !l2_to_l1_for_repush.is_empty() {
                         let mut q = self
-                            .queued_withdrawals
+                            .queued_l2_to_l1_calls
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
                         warn!(
                             target: "based_rollup::driver",
-                            count = withdrawals_for_repush.len(),
-                            "re-pushing withdrawals to shared queue after build failure"
+                            count = l2_to_l1_for_repush.len(),
+                            "re-pushing L2→L1 calls to shared queue after build failure"
                         );
-                        q.extend(withdrawals_for_repush.iter().cloned());
+                        q.extend(l2_to_l1_for_repush.iter().cloned());
                     }
                     self.mode = DriverMode::Sync;
                     self.synced
@@ -1553,16 +1478,10 @@ where
                     );
                     // Re-push drained entries back to shared queues so they are
                     // not lost when clear_internal_state() runs. See issue #237.
-                    self.pending_cross_chain_entries.truncate(pre_drain_cc_len);
-                    self.pending_continuation_l1_entries
-                        .truncate(pre_drain_cont_len);
-                    self.pending_withdrawal_l1_entries
-                        .truncate(pre_drain_wl_len);
-                    self.pending_withdrawal_metadata.truncate(pre_drain_wm_len);
-                    self.pending_l1_entries.truncate(pre_drain_unified_len);
-                    self.pending_l1_group_starts.truncate(pre_drain_unified_groups);
+                    self.pending_l1_entries.truncate(pre_drain_l1_len);
+                    self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
                     self.pending_l1_trigger_metadata
-                        .truncate(pre_drain_unified_meta);
+                        .truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1575,17 +1494,17 @@ where
                         );
                         q.extend(calls_for_repush.iter().cloned());
                     }
-                    if !withdrawals_for_repush.is_empty() {
+                    if !l2_to_l1_for_repush.is_empty() {
                         let mut q = self
-                            .queued_withdrawals
+                            .queued_l2_to_l1_calls
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
                         warn!(
                             target: "based_rollup::driver",
-                            count = withdrawals_for_repush.len(),
-                            "re-pushing withdrawals to shared queue after build failure"
+                            count = l2_to_l1_for_repush.len(),
+                            "re-pushing L2→L1 calls to shared queue after build failure"
                         );
-                        q.extend(withdrawals_for_repush.iter().cloned());
+                        q.extend(l2_to_l1_for_repush.iter().cloned());
                     }
                     self.mode = DriverMode::Sync;
                     self.synced
@@ -1618,36 +1537,32 @@ where
             self.journal_block_transactions(next_l2_block, &derived_transactions);
 
             // Cross-chain entries for L1 submission come from external sources
-            // (L1 proxy, RPC) and are added to pending_cross_chain_entries
-            // via the shared queue. We do NOT generate per-block entries here
-            // because the aggregate block entry in flush_to_l1 already handles
-            // state root progression. Per-block entries would conflict: Rollups.sol
-            // processes entries sequentially, so after the aggregate entry updates
-            // the on-chain root, per-block entries' currentState would mismatch.
-            if self.pending_cross_chain_entries.len() > MAX_PENDING_CROSS_CHAIN_ENTRIES {
+            // (L1 proxy, RPC) and are added to pending_l1_entries via the shared
+            // queue. We do NOT generate per-block entries here because the aggregate
+            // block entry in flush_to_l1 already handles state root progression.
+            // Per-block entries would conflict: Rollups.sol processes entries
+            // sequentially, so after the aggregate entry updates the on-chain root,
+            // per-block entries' currentState would mismatch.
+            if self.pending_l1_entries.len() > MAX_PENDING_CROSS_CHAIN_ENTRIES {
                 warn!(target: "based_rollup::driver",
-                    count = self.pending_cross_chain_entries.len(),
+                    count = self.pending_l1_entries.len(),
                     max = MAX_PENDING_CROSS_CHAIN_ENTRIES,
                     "pending cross-chain entries exceeded cap, dropping oldest"
                 );
                 let excess =
-                    self.pending_cross_chain_entries.len() - MAX_PENDING_CROSS_CHAIN_ENTRIES;
-                self.pending_cross_chain_entries.drain(..excess);
+                    self.pending_l1_entries.len() - MAX_PENDING_CROSS_CHAIN_ENTRIES;
+                self.pending_l1_entries.drain(..excess);
             }
 
             // Compute unified intermediate state roots for chained cross-chain
-            // entry deltas. Both deposits (RPC entries) and withdrawals are handled
-            // in a single D+W+1 root chain:
-            //   R(0,0) = clean (no deposits, no withdrawals)
-            //   R(d,0) = d deposits applied
-            //   R(D,w) = all deposits + w withdrawals
-            //   R(D,W) = speculative (all txs)
+            // entry deltas. All entry types (deposits, L2→L1 calls, continuations)
+            // are handled in a single root chain via trigger group counting.
             let has_rpc_entries = !rpc_entries_for_block.is_empty();
             let our_rollup_id = alloy_primitives::U256::from(self.config.rollup_id);
-            let num_deposits = rpc_entries_for_block
+            let num_protocol_triggers = rpc_entries_for_block
                 .iter()
                 .filter(|e| {
-                    // Only count true deposit triggers, NOT continuation table entries.
+                    // Only count true triggers, NOT continuation table entries.
                     // Triggers have hash(next_action) == action_hash (same guard as
                     // partition_entries). Continuations have action_hash=hash(RESULT)
                     // but next_action=CALL_B, so hash(next_action) != action_hash.
@@ -1661,8 +1576,11 @@ where
                     next_hash == e.action_hash
                 })
                 .count();
-            let num_withdrawals = self.pending_withdrawal_l1_entries.len() / 2;
-            let has_entries = has_rpc_entries || num_withdrawals > 0;
+            let num_user_triggers = self.pending_l1_trigger_metadata
+                .iter()
+                .filter(|m| m.is_some())
+                .count();
+            let has_entries = has_rpc_entries || num_user_triggers > 0;
 
             let mut intermediate_roots = Vec::new();
             let clean_state_root = if has_entries {
@@ -1681,17 +1599,10 @@ where
                             l2_block = next_l2_block,
                             speculative = %built.state_root,
                             clean = %clean,
-                            num_deposits,
-                            num_withdrawals,
+                            num_protocol_triggers,
+                            num_user_triggers,
                             "computed unified intermediate state roots"
                         );
-                        // Legacy attachment skipped: attach_generic_state_deltas
-                        // (below) handles all entry types via the unified queue.
-                        // The legacy attach_unified_chained_state_deltas expects
-                        // D+W+1 roots but compute_intermediate_roots now returns
-                        // T+1 roots (trigger-based, not type-based).
-                        // Legacy continuation attachment skipped: attach_generic_state_deltas
-                        // handles all entry types via the unified queue.
                         intermediate_roots = roots;
                         clean
                     }
@@ -1709,10 +1620,6 @@ where
                         self.pending_l1_entries.clear();
                         self.pending_l1_group_starts.clear();
                         self.pending_l1_trigger_metadata.clear();
-                        self.pending_cross_chain_entries.clear();
-                        self.pending_continuation_l1_entries.clear();
-                        self.pending_withdrawal_l1_entries.clear();
-                        self.pending_withdrawal_metadata.clear();
                         built.state_root // No entries → speculative IS clean
                     }
                 }
@@ -1720,11 +1627,8 @@ where
                 built.state_root
             };
 
-            // === Generic state delta attachment (unified queue) ===
-            // Applies correct state deltas to all L1 entries in the unified queue
-            // using the intermediate roots from compute_intermediate_roots.
-            // This runs AFTER the legacy attachment blocks (above) so both paths
-            // produce correct entries during the dual-write transition period.
+            // Attach correct state deltas to all pending L1 entries using the
+            // intermediate roots from compute_intermediate_roots.
             if !self.pending_l1_entries.is_empty() && !intermediate_roots.is_empty() {
                 crate::cross_chain::attach_generic_state_deltas(
                     &mut self.pending_l1_entries,
@@ -1802,10 +1706,6 @@ where
                 );
                 self.pending_submissions.clear();
             }
-            if !self.pending_cross_chain_entries.is_empty() {
-                self.pending_cross_chain_entries.clear();
-            }
-            self.pending_continuation_l1_entries.clear();
             self.pending_l1_entries.clear();
             self.pending_l1_group_starts.clear();
             self.pending_l1_trigger_metadata.clear();
@@ -1819,7 +1719,7 @@ where
         // but no corresponding L2 block, causing orphaned entries with zero
         // state deltas.
 
-        if self.pending_submissions.is_empty() && self.pending_cross_chain_entries.is_empty() {
+        if self.pending_submissions.is_empty() && self.pending_l1_entries.is_empty() {
             return Ok(());
         }
 
@@ -1891,7 +1791,7 @@ where
             }
         };
 
-        if self.pending_submissions.is_empty() && self.pending_cross_chain_entries.is_empty() {
+        if self.pending_submissions.is_empty() && self.pending_l1_entries.is_empty() {
             return Ok(());
         }
 
@@ -1902,8 +1802,13 @@ where
         // derivation filters those txs (§4f), the nonces are wrong. By excluding
         // subsequent blocks from this batch, we ensure they are held until
         // derivation confirms the entry-bearing block.
-        let has_pending_entries = !self.pending_cross_chain_entries.is_empty();
-        let has_continuation_entries = !self.pending_continuation_l1_entries.is_empty();
+        let has_pending_entries = !self.pending_l1_entries.is_empty();
+        // Continuation groups have > 2 L1 entries (simple deposits = 1, simple
+        // L2→L1 calls = 2, multi-call continuations = 3+).
+        let has_continuation_entries = self.pending_l1_group_starts.iter().enumerate().any(|(i, &start)| {
+            let end = self.pending_l1_group_starts.get(i + 1).copied().unwrap_or(self.pending_l1_entries.len());
+            end - start > 2
+        });
         let batch_size = if has_pending_entries {
             if has_continuation_entries {
                 // Continuation entries (multi-call patterns): include ALL pending blocks.
@@ -2063,47 +1968,23 @@ where
             }
         }
 
-        let entries = std::mem::take(&mut self.pending_cross_chain_entries);
-        let continuation_l1_entries = std::mem::take(&mut self.pending_continuation_l1_entries);
-        let withdrawal_l1_entries = std::mem::take(&mut self.pending_withdrawal_l1_entries);
-        let withdrawal_metadata = std::mem::take(&mut self.pending_withdrawal_metadata);
-
-        // Drain unified queue alongside legacy queues.
-        let unified_l1_entries = std::mem::take(&mut self.pending_l1_entries);
-        let unified_group_starts = std::mem::take(&mut self.pending_l1_group_starts);
-        let unified_trigger_metadata = std::mem::take(&mut self.pending_l1_trigger_metadata);
+        // Drain L1 entry queues for submission.
+        let l1_entries_owned = std::mem::take(&mut self.pending_l1_entries);
+        let group_starts = std::mem::take(&mut self.pending_l1_group_starts);
+        let trigger_metadata = std::mem::take(&mut self.pending_l1_trigger_metadata);
 
         info!(
             target: "based_rollup::driver",
-            pending_entry_pairs = entries.len(),
-            pending_continuation_l1_entries = continuation_l1_entries.len(),
-            pending_withdrawal_entries = withdrawal_l1_entries.len(),
-            unified_l1_entries = unified_l1_entries.len(),
+            l1_entries = l1_entries_owned.len(),
+            groups = group_starts.len(),
             pending_blocks = blocks.len(),
             "flush_to_l1: drained entries and blocks for submission"
         );
 
-        // Assemble L1 entries for submission.
-        //
-        // When the unified queue is non-empty, prefer it — entries are already in
-        // L1 format with correct state deltas from attach_generic_state_deltas.
-        // Otherwise fall back to the legacy three-queue assembly path.
-        let l1_entries = if !unified_l1_entries.is_empty() {
-            // Generic path: entries already in L1 format with correct state deltas.
-            // Clone to preserve ownership — unified_l1_entries may be re-assigned
-            // to self.pending_l1_entries on failure recovery.
-            unified_l1_entries.clone()
-        } else if continuation_l1_entries.is_empty() {
-            // Legacy simple path: convert L2 CALL+RESULT pairs to L1 format.
-            let mut converted = crate::cross_chain::convert_pairs_to_l1_entries(&entries);
-            converted.extend(withdrawal_l1_entries.iter().cloned());
-            converted
-        } else {
-            // Legacy continuation path: use pre-built L1 entries AS-IS.
-            let mut combined = continuation_l1_entries.clone();
-            combined.extend(withdrawal_l1_entries.iter().cloned());
-            combined
-        };
+        // Entries are already in L1 format with correct state deltas from
+        // attach_generic_state_deltas. Clone to preserve ownership for
+        // failure recovery (re-assigned to self.pending_l1_entries).
+        let l1_entries = l1_entries_owned.clone();
 
         // §4f nonce safety: if this batch includes cross-chain entries, set the
         // hold BEFORE sending to L1. This ensures no new batches are submitted
@@ -2158,35 +2039,19 @@ where
                 if has_entries {
                     self.forward_queued_l1_txs().await?;
                 }
-                // Send withdrawal triggers BEFORE waiting for receipt — they must
-                // land in the SAME L1 block as postBatch (ExecutionNotInCurrentBlock).
-                // Same pattern as forward_queued_l1_txs above.
-                //
-                // When using the unified queue, build trigger metadata from
-                // unified_trigger_metadata (filtering out None entries, which are
-                // protocol-triggered groups that don't need executeL2TX).
-                let effective_withdrawal_metadata: Vec<WithdrawalMetadata> =
-                    if !unified_trigger_metadata.is_empty() {
-                        unified_trigger_metadata
-                            .iter()
-                            .filter_map(|opt| {
-                                opt.as_ref().map(|tm| WithdrawalMetadata {
-                                    user: tm.user,
-                                    amount: tm.amount,
-                                    rlp_encoded_tx: tm.rlp_encoded_tx.clone(),
-                                    trigger_count: tm.trigger_count,
-                                })
-                            })
-                            .collect()
-                    } else {
-                        // Clone to preserve ownership — withdrawal_metadata may be
-                        // re-assigned to self.pending_withdrawal_metadata on failure.
-                        withdrawal_metadata.clone()
-                    };
+                // Send L1 trigger txs (executeL2TX) BEFORE waiting for receipt —
+                // they must land in the SAME L1 block as postBatch
+                // (ExecutionNotInCurrentBlock). Filter out None entries (protocol-
+                // triggered groups that don't need executeL2TX).
+                let effective_trigger_metadata: Vec<TriggerMetadata> =
+                    trigger_metadata
+                        .iter()
+                        .filter_map(|opt| opt.clone())
+                        .collect();
                 let trigger_tx_hashes: Vec<B256> =
-                    if !effective_withdrawal_metadata.is_empty() {
+                    if !effective_trigger_metadata.is_empty() {
                         match self
-                            .send_withdrawal_triggers(&effective_withdrawal_metadata)
+                            .send_l2_to_l1_triggers(&effective_trigger_metadata)
                             .await
                         {
                             Ok(hashes) => hashes,
@@ -2194,7 +2059,7 @@ where
                                 error!(
                                     target: "based_rollup::driver",
                                     %err,
-                                    "withdrawal trigger tx failed — rewinding to re-derive"
+                                    "L2→L1 trigger tx failed — rewinding to re-derive"
                                 );
                                 let (rewind_target, rollback_l1_block) =
                                     if let Some(anchor) = self.l1_confirmed_anchor {
@@ -2236,7 +2101,7 @@ where
                         }
                         // Entry verification hold was set before send_to_l1 (above).
 
-                        // Verify all withdrawal trigger receipts. Triggers land in the
+                        // Verify all L2→L1 trigger receipts. Triggers land in the
                         // same L1 block as postBatch, so receipts should be available
                         // immediately after the postBatch receipt.
                         if !trigger_tx_hashes.is_empty() {
@@ -2251,7 +2116,7 @@ where
                                         warn!(
                                             target: "based_rollup::driver",
                                             %err, %trigger_hash,
-                                            "withdrawal trigger reverted on L1 — will rewind to strip entries"
+                                            "L2→L1 trigger reverted on L1 — will rewind to strip entries"
                                         );
                                         any_trigger_failed = true;
                                     }
@@ -2260,16 +2125,16 @@ where
                             if any_trigger_failed {
                                 // With intermediate state roots, the on-chain stateRoot
                                 // is at an intermediate root (partial consumption).
-                                // Derivation can filter unconsumed withdrawal txs to
+                                // Derivation can filter unconsumed L2→L1 txs to
                                 // produce the matching root via §4f. Rewind to re-derive.
                                 warn!(
                                     target: "based_rollup::driver",
-                                    "one or more withdrawal triggers reverted — \
+                                    "one or more L2→L1 triggers reverted — \
                                      rewinding for re-derivation with filtered txs"
                                 );
                                 // The anchor was JUST updated (line ~2063) to the current
-                                // batch's last block — which IS the withdrawal block.
-                                // We must rewind to anchor - 1 so the withdrawal block
+                                // batch's last block — which IS the entry block.
+                                // We must rewind to anchor - 1 so the entry block
                                 // itself gets re-derived with §4f filtering applied.
                                 let (rewind_target, rollback_l1_block) =
                                     if let Some(anchor) = self.l1_confirmed_anchor {
@@ -2420,13 +2285,9 @@ where
                             for block in blocks.into_iter().rev() {
                                 self.pending_submissions.push_front(block);
                             }
-                            self.pending_cross_chain_entries = entries;
-                            self.pending_continuation_l1_entries = continuation_l1_entries;
-                            self.pending_withdrawal_l1_entries = withdrawal_l1_entries;
-                            self.pending_withdrawal_metadata = withdrawal_metadata;
-                            self.pending_l1_entries = unified_l1_entries;
-                            self.pending_l1_group_starts = unified_group_starts;
-                            self.pending_l1_trigger_metadata = unified_trigger_metadata;
+                            self.pending_l1_entries = l1_entries_owned;
+                            self.pending_l1_group_starts = group_starts;
+                            self.pending_l1_trigger_metadata = trigger_metadata;
                         }
                         return Ok(());
                     }
@@ -2440,24 +2301,19 @@ where
                     self.pending_submissions.push_front(block);
                 }
                 // Put entries back
-                self.pending_cross_chain_entries = entries;
-                self.pending_continuation_l1_entries = continuation_l1_entries;
-                self.pending_withdrawal_l1_entries = withdrawal_l1_entries;
-                self.pending_withdrawal_metadata = withdrawal_metadata;
-                self.pending_l1_entries = unified_l1_entries;
-                self.pending_l1_group_starts = unified_group_starts;
-                self.pending_l1_trigger_metadata = unified_trigger_metadata;
+                self.pending_l1_entries = l1_entries_owned;
+                self.pending_l1_group_starts = group_starts;
+                self.pending_l1_trigger_metadata = trigger_metadata;
             }
         }
 
         Ok(())
     }
 
-    /// Send L1 trigger transactions for pending withdrawals.
+    /// Send L1 trigger transactions for pending L2→L1 calls.
     ///
-    /// For each withdrawal, sends:
-    /// 1. `createCrossChainProxy(user, rollup_id)` on Rollups contract
-    /// 2. Empty call to `proxy(user, rollup_id)` to trigger entry consumption
+    /// For each trigger group, sends one or more `executeL2TX(rollupId, rlpTx)`
+    /// calls to consume the L1 deferred entries posted in the same batch.
     ///
     /// Uses EXPLICIT nonces (queried from L1) instead of alloy's auto-nonce.
     /// This prevents nonce desynchronization when a tx fails — alloy's
@@ -2467,14 +2323,14 @@ where
     ///
     /// On any failure, resets the proposer's nonce cache before returning
     /// the error, so the caller's next `send_to_l1` starts fresh.
-    async fn send_withdrawal_triggers(
+    async fn send_l2_to_l1_triggers(
         &mut self,
-        withdrawals: &[WithdrawalMetadata],
+        triggers: &[TriggerMetadata],
     ) -> Result<Vec<B256>> {
         let proposer = self
             .proposer
             .as_ref()
-            .ok_or_else(|| eyre::eyre!("proposer required for withdrawal triggers"))?;
+            .ok_or_else(|| eyre::eyre!("proposer required for trigger txs"))?;
 
         // Collect all trigger tx hashes for post-receipt verification.
         let mut trigger_tx_hashes: Vec<B256> = Vec::new();
@@ -2485,17 +2341,17 @@ where
         info!(
             target: "based_rollup::driver",
             nonce,
-            withdrawal_count = withdrawals.len(),
-            "starting withdrawal triggers with explicit nonce"
+            trigger_count = triggers.len(),
+            "starting L1 trigger txs with explicit nonce"
         );
 
         /// Gas limit for executeL2TX trigger txs. Must be generous to accommodate
         /// nested scope navigation (delivery + bridge return trips in multi-call patterns).
-        /// The simpler ETH withdrawal trigger uses ~50k, but multi-call with nested
+        /// The simpler single-call trigger uses ~50k, but multi-call with nested
         /// delivery (receiveTokens + claimAndBridgeBack + bridge back) needs ~1.5M+.
         const TRIGGER_GAS: u64 = 3_000_000;
 
-        for w in withdrawals {
+        for w in triggers {
             // Encode executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx)
             // using typed ABI encoding via sol! macro (NEVER hardcode selectors).
             let execute_l2tx_calldata = crate::cross_chain::IRollups::executeL2TXCall {
@@ -2534,7 +2390,7 @@ where
                             rlp_tx_len = w.rlp_encoded_tx.len(),
                             trigger = trigger_idx + 1,
                             total_triggers = w.trigger_count,
-                            "sent executeL2TX withdrawal trigger"
+                            "sent executeL2TX trigger for L2→L1 call"
                         );
                         trigger_tx_hashes.push(hash);
                         nonce += 1;
@@ -2543,7 +2399,7 @@ where
                         warn!(
                             target: "based_rollup::driver",
                             %err, nonce, user = %w.user,
-                            "executeL2TX withdrawal trigger failed — resetting nonce and aborting"
+                            "executeL2TX trigger failed — resetting nonce and aborting"
                         );
                         if let Some(p) = self.proposer.as_mut() {
                             let _ = p.reset_nonce();
@@ -2896,8 +2752,8 @@ where
     }
 
     /// Clear internal driver state (pending submissions, entries, hold).
-    /// Preserves external queues (cross-chain calls, withdrawals) because they
-    /// represent user-initiated actions from the L1/L2 proxy that must eventually
+    /// Preserves external queues (cross-chain calls, L2→L1 calls) because they
+    /// represent user-initiated actions from the composer RPCs that must eventually
     /// be processed — silently discarding them loses user transactions.
     /// Also clears `pending_l1_forward_txs` as defense-in-depth: the normal path
     /// (step_builder) only commits L1 forward txs after successful block builds,
@@ -2905,10 +2761,6 @@ where
     fn clear_internal_state(&mut self) {
         self.preconfirmed_hashes.clear();
         self.pending_submissions.clear();
-        self.pending_cross_chain_entries.clear();
-        self.pending_continuation_l1_entries.clear();
-        self.pending_withdrawal_l1_entries.clear();
-        self.pending_withdrawal_metadata.clear();
         self.pending_l1_entries.clear();
         self.pending_l1_group_starts.clear();
         self.pending_l1_trigger_metadata.clear();
@@ -3514,8 +3366,7 @@ where
 
     /// Generic §4f filtering using `ExecutionConsumed` events.
     ///
-    /// This is the protocol-generic replacement for type-specific deposit/withdrawal
-    /// counting. It works uniformly for any cross-chain entry type:
+    /// Protocol-generic filtering that works uniformly for any cross-chain entry type:
     ///
     /// 1. Trial-executes the full block (with ALL triggers) to get receipts
     /// 2. Identifies trigger tx indices via `ExecutionConsumed` events from the CCM
@@ -3913,9 +3764,9 @@ where
     ///   roots[k] = R(k) = state with loadTable + first k triggers
     ///   roots[T] = speculative = state with all triggers
     ///
-    /// The function is protocol-generic: it doesn't distinguish between deposits,
-    /// withdrawals, or continuations. All trigger types are identified uniformly
-    /// via `ExecutionConsumed` events.
+    /// The function is protocol-generic: it doesn't distinguish between entry types
+    /// (L1→L2 calls, L2→L1 calls, continuations). All trigger types are identified
+    /// uniformly via `ExecutionConsumed` events.
     fn compute_intermediate_roots(
         &self,
         parent_block_number: u64,

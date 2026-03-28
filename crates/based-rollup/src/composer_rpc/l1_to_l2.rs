@@ -590,16 +590,6 @@ async fn run_l2_sim_bundle(
         }
     };
 
-    // Save trace for debugging.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let _ = std::fs::write(
-        format!("/tmp/trace_l2sim_{ts}.json"),
-        serde_json::to_string_pretty(&body).unwrap_or_default(),
-    );
-
     // Extract the exec trace (tx[1]).
     // result[0] = bundle traces array, result[0][1] = exec tx trace.
     // Fall back to result[0][0] if only 1 trace returned.
@@ -625,17 +615,8 @@ async fn run_l2_sim_bundle(
         return None;
     };
 
-    let has_error = exec_trace.get("error").is_some() || exec_trace.get("revertReason").is_some();
-    let success = !has_error;
-
-    tracing::info!(
-        target: "based_rollup::l1_proxy::debug256",
-        file = %format!("/tmp/trace_l2sim_{ts}.json"),
-        success,
-        has_error,
-        output_len = exec_trace.get("output").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0),
-        "run_l2_sim_bundle trace saved"
-    );
+    let success =
+        exec_trace.get("error").is_none() && exec_trace.get("revertReason").is_none();
 
     Some((exec_trace.clone(), success))
 }
@@ -840,14 +821,13 @@ async fn simulate_l1_to_l2_call_on_l2(
     // Step 5: Extract return data.
     let return_data = extract_return_data_from_trace(&trace);
 
-    tracing::info!(
-        target: "based_rollup::l1_proxy::debug256",
+    tracing::debug!(
+        target: "based_rollup::l1_proxy",
         dest = %destination,
         source = %source_address,
         return_data_len = return_data.len(),
         call_success = success,
         child_count = children.len(),
-        has_error = trace.get("error").is_some(),
         "initial L2 simulation result"
     );
 
@@ -1611,14 +1591,6 @@ async fn trace_and_detect_internal_calls(
             "id": 1
         });
 
-        // Save request to file for debugging (#256)
-        let req_json = serde_json::to_string_pretty(&trace_req).unwrap_or_default();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let _ = std::fs::write(format!("/tmp/trace_req_initial_{ts}.json"), &req_json);
-
         let resp = client
             .post(l1_rpc_url)
             .json(&trace_req)
@@ -1626,15 +1598,6 @@ async fn trace_and_detect_internal_calls(
             .await?
             .json::<Value>()
             .await?;
-
-        // Save response to file for debugging (#256)
-        let resp_json = serde_json::to_string_pretty(&resp).unwrap_or_default();
-        let _ = std::fs::write(format!("/tmp/trace_resp_initial_{ts}.json"), &resp_json);
-        tracing::info!(
-            target: "based_rollup::l1_proxy::debug256",
-            file = %format!("/tmp/trace_resp_initial_{ts}.json"),
-            "saved initial debug_traceCall request+response to files"
-        );
 
         if let Some(error) = resp.get("error") {
             tracing::debug!(
@@ -1650,12 +1613,6 @@ async fn trace_and_detect_internal_calls(
             None => return Ok(None),
         }
     };
-
-    tracing::info!(
-        target: "based_rollup::l1_proxy::debug256",
-        trace_json = %serde_json::to_string(&trace_result).unwrap_or_default().chars().take(3000).collect::<String>(),
-        "initial debug_traceCall full trace"
-    );
 
     // Check if the top-level call reverted — indicates the tx needs entries posted first.
     let top_level_error = trace_result.get("error").is_some()
@@ -1757,14 +1714,13 @@ async fn trace_and_detect_internal_calls(
                 )
                 .await
             };
-            tracing::info!(
-                target: "based_rollup::l1_proxy::debug256",
+            tracing::debug!(
+                target: "based_rollup::l1_proxy",
                 dest = %call_destination,
                 source = %call_source,
                 return_data_len = ret_data.len(),
                 call_success = success,
                 child_l2_to_l1_calls = child_calls.len(),
-                return_data_hex = %if ret_data.is_empty() { "EMPTY".to_string() } else { format!("0x{}", hex::encode(&ret_data[..std::cmp::min(ret_data.len(), 64)])) },
                 chained = call_idx > 0,
                 "simulate_l1_to_l2_call_on_l2 result"
             );
@@ -2204,17 +2160,6 @@ async fn trace_and_detect_internal_calls(
                         "id": 3
                     });
 
-                    // Save iterative request to file (#256 debug)
-                    let req_json = serde_json::to_string_pretty(&trace_req).unwrap_or_default();
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis();
-                    let _ = std::fs::write(
-                        format!("/tmp/trace_req_iter{iteration}_{ts}.json"),
-                        &req_json,
-                    );
-
                     let resp = match client.post(l1_rpc_url).json(&trace_req).send().await {
                         Ok(r) => match r.json::<Value>().await {
                             Ok(v) => v,
@@ -2228,19 +2173,6 @@ async fn trace_and_detect_internal_calls(
                             break;
                         }
                     };
-
-                    // Save iterative response to file (#256 debug)
-                    let resp_json = serde_json::to_string_pretty(&resp).unwrap_or_default();
-                    let _ = std::fs::write(
-                        format!("/tmp/trace_resp_iter{iteration}_{ts}.json"),
-                        &resp_json,
-                    );
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy::debug256",
-                        file = %format!("/tmp/trace_resp_iter{iteration}_{ts}.json"),
-                        iteration,
-                        "saved iterative traceCallMany request+response to files"
-                    );
 
                     // Extract traces from result.
                     // debug_traceCallMany returns Vec<Vec<GethTrace>>:
@@ -2296,21 +2228,6 @@ async fn trace_and_detect_internal_calls(
 
                     let user_trace = &bundle_traces[1];
 
-                    // debug256: dump full user_trace JSON
-                    {
-                        let trace_str: String = serde_json::to_string(user_trace)
-                            .unwrap_or_default()
-                            .chars()
-                            .take(3000)
-                            .collect();
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy::debug256",
-                            iteration,
-                            user_trace_json = %trace_str,
-                            "iterative traceCallMany user_trace dump"
-                        );
-                    }
-
                     // Log user tx trace status with decoded error
                     let user_error = user_trace
                         .get("error")
@@ -2337,30 +2254,15 @@ async fn trace_and_detect_internal_calls(
                     } else {
                         ""
                     };
-                    tracing::info!(
+                    tracing::debug!(
                         target: "based_rollup::l1_proxy",
-                        "╔══ traceCallMany Result ══"
-                    );
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        "║ postBatch (tx1): {}",
-                        if tx1_trace.get("error").is_some() { "REVERTED" } else { "SUCCESS" }
-                    );
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        "║ userTx (tx2):   {} — {} {}",
-                        if user_error == "none" { "SUCCESS" } else { "REVERTED" },
-                        decoded_error,
-                        if !inner_error.is_empty() { format!("(inner: {})", inner_error) } else { String::new() }
-                    );
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        "║ userTx subcalls: {}",
-                        user_calls_count
-                    );
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        "╚═════════════════════════"
+                        iteration,
+                        postbatch_ok = tx1_trace.get("error").is_none(),
+                        user_ok = user_error == "none",
+                        %decoded_error,
+                        %inner_error,
+                        user_calls_count,
+                        "traceCallMany iteration result"
                     );
 
                     // Walk the user tx trace for new cross-chain calls
@@ -2374,30 +2276,12 @@ async fn trace_and_detect_internal_calls(
                     )
                     .await;
 
-                    tracing::info!(
+                    tracing::debug!(
                         target: "based_rollup::l1_proxy",
                         new_detected_count = new_detected.len(),
+                        all_calls_count = all_calls.len(),
                         "walked user tx trace for cross-chain calls"
                     );
-
-                    // debug256: dump walk results
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy::debug256",
-                        new_detected_count = new_detected.len(),
-                        all_calls_count = all_calls.len(),
-                        "walk_trace_tree completed for re-trace iteration"
-                    );
-                    for (i, c) in new_detected.iter().enumerate() {
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy::debug256",
-                            index = i,
-                            dest = %c.destination,
-                            source = %c.source_address,
-                            calldata_len = c.calldata.len(),
-                            value = %c.value,
-                            "new_detected call"
-                        );
-                    }
 
                     // Find truly new calls using count-based comparison.
                     // A call is "new" only if new_detected has MORE of that
@@ -2412,20 +2296,6 @@ async fn trace_and_detect_internal_calls(
                             && a.value == b.value
                             && a.source_address == b.source_address
                     });
-
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy::debug256",
-                        new_calls_count = new_calls.len(),
-                        "filter_new_by_count result"
-                    );
-
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy::debug256",
-                        new_calls_count = new_calls.len(),
-                        user_reverted = user_error != "none",
-                        user_error = %user_error,
-                        "convergence decision"
-                    );
 
                     if new_calls.is_empty() {
                         tracing::info!(

@@ -393,7 +393,7 @@ async fn simulate_in_background(client: &reqwest::Client, upstream_url: &str, ra
 /// `BuildL2ToL1ExecutionTableParams` and queues them atomically via the RPC.
 ///
 /// The RPC builds L2 table entries (CALL+RESULT pairs for each L2→L1 call) and
-/// 3 L1 deferred entries (continuation structure), queued as a single `QueuedWithdrawal`.
+/// 3 L1 deferred entries (continuation structure), queued as a single `QueuedL2ToL1Call`.
 #[allow(clippy::too_many_arguments)]
 async fn queue_l2_to_l1_multi_call_entries(
     client: &reqwest::Client,
@@ -1657,7 +1657,7 @@ async fn simulate_l1_delivery(
         // On subsequent iterations, include continuation entries for discovered return calls.
         let entries = if all_return_calls.is_empty() {
             // Simple case: just the original L2→L1 call
-            let withdrawal_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+            let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
                 destination,
                 data.to_vec(),
                 value,
@@ -1667,7 +1667,7 @@ async fn simulate_l1_delivery(
                 vec![],                  // placeholder delivery_return_data
                 false,                   // placeholder delivery_failed
             );
-            withdrawal_entries.l1_deferred_entries
+            call_entries.l1_deferred_entries
         } else {
             // Continuation case: use the SAME table builder functions as the real
             // batch (build_l2_to_l1_continuation_entries) to ensure identical entry
@@ -1926,31 +1926,6 @@ async fn simulate_l1_delivery(
             // all inner calls (proxy calls, executeCrossChainCall, etc.) which
             // are needed for depth-N return call discovery.
         }
-
-        // DEBUG: dump BOTH traces for depth-N investigation
-        // Log tx0 root-level info without the full trace (too large)
-        let tx0_error = bundle_traces[0].get("error").and_then(|v| v.as_str()).unwrap_or("NONE");
-        let tx0_output = bundle_traces[0].get("output").and_then(|v| v.as_str()).unwrap_or("").chars().take(20).collect::<String>();
-        let tx0_to = bundle_traces[0].get("to").and_then(|v| v.as_str()).unwrap_or("?");
-        let tx0_input_sel = bundle_traces[0].get("input").and_then(|v| v.as_str()).unwrap_or("").chars().take(10).collect::<String>();
-        let tx0_trace_str = format!("to={} sel={} error={} output={}", tx0_to, tx0_input_sel, tx0_error, tx0_output);
-        let tx1_trace_str: String = serde_json::to_string(&bundle_traces[1])
-            .unwrap_or_default()
-            .chars()
-            .take(8000)
-            .collect();
-        tracing::info!(
-            target: "based_rollup::proxy",
-            iteration,
-            tx0_trace = %tx0_trace_str,
-            "DEBUG: L1 delivery simulation postBatch trace (tx0)"
-        );
-        tracing::info!(
-            target: "based_rollup::proxy",
-            iteration,
-            tx1_trace = %tx1_trace_str,
-            "DEBUG: L1 delivery simulation trigger trace (tx1)"
-        );
 
         // Extract delivery output from executeL2TX trace (tx1).
         let trigger_trace = &bundle_traces[1];
@@ -2493,7 +2468,7 @@ async fn simulate_l1_combined_delivery(
 
             let entries = if my_return_calls.is_empty() {
                 // Simple case: just this L2→L1 call.
-                let withdrawal_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+                let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
                     call.destination,
                     call.calldata.to_vec(),
                     call.value,
@@ -2503,7 +2478,7 @@ async fn simulate_l1_combined_delivery(
                     per_call_return_data[i].clone(),
                     per_call_delivery_failed[i],
                 );
-                withdrawal_entries.l1_deferred_entries
+                call_entries.l1_deferred_entries
             } else {
                 // Continuation case: use the SAME table builder functions as the
                 // real batch to ensure identical entry ordering (same fix as
@@ -3626,7 +3601,7 @@ async fn trace_and_detect_l2_internal_calls(
             // Step 1: Build L2 table entries for all known calls.
             let mut l2_table_entries = Vec::new();
             for call in &all_calls {
-                let withdrawal_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+                let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
                     call.destination,
                     call.calldata.clone(),
                     call.value,
@@ -3636,7 +3611,7 @@ async fn trace_and_detect_l2_internal_calls(
                     vec![],           // delivery_return_data (placeholder for discovery)
                     false,            // delivery_failed (placeholder for discovery)
                 );
-                l2_table_entries.extend(withdrawal_entries.l2_table_entries);
+                l2_table_entries.extend(call_entries.l2_table_entries);
             }
 
             // Step 2: Encode loadExecutionTable calldata.

@@ -185,18 +185,18 @@ pub struct QueuedCrossChainCall {
     pub l1_entries: Vec<CrossChainExecutionEntry>,
 }
 
-/// A queued L2→L1 withdrawal with L2 table entries and L1 deferred entries.
-/// The driver drains these into the next block alongside any deposit entries
+/// A queued L2→L1 call with L2 table entries and L1 deferred entries.
+/// The driver drains these into the next block alongside any L1→L2 entries
 /// (unified intermediate roots handle both types in the same block).
 #[derive(Debug, Clone)]
-pub struct QueuedWithdrawal {
+pub struct QueuedL2ToL1Call {
     /// L2 table entries (loaded via loadExecutionTable).
     pub l2_table_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
     /// L1 deferred entries (posted via postBatch, consumed by executeL2TX trigger).
     pub l1_deferred_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
-    /// User address (withdrawal initiator).
+    /// User address (L2→L1 call initiator).
     pub user: Address,
-    /// Withdrawal amount in wei.
+    /// ETH amount in wei.
     pub amount: U256,
     /// Held raw L2 transaction for hold-then-forward pattern.
     /// When non-empty, the proxy held this tx instead of forwarding to upstream;
@@ -446,9 +446,9 @@ pub struct SyncRollupsRpc<Provider> {
     /// Legacy queue for raw signed L1 txs (kept for backward compatibility with
     /// `queueL1ForwardTx` RPC method — the unified path uses `queued_cross_chain_calls`).
     pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
-    /// Queue for L2→L1 withdrawals. Each entry bundles L2 table entries and L1
-    /// deferred entries. The driver drains these alongside deposits (unified roots).
-    queued_withdrawals: Arc<std::sync::Mutex<Vec<QueuedWithdrawal>>>,
+    /// Queue for L2→L1 calls. Each entry bundles L2 table entries and L1
+    /// deferred entries. The driver drains these alongside L1→L2 entries (unified roots).
+    queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<QueuedL2ToL1Call>>>,
 }
 
 impl<Provider> SyncRollupsRpc<Provider> {
@@ -460,7 +460,7 @@ impl<Provider> SyncRollupsRpc<Provider> {
         synced: Arc<std::sync::atomic::AtomicBool>,
         queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>>,
         pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
-        queued_withdrawals: Arc<std::sync::Mutex<Vec<QueuedWithdrawal>>>,
+        queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<QueuedL2ToL1Call>>>,
     ) -> Self {
         Self {
             provider,
@@ -469,7 +469,7 @@ impl<Provider> SyncRollupsRpc<Provider> {
             synced,
             queued_cross_chain_calls,
             pending_l1_forward_txs,
-            queued_withdrawals,
+            queued_l2_to_l1_calls,
         }
     }
 }
@@ -737,7 +737,7 @@ where
 
         {
             let mut queue = self
-                .queued_withdrawals
+                .queued_l2_to_l1_calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if queue.len() >= 100 {
@@ -747,7 +747,7 @@ where
                     None::<()>,
                 ));
             }
-            queue.push(QueuedWithdrawal {
+            queue.push(QueuedL2ToL1Call {
                 l2_table_entries: entries.l2_table_entries,
                 l1_deferred_entries: entries.l1_deferred_entries,
                 user: entries.user,
@@ -1067,12 +1067,12 @@ where
             "built L2→L1 execution table for reverse multi-call continuation"
         );
 
-        // Queue as a QueuedWithdrawal with L2 table entries and L1 deferred entries.
-        // The L1 deferred entries go to pending_withdrawal_l1_entries in the driver,
+        // Queue as a QueuedL2ToL1Call with L2 table entries and L1 deferred entries.
+        // The L1 deferred entries go to pending_l1_entries in the driver,
         // which handles them via the trigger flow (postBatch + createProxy + trigger).
         {
             let mut queue = self
-                .queued_withdrawals
+                .queued_l2_to_l1_calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if queue.len() >= 100 {
@@ -1086,7 +1086,7 @@ where
             // consumes one L2TX-triggered entry via _findAndApplyExecution (swap-and-pop).
             // Continuation entries (reentrant children) are consumed within scope resolution.
             let root_call_count = params.l2_calls.len();
-            queue.push(QueuedWithdrawal {
+            queue.push(QueuedL2ToL1Call {
                 l2_table_entries: continuation.l2_entries,
                 l1_deferred_entries: continuation.l1_entries,
                 user: params.l2_calls[0].source_address,
@@ -1106,7 +1106,7 @@ where
                 target: "based_rollup::rpc",
                 l2_call_count = params.l2_calls.len(),
                 return_call_count = params.return_calls.len(),
-                "queued L2->L1 multi-call withdrawal with L2TX trigger"
+                "queued L2->L1 multi-call with L2TX trigger"
             );
         }
 
