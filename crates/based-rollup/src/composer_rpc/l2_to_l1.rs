@@ -1718,6 +1718,18 @@ async fn simulate_l1_delivery(
             continuation.l1_entries
         };
 
+        // Clear placeholder state deltas for simulation-only entries.
+        // Entries are built with currentState=0x0 / newState=0x0 (placeholders
+        // for the driver to fill with real intermediate roots). In the simulation,
+        // Rollups.sol._findAndApplyExecution checks delta.currentState against the
+        // on-chain root — 0x0 never matches. Clearing deltas makes the match
+        // unconditional (empty deltas → no state root check).
+        // Same fix as L1→L2 path (commit 6885cf0).
+        let mut entries = entries;
+        for e in &mut entries {
+            e.state_deltas.clear();
+        }
+
         if entries.is_empty() {
             tracing::warn!(
                 target: "based_rollup::proxy",
@@ -1915,22 +1927,33 @@ async fn simulate_l1_delivery(
             // are needed for depth-N return call discovery.
         }
 
+        // DEBUG: dump BOTH traces for depth-N investigation
+        // Log tx0 root-level info without the full trace (too large)
+        let tx0_error = bundle_traces[0].get("error").and_then(|v| v.as_str()).unwrap_or("NONE");
+        let tx0_output = bundle_traces[0].get("output").and_then(|v| v.as_str()).unwrap_or("").chars().take(20).collect::<String>();
+        let tx0_to = bundle_traces[0].get("to").and_then(|v| v.as_str()).unwrap_or("?");
+        let tx0_input_sel = bundle_traces[0].get("input").and_then(|v| v.as_str()).unwrap_or("").chars().take(10).collect::<String>();
+        let tx0_trace_str = format!("to={} sel={} error={} output={}", tx0_to, tx0_input_sel, tx0_error, tx0_output);
+        let tx1_trace_str: String = serde_json::to_string(&bundle_traces[1])
+            .unwrap_or_default()
+            .chars()
+            .take(2000)
+            .collect();
+        tracing::info!(
+            target: "based_rollup::proxy",
+            iteration,
+            tx0_trace = %tx0_trace_str,
+            "DEBUG: L1 delivery simulation postBatch trace (tx0)"
+        );
+        tracing::info!(
+            target: "based_rollup::proxy",
+            iteration,
+            tx1_trace = %tx1_trace_str,
+            "DEBUG: L1 delivery simulation trigger trace (tx1)"
+        );
+
         // Extract delivery output from executeL2TX trace (tx1).
         let trigger_trace = &bundle_traces[1];
-        // DEBUG: dump trigger trace for depth-N investigation
-        {
-            let trace_str: String = serde_json::to_string(trigger_trace)
-                .unwrap_or_default()
-                .chars()
-                .take(2000)
-                .collect();
-            tracing::info!(
-                target: "based_rollup::proxy",
-                iteration,
-                trigger_trace_json = %trace_str,
-                "DEBUG: L1 delivery simulation trigger trace (tx1)"
-            );
-        }
         let (return_data, _delivery_failed) =
             extract_delivery_output_from_trigger_trace(trigger_trace, destination);
 

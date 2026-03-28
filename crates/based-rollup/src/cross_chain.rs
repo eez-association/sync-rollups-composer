@@ -791,6 +791,15 @@ pub fn build_l2_to_l1_call_entries(
         &l1_trigger_action.to_sol_action(),
     ));
 
+    tracing::info!(
+        target: "based_rollup::cross_chain",
+        %l1_trigger_hash,
+        rlp_len = l1_trigger_action.data.len(),
+        rlp_prefix = %format!("0x{}", hex::encode(&l1_trigger_action.data[..std::cmp::min(20, l1_trigger_action.data.len())])),
+        rollup_id = %l1_trigger_action.rollup_id,
+        "DEBUG: L2TX entry action_hash (from build_l2_to_l1_call_entries)"
+    );
+
     // nextAction for L2TX trigger = delivery CALL (executes on L1 via _resolveScopes)
     // Per spec: scope=[] (empty). _resolveScopes sees CALL with empty scope → enters
     // _processCallAtScope directly to execute the delivery.
