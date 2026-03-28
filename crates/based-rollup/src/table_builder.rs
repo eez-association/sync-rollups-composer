@@ -1479,26 +1479,28 @@ pub fn build_l2_to_l1_continuation_entries(
         let trigger_hash = compute_action_hash(&trigger);
 
         if root_pos == 0 {
-            // FIRST call: delivery CALL with scope=[] (empty per spec).
-            // _resolveScopes sees CALL with empty scope → _processCallAtScope →
-            // executeOnBehalf(destination, data) which ACTUALLY EXECUTES the delivery.
+            // FIRST call: delivery CALL.
+            // When delivery_failed: scope=[0] for REVERT handling.
+            // When success: scope=[] (empty per spec, enters _processCallAtScope directly).
+            let delivery_scope = if l2_call.l2_delivery_failed {
+                vec![U256::ZERO]
+            } else {
+                vec![]
+            };
             let delivery = CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: U256::ZERO,
-                destination: l2_call.call_action.destination, // L1 target (e.g., Bridge_L1)
+                destination: l2_call.call_action.destination,
                 value: l2_call.call_action.value,
                 data: l2_call.call_action.data.clone(),
                 failed: false,
-                source_address: l2_call.call_action.source_address, // L2 source (e.g., Bridge_L2)
+                source_address: l2_call.call_action.source_address,
                 source_rollup: our_rollup_id,
-                scope: vec![],
+                scope: delivery_scope,
             };
 
-            // The delivery CALL sends ETH via the proxy (action.value).
-            // Rollups.sol tracks this as _etherDelta -= value in _processCallAtScope.
-            // The stateDelta must reflect this: negative ether_delta for ETH leaving
-            // the rollup. Without this, _applyStateDeltas fails with EtherDeltaMismatch.
-            let delivery_ether_delta = if delivery.value.is_zero() {
+            // When delivery reverts, no ETH is sent → ether_delta = 0 for ALL entries.
+            let delivery_ether_delta = if l2_call.l2_delivery_failed || delivery.value.is_zero() {
                 alloy_primitives::I256::ZERO
             } else {
                 -alloy_primitives::I256::try_from(delivery.value)
@@ -1507,12 +1509,11 @@ pub fn build_l2_to_l1_continuation_entries(
 
             tracing::info!(
                 target: "based_rollup::table_builder",
-                "L1 Entry {} (trigger→delivery): hash={} delivery_dest={} data_len={} ether_delta={}",
-                root_pos, trigger_hash, delivery.destination, trigger.data.len(), delivery_ether_delta
+                "L1 Entry {} (trigger→delivery): hash={} delivery_dest={} data_len={} ether_delta={} delivery_failed={}",
+                root_pos, trigger_hash, delivery.destination, trigger.data.len(), delivery_ether_delta, l2_call.l2_delivery_failed
             );
 
             // Trigger entry: consumed BEFORE the delivery CALL executes.
-            // At consumption: _etherDelta = 0 → ether_delta must be 0.
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
                     rollup_id: our_rollup_id,
@@ -1524,72 +1525,133 @@ pub fn build_l2_to_l1_continuation_entries(
                 next_action: delivery,
             });
 
-            // If the first call's delivery execution triggers reentrant child calls
-            // (e.g., delivery of receiveTokens triggers a bridgeTokens back), add
-            // reentrant entries for each child. These are consumed by reentrant
-            // executeCrossChainCall within the delivery's scope.
-            // For depth > 1, this recurses into children with grandchildren.
-            push_reentrant_child_entries(
-                &this_call_children,
-                detected,
-                our_rollup_id,
-                orig_idx,
-                &empty_deltas,
-                &l1_result_void,
-                &mut l1_entries,
-            );
+            if !l2_call.l2_delivery_failed {
+                // ── Success path ──
+                // Reentrant child entries (if any).
+                push_reentrant_child_entries(
+                    &this_call_children,
+                    detected,
+                    our_rollup_id,
+                    orig_idx,
+                    &empty_deltas,
+                    &l1_result_void,
+                    &mut l1_entries,
+                );
 
-            // Delivery RESULT resolution entry.
-            // _processCallAtScope builds RESULT{data: returnData} from executeOnBehalf's
-            // raw return. The return data depends on what the delivery function returns:
-            //   - void functions: returnData = "" (0 bytes) → result_void
-            //   - functions returning data (e.g., Logger.execute → bytes): returnData
-            //     is ABI-encoded, even when inner calls return empty via result_void
-            //     entries (e.g., abi.encode(bytes("")) = 64 bytes)
-            // The simulation must include inner call entries so it produces the same
-            // return data as the real execution (issue #245).
-            let delivery_result =
-                if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
-                    result_void(U256::ZERO)
-                } else {
-                    CrossChainAction {
-                        action_type: CrossChainActionType::Result,
-                        rollup_id: U256::ZERO,
-                        destination: Address::ZERO,
-                        value: U256::ZERO,
-                        data: l2_call.delivery_return_data.clone(),
-                        failed: l2_call.l2_delivery_failed,
-                        source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
-                        scope: vec![],
-                    }
+                // Delivery RESULT resolution entry.
+                let delivery_result =
+                    if l2_call.delivery_return_data.is_empty() {
+                        result_void(U256::ZERO)
+                    } else {
+                        CrossChainAction {
+                            action_type: CrossChainActionType::Result,
+                            rollup_id: U256::ZERO,
+                            destination: Address::ZERO,
+                            value: U256::ZERO,
+                            data: l2_call.delivery_return_data.clone(),
+                            failed: false,
+                            source_address: Address::ZERO,
+                            source_rollup: U256::ZERO,
+                            scope: vec![],
+                        }
+                    };
+                let delivery_result_hash = compute_action_hash(&delivery_result);
+                let l1_delivery_exit = CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: our_rollup_id,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: vec![],
+                    failed: false,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
                 };
-            let delivery_result_hash = compute_action_hash(&delivery_result);
-            // §C.6: L2TX terminal RESULT is always void with rollupId = triggering rollupId.
-            // This applies regardless of whether inner calls return data.
-            let l1_delivery_exit = CrossChainAction {
-                action_type: CrossChainActionType::Result,
-                rollup_id: our_rollup_id, // triggering rollupId (L2)
-                destination: Address::ZERO,
-                value: U256::ZERO,
-                data: vec![], // always empty per §C.6
-                failed: false,
-                source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
-                scope: vec![],
-            };
-            // Scope resolution: consumed AFTER the delivery CALL executes.
-            // At consumption: _etherDelta = -value (ETH was sent) → ether_delta must be -value.
-            l1_entries.push(CrossChainExecutionEntry {
-                state_deltas: vec![CrossChainStateDelta {
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: vec![CrossChainStateDelta {
+                        rollup_id: our_rollup_id,
+                        current_state: alloy_primitives::B256::ZERO,
+                        new_state: alloy_primitives::B256::ZERO,
+                        ether_delta: delivery_ether_delta,
+                    }],
+                    action_hash: delivery_result_hash,
+                    next_action: l1_delivery_exit,
+                });
+            } else {
+                // ── REVERT_CONTINUE path (§D.6) ──
+                // Delivery reverted → L2TX cannot end with RESULT(failed).
+                // 2 additional entries: RESULT(failed) → REVERT, REVERT_CONTINUE → RESULT(ok).
+
+                let delivery_result = CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: U256::ZERO,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: l2_call.delivery_return_data.clone(),
+                    failed: true,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                };
+                let delivery_result_hash = compute_action_hash(&delivery_result);
+
+                let revert_action = CrossChainAction {
+                    action_type: CrossChainActionType::Revert,
+                    rollup_id: our_rollup_id,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: vec![],
+                    failed: false,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![U256::ZERO],
+                };
+
+                let revert_continue_action = CrossChainAction {
+                    action_type: CrossChainActionType::RevertContinue,
+                    rollup_id: our_rollup_id,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: vec![],
+                    failed: true,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                };
+                let revert_continue_hash = compute_action_hash(&revert_continue_action);
+
+                let l1_delivery_exit = CrossChainAction {
+                    action_type: CrossChainActionType::Result,
+                    rollup_id: our_rollup_id,
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: vec![],
+                    failed: false,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                };
+
+                let zero_delta = CrossChainStateDelta {
                     rollup_id: our_rollup_id,
                     current_state: alloy_primitives::B256::ZERO,
                     new_state: alloy_primitives::B256::ZERO,
-                    ether_delta: delivery_ether_delta,
-                }],
-                action_hash: delivery_result_hash,
-                next_action: l1_delivery_exit,
-            });
+                    ether_delta: alloy_primitives::I256::ZERO,
+                };
+
+                // Entry[1]: RESULT(failed) → REVERT(scope=[0])
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: vec![zero_delta.clone()],
+                    action_hash: delivery_result_hash,
+                    next_action: revert_action,
+                });
+                // Entry[2]: REVERT_CONTINUE → RESULT(L2, ok)
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: vec![zero_delta],
+                    action_hash: revert_continue_hash,
+                    next_action: l1_delivery_exit,
+                });
+            }
         } else if !this_call_children.is_empty() {
             // Subsequent call WITH children: EXECUTION with scope=[0].
             // _processCallAtScope creates the proxy and calls executeOnBehalf,

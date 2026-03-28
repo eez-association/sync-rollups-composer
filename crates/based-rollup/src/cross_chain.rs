@@ -861,7 +861,9 @@ pub fn build_l2_to_l1_call_entries(
     //
     // Entry[1] (scope resolution RESULT) is consumed AFTER the CALL executes.
     //   At consumption: _etherDelta = -value (ETH was sent) → ether_delta must be -value.
-    let delivery_ether_delta = if value.is_zero() {
+    // When delivery reverts (delivery_failed=true), no ETH is actually sent —
+    // the EVM rolls back the value transfer. ether_delta must be 0.
+    let delivery_ether_delta = if delivery_failed || value.is_zero() {
         I256::ZERO
     } else {
         -I256::try_from(value).unwrap_or(I256::ZERO)
@@ -887,6 +889,203 @@ pub fn build_l2_to_l1_call_entries(
             }],
             action_hash: l1_delivery_result_hash,
             next_action: l2tx_terminal, // §C.6: L2TX terminal is always void
+        },
+    ];
+
+    WithdrawalEntries {
+        l2_table_entries,
+        l1_deferred_entries,
+        user: source_address,
+        amount: value,
+    }
+}
+
+/// Build L2→L1 REVERT_CONTINUE entries when delivery reverts on L1.
+///
+/// When `executeL2TX` triggers a delivery call that reverts, L2TX CANNOT end with
+/// RESULT(failed). Instead, the REVERT_CONTINUE mechanism unwinds the scope:
+///
+/// L1 entries (3):
+///   [0] hash(L2TX) → CALL(dest, scope=[0])         — triggers scoped delivery
+///   [1] hash(RESULT(L1, failed)) → REVERT(L2, scope=[0]) — signals scope revert
+///   [2] hash(REVERT_CONTINUE(L2)) → RESULT(L2, ok)  — continuation after revert
+///
+/// L2 entry (1):
+///   [0] hash(CALL) → RESULT(L1, failed=true, revertData) — terminal failure on L2
+///
+/// All ether_delta = 0 (delivery reverted, no ETH sent).
+///
+/// Reference: `script/e2e/revertCounterL2/E2E.s.sol`
+#[allow(clippy::too_many_arguments)]
+pub fn build_l2_to_l1_revert_entries(
+    destination: Address,
+    data: Vec<u8>,
+    value: U256,
+    source_address: Address,
+    rollup_id: u64,
+    rlp_encoded_tx: Vec<u8>,
+    delivery_return_data: Vec<u8>,
+) -> WithdrawalEntries {
+    let rollup_id_u256 = U256::from(rollup_id);
+
+    // ── L2 table entry (1 entry) ──
+    // CALL → RESULT(L1, failed=true, revertData)
+    // executeCrossChainCall on L2 consumes this, sees failed=true → CallExecutionFailed → reverts.
+    let l2_call_action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: U256::ZERO, // target = L1
+        destination,
+        value,
+        data: data.clone(),
+        failed: false,
+        source_address,
+        source_rollup: rollup_id_u256,
+        scope: vec![],
+    };
+    let l2_result_action = CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id: U256::ZERO,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: delivery_return_data.clone(),
+        failed: true, // delivery reverted
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+
+    let l2_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l2_call_action.to_sol_action(),
+    ));
+
+    // Only 1 L2 entry: CALL → RESULT(failed). No self-referencing terminal needed
+    // because executeCrossChainCall reverts before reaching it.
+    let l2_table_entries = vec![CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash: l2_call_hash,
+        next_action: l2_result_action,
+    }];
+
+    // ── L1 deferred entries (3 entries) ──
+
+    // Entry[0]: L2TX trigger → delivery CALL with scope=[0]
+    let l1_trigger_action = CrossChainAction {
+        action_type: CrossChainActionType::L2Tx,
+        rollup_id: rollup_id_u256,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: rlp_encoded_tx,
+        failed: false,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let l1_trigger_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l1_trigger_action.to_sol_action(),
+    ));
+
+    // Delivery CALL with scope=[0] — enters newScope for REVERT handling
+    let l1_delivery_action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: U256::ZERO,
+        destination,
+        value,
+        data,
+        failed: false,
+        source_address,
+        source_rollup: rollup_id_u256,
+        scope: vec![U256::ZERO], // scope=[0] for REVERT handling
+    };
+
+    // Entry[1]: RESULT(L1, failed) → REVERT(L2, scope=[0])
+    // After _processCallAtScope executes delivery and it reverts,
+    // RESULT(failed=true) is built. The entry maps it to REVERT(scope=[0]).
+    let l1_delivery_result = CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id: U256::ZERO,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: delivery_return_data,
+        failed: true,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let l1_delivery_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l1_delivery_result.to_sol_action(),
+    ));
+
+    // REVERT action: signals scope revert at scope=[0]
+    // Per spec §D.6: REVERT.failed = false, REVERT.rollupId = source rollup (L2)
+    let revert_action = CrossChainAction {
+        action_type: CrossChainActionType::Revert,
+        rollup_id: rollup_id_u256,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: false, // REVERT.failed is always false (§D.6)
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![U256::ZERO],
+    };
+
+    // Entry[2]: REVERT_CONTINUE → terminal RESULT(L2, ok)
+    // _getRevertContinuation builds REVERT_CONTINUE and looks it up in the table.
+    // The continuation provides the final RESULT so executeL2TX succeeds.
+    let revert_continue_action = CrossChainAction {
+        action_type: CrossChainActionType::RevertContinue,
+        rollup_id: rollup_id_u256,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: true, // REVERT_CONTINUE.failed is always true (§D.6)
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let revert_continue_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &revert_continue_action.to_sol_action(),
+    ));
+
+    // Terminal RESULT: L2TX ends with success
+    let l2tx_terminal = CrossChainAction {
+        action_type: CrossChainActionType::Result,
+        rollup_id: rollup_id_u256,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: false,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+
+    // All ether_delta = 0: delivery reverted, no ETH sent
+    let zero_delta = CrossChainStateDelta {
+        rollup_id: rollup_id_u256,
+        current_state: B256::ZERO, // placeholder — driver fills via attach_generic_state_deltas
+        new_state: B256::ZERO,
+        ether_delta: I256::ZERO,
+    };
+
+    let l1_deferred_entries = vec![
+        // Entry[0]: L2TX → CALL(dest, scope=[0])
+        CrossChainExecutionEntry {
+            state_deltas: vec![zero_delta.clone()],
+            action_hash: l1_trigger_hash,
+            next_action: l1_delivery_action,
+        },
+        // Entry[1]: RESULT(failed) → REVERT(scope=[0])
+        CrossChainExecutionEntry {
+            state_deltas: vec![zero_delta.clone()],
+            action_hash: l1_delivery_result_hash,
+            next_action: revert_action,
+        },
+        // Entry[2]: REVERT_CONTINUE → RESULT(L2, ok)
+        CrossChainExecutionEntry {
+            state_deltas: vec![zero_delta],
+            action_hash: revert_continue_hash,
+            next_action: l2tx_terminal,
         },
     ];
 

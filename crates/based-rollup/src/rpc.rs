@@ -712,16 +712,30 @@ where
             ));
         }
 
-        let entries = crate::cross_chain::build_l2_to_l1_call_entries(
-            params.destination,
-            params.data.to_vec(),
-            params.value,
-            params.source_address, // L2 sender: msg.sender in L2 proxy fallback
-            self.config.rollup_id,
-            params.raw_l2_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger on L1
-            params.delivery_return_data.to_vec(),
-            params.delivery_failed,
-        );
+        // When delivery reverts on L1, use REVERT_CONTINUE pattern (§D.6):
+        // L2TX cannot end with RESULT(failed) — ScopeReverted unwinds the scope.
+        let entries = if params.delivery_failed {
+            crate::cross_chain::build_l2_to_l1_revert_entries(
+                params.destination,
+                params.data.to_vec(),
+                params.value,
+                params.source_address,
+                self.config.rollup_id,
+                params.raw_l2_tx.to_vec(),
+                params.delivery_return_data.to_vec(),
+            )
+        } else {
+            crate::cross_chain::build_l2_to_l1_call_entries(
+                params.destination,
+                params.data.to_vec(),
+                params.value,
+                params.source_address,
+                self.config.rollup_id,
+                params.raw_l2_tx.to_vec(),
+                params.delivery_return_data.to_vec(),
+                params.delivery_failed,
+            )
+        };
 
         let call_id = entries.l2_table_entries[0].action_hash;
 

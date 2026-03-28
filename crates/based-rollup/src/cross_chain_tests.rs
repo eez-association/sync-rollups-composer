@@ -2386,3 +2386,470 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         "RESULT hash must change when return data differs"
     );
 }
+
+// ──────────────────────────────────────────────
+//  REVERT / REVERT_CONTINUE entry construction tests
+// ──────────────────────────────────────────────
+
+/// Phase 1: `build_cross_chain_call_entries()` with `call_success=false` must
+/// produce a RESULT action with `failed=true` and revert data, while the CALL
+/// action always has `failed=false`. The RESULT entry must be self-referencing
+/// (action_hash == hash(next_action)).
+#[test]
+fn test_build_cross_chain_call_entries_with_failure() {
+    use alloy_sol_types::SolType;
+
+    let revert_data = vec![0x08, 0xc3, 0x79, 0xa0, 0x00, 0x00, 0x00, 0x20];
+    let (call_entry, result_entry) = build_cross_chain_call_entries(
+        U256::from(1),
+        Address::repeat_byte(0xBB),
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+        U256::from(500),
+        Address::repeat_byte(0xAA),
+        U256::from(2),
+        false, // call failed
+        revert_data.clone(),
+    );
+
+    // CALL action: failed is always false (the CALL itself does not fail,
+    // only the delivery result carries failure status)
+    assert!(
+        !call_entry.next_action.failed,
+        "CALL action must have failed=false regardless of call_success"
+    );
+    assert_eq!(
+        call_entry.next_action.action_type,
+        CrossChainActionType::Call
+    );
+
+    // RESULT action: failed=true when call_success=false
+    assert!(
+        result_entry.next_action.failed,
+        "RESULT action must have failed=true when call_success=false"
+    );
+    assert_eq!(
+        result_entry.next_action.action_type,
+        CrossChainActionType::Result
+    );
+
+    // RESULT action data must contain the revert data
+    assert_eq!(
+        result_entry.next_action.data, revert_data,
+        "RESULT action data must be the revert data from the failed call"
+    );
+
+    // RESULT entry is self-referencing: action_hash == hash(next_action)
+    let expected_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &result_entry.next_action.to_sol_action(),
+    ));
+    assert_eq!(
+        result_entry.action_hash, expected_result_hash,
+        "RESULT entry must be self-referencing: action_hash == hash(next_action)"
+    );
+
+    // CALL entry action_hash == hash(CALL action), not hash(RESULT)
+    let expected_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &call_entry.next_action.to_sol_action(),
+    ));
+    assert_eq!(
+        call_entry.action_hash, expected_call_hash,
+        "CALL entry action_hash must be hash(CALL action)"
+    );
+
+    // CALL and RESULT hashes must differ
+    assert_ne!(
+        call_entry.action_hash, result_entry.action_hash,
+        "CALL and RESULT action hashes must differ"
+    );
+}
+
+/// Phase 2: `build_l2_to_l1_revert_entries()` structure validation.
+/// Verifies: l2_table_entries.len()==1, l1_deferred_entries.len()==3,
+/// entry[0] scope, entry[1] REVERT fields, entry[2] REVERT_CONTINUE hash/terminal,
+/// and all ether_delta==0.
+#[test]
+fn test_build_l2_to_l1_revert_entries_structure() {
+    use alloy_sol_types::SolType;
+
+    let destination = Address::repeat_byte(0xBB);
+    let data = vec![1, 2, 3, 4];
+    let value = U256::from(1000);
+    let source_address = Address::repeat_byte(0xAA);
+    let rollup_id: u64 = 1;
+    let rlp_encoded_tx = vec![0xf8, 0x50];
+    let delivery_return_data = vec![0x08, 0xc3, 0x79, 0xa0]; // Error(string) selector
+
+    let result = build_l2_to_l1_revert_entries(
+        destination,
+        data,
+        value,
+        source_address,
+        rollup_id,
+        rlp_encoded_tx,
+        delivery_return_data.clone(),
+    );
+
+    // L2 table entries: exactly 1 (CALL -> RESULT(failed))
+    assert_eq!(
+        result.l2_table_entries.len(),
+        1,
+        "revert path must have exactly 1 L2 table entry"
+    );
+
+    // L1 deferred entries: exactly 3
+    assert_eq!(
+        result.l1_deferred_entries.len(),
+        3,
+        "revert path must have exactly 3 L1 deferred entries"
+    );
+
+    // Entry[0]: L2TX trigger -> CALL(dest, scope=[0])
+    let entry0 = &result.l1_deferred_entries[0];
+    assert_eq!(
+        entry0.next_action.action_type,
+        CrossChainActionType::Call,
+        "entry[0] next_action must be CALL"
+    );
+    assert_eq!(
+        entry0.next_action.scope,
+        vec![U256::ZERO],
+        "entry[0] next_action must have scope=[0] for REVERT handling"
+    );
+
+    // Entry[1]: RESULT(failed) -> REVERT(scope=[0])
+    let entry1 = &result.l1_deferred_entries[1];
+    assert_eq!(
+        entry1.next_action.action_type,
+        CrossChainActionType::Revert,
+        "entry[1] next_action must be REVERT"
+    );
+    assert!(
+        !entry1.next_action.failed,
+        "REVERT action must have failed=false per spec D.6"
+    );
+    assert_eq!(
+        entry1.next_action.scope,
+        vec![U256::ZERO],
+        "REVERT must have scope=[0]"
+    );
+    assert_eq!(
+        entry1.next_action.rollup_id,
+        U256::from(rollup_id),
+        "REVERT rollup_id must be the source rollup (L2)"
+    );
+
+    // Entry[2]: hash(REVERT_CONTINUE) -> RESULT(ok)
+    let entry2 = &result.l1_deferred_entries[2];
+
+    // Verify entry[2] action_hash is hash of a REVERT_CONTINUE action with failed==true
+    let expected_revert_continue = CrossChainAction {
+        action_type: CrossChainActionType::RevertContinue,
+        rollup_id: U256::from(rollup_id),
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: true, // REVERT_CONTINUE.failed is always true per D.6
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let expected_rc_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &expected_revert_continue.to_sol_action(),
+    ));
+    assert_eq!(
+        entry2.action_hash, expected_rc_hash,
+        "entry[2] action_hash must be hash(REVERT_CONTINUE action with failed=true)"
+    );
+
+    // Entry[2] next_action is terminal RESULT with failed=false and empty data
+    assert_eq!(
+        entry2.next_action.action_type,
+        CrossChainActionType::Result,
+        "entry[2] next_action must be RESULT (terminal)"
+    );
+    assert!(
+        !entry2.next_action.failed,
+        "terminal RESULT must have failed=false"
+    );
+    assert!(
+        entry2.next_action.data.is_empty(),
+        "terminal RESULT must have empty data"
+    );
+
+    // ALL entries must have ether_delta == 0 (delivery reverted, no ETH sent)
+    for (i, entry) in result.l1_deferred_entries.iter().enumerate() {
+        for (j, delta) in entry.state_deltas.iter().enumerate() {
+            assert_eq!(
+                delta.ether_delta,
+                I256::ZERO,
+                "l1_deferred_entries[{i}].state_deltas[{j}].ether_delta must be 0 for reverted delivery"
+            );
+        }
+    }
+}
+
+/// Phase 2: L2 entry structure for revert path.
+/// The L2 entry must be: action_hash==hash(CALL), next_action==RESULT(rollupId=0, failed=true, data=delivery_return_data).
+#[test]
+fn test_build_l2_to_l1_revert_entries_l2_entry() {
+    use alloy_sol_types::SolType;
+
+    let destination = Address::repeat_byte(0xBB);
+    let data = vec![0xDE, 0xAD];
+    let value = U256::from(500);
+    let source_address = Address::repeat_byte(0xAA);
+    let rollup_id: u64 = 1;
+    let rlp_encoded_tx = vec![0xf8, 0x50];
+    let delivery_return_data = vec![0x08, 0xc3, 0x79, 0xa0, 0x00, 0x00, 0x00, 0x20];
+
+    let result = build_l2_to_l1_revert_entries(
+        destination,
+        data.clone(),
+        value,
+        source_address,
+        rollup_id,
+        rlp_encoded_tx,
+        delivery_return_data.clone(),
+    );
+
+    assert_eq!(result.l2_table_entries.len(), 1);
+    let l2_entry = &result.l2_table_entries[0];
+
+    // action_hash must be hash(CALL action targeting L1)
+    let expected_call_action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: U256::ZERO, // target = L1
+        destination,
+        value,
+        data,
+        failed: false,
+        source_address,
+        source_rollup: U256::from(rollup_id),
+        scope: vec![],
+    };
+    let expected_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &expected_call_action.to_sol_action(),
+    ));
+    assert_eq!(
+        l2_entry.action_hash, expected_call_hash,
+        "L2 entry action_hash must be hash(CALL action)"
+    );
+
+    // next_action must be RESULT with failed=true
+    assert_eq!(
+        l2_entry.next_action.action_type,
+        CrossChainActionType::Result,
+        "L2 entry next_action must be RESULT"
+    );
+    assert!(
+        l2_entry.next_action.failed,
+        "L2 RESULT must have failed=true (delivery reverted)"
+    );
+
+    // next_action.rollup_id must be 0 (L1) -- this is the target rollup of the RESULT
+    assert_eq!(
+        l2_entry.next_action.rollup_id,
+        U256::ZERO,
+        "L2 entry next_action.rollup_id must be 0 (L1)"
+    );
+
+    // next_action.data must be the delivery return data (revert reason)
+    assert_eq!(
+        l2_entry.next_action.data, delivery_return_data,
+        "L2 RESULT data must contain the delivery revert data"
+    );
+}
+
+/// Phase 2 - ether_delta fix: when delivery_failed=true, ether_delta must be 0
+/// even when value is non-zero. Compare with delivery_failed=false where
+/// ether_delta must be -value.
+#[test]
+fn test_ether_delta_zero_when_delivery_failed() {
+    let destination = Address::repeat_byte(0xCC);
+    let data = vec![0x01, 0x02];
+    let value = U256::from(1_000_000);
+    let source = Address::repeat_byte(0xDD);
+    let rollup_id: u64 = 1;
+    let rlp = vec![0xc0];
+
+    // Case 1: delivery_failed=true -> ether_delta must be 0
+    let failed_entries = build_l2_to_l1_call_entries(
+        destination,
+        data.clone(),
+        value,
+        source,
+        rollup_id,
+        rlp.clone(),
+        vec![0x08, 0xc3, 0x79, 0xa0], // revert data
+        true,                           // delivery_failed
+    );
+
+    // l1_deferred_entries[1] is the scope resolution entry (consumed AFTER delivery)
+    assert!(
+        failed_entries.l1_deferred_entries.len() >= 2,
+        "must have at least 2 L1 deferred entries"
+    );
+    let failed_delta = &failed_entries.l1_deferred_entries[1].state_deltas[0];
+    assert_eq!(
+        failed_delta.ether_delta,
+        I256::ZERO,
+        "when delivery_failed=true, ether_delta must be 0 (EVM rolls back value transfer)"
+    );
+
+    // Also verify entry[0] trigger delta is always 0
+    let trigger_delta = &failed_entries.l1_deferred_entries[0].state_deltas[0];
+    assert_eq!(
+        trigger_delta.ether_delta,
+        I256::ZERO,
+        "trigger entry ether_delta must always be 0 (consumed BEFORE ETH sent)"
+    );
+
+    // Case 2: delivery_failed=false -> ether_delta must be -value
+    let success_entries = build_l2_to_l1_call_entries(
+        destination,
+        data,
+        value,
+        source,
+        rollup_id,
+        rlp,
+        vec![], // no revert data
+        false,  // delivery_failed=false
+    );
+
+    let success_delta = &success_entries.l1_deferred_entries[1].state_deltas[0];
+    let expected_negative =
+        -I256::try_from(value).expect("1_000_000 should fit in I256");
+    assert_eq!(
+        success_delta.ether_delta, expected_negative,
+        "when delivery_failed=false, ether_delta must be -value"
+    );
+
+    // Trigger delta is still 0 for the success case
+    let success_trigger_delta = &success_entries.l1_deferred_entries[0].state_deltas[0];
+    assert_eq!(
+        success_trigger_delta.ether_delta,
+        I256::ZERO,
+        "trigger entry ether_delta must always be 0 regardless of delivery outcome"
+    );
+}
+
+/// Phase 2 - verify exact REVERT and REVERT_CONTINUE field values match
+/// protocol spec section D.6.
+#[test]
+fn test_revert_action_field_values() {
+    use alloy_sol_types::SolType;
+
+    let result = build_l2_to_l1_revert_entries(
+        Address::repeat_byte(0xBB),
+        vec![0x01],
+        U256::from(100),
+        Address::repeat_byte(0xAA),
+        1, // rollup_id
+        vec![0xc0],
+        vec![0x08, 0xc3, 0x79, 0xa0],
+    );
+
+    // Extract entry[1] next_action = REVERT
+    let revert_action = &result.l1_deferred_entries[1].next_action;
+    assert_eq!(revert_action.action_type, CrossChainActionType::Revert);
+    assert!(
+        !revert_action.failed,
+        "REVERT.failed must be false per D.6"
+    );
+    assert_eq!(
+        revert_action.destination,
+        Address::ZERO,
+        "REVERT.destination must be Address::ZERO per D.6"
+    );
+    assert_eq!(
+        revert_action.value,
+        U256::ZERO,
+        "REVERT.value must be 0 per D.6"
+    );
+    assert!(
+        revert_action.data.is_empty(),
+        "REVERT.data must be empty per D.6"
+    );
+    assert_eq!(
+        revert_action.source_address,
+        Address::ZERO,
+        "REVERT.sourceAddress must be Address::ZERO per D.6"
+    );
+    assert_eq!(
+        revert_action.source_rollup,
+        U256::ZERO,
+        "REVERT.sourceRollup must be 0 per D.6"
+    );
+    // REVERT.rollupId = source rollup (L2), not zero
+    assert_eq!(
+        revert_action.rollup_id,
+        U256::from(1),
+        "REVERT.rollupId must be the source rollup ID"
+    );
+    // REVERT.scope = [0]
+    assert_eq!(
+        revert_action.scope,
+        vec![U256::ZERO],
+        "REVERT.scope must be [0]"
+    );
+
+    // Extract REVERT_CONTINUE action from entry[2] action_hash computation.
+    // The REVERT_CONTINUE is not stored as next_action anywhere; it is used
+    // to derive entry[2].action_hash. Reconstruct it and verify fields.
+    let revert_continue = CrossChainAction {
+        action_type: CrossChainActionType::RevertContinue,
+        rollup_id: U256::from(1),
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: true,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+
+    // Verify this reconstructed REVERT_CONTINUE hashes to entry[2].action_hash
+    let rc_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &revert_continue.to_sol_action(),
+    ));
+    assert_eq!(
+        result.l1_deferred_entries[2].action_hash, rc_hash,
+        "entry[2].action_hash must match hash of REVERT_CONTINUE"
+    );
+
+    // Verify REVERT_CONTINUE field values per D.6
+    assert_eq!(revert_continue.action_type, CrossChainActionType::RevertContinue);
+    assert!(
+        revert_continue.failed,
+        "REVERT_CONTINUE.failed must be true per D.6"
+    );
+    assert_eq!(
+        revert_continue.destination,
+        Address::ZERO,
+        "REVERT_CONTINUE.destination must be Address::ZERO per D.6"
+    );
+    assert_eq!(
+        revert_continue.value,
+        U256::ZERO,
+        "REVERT_CONTINUE.value must be 0 per D.6"
+    );
+    assert!(
+        revert_continue.data.is_empty(),
+        "REVERT_CONTINUE.data must be empty per D.6"
+    );
+    assert_eq!(
+        revert_continue.source_address,
+        Address::ZERO,
+        "REVERT_CONTINUE.sourceAddress must be Address::ZERO per D.6"
+    );
+    assert_eq!(
+        revert_continue.source_rollup,
+        U256::ZERO,
+        "REVERT_CONTINUE.sourceRollup must be 0 per D.6"
+    );
+    // REVERT_CONTINUE.scope = [] (empty, per D.6)
+    assert!(
+        revert_continue.scope.is_empty(),
+        "REVERT_CONTINUE.scope must be empty per D.6"
+    );
+}
