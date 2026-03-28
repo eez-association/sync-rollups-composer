@@ -239,8 +239,8 @@ export function useWallet(log: Logger) {
   /**
    * Send a tx to L2 via the L2 RPC proxy (port 9548).
    *
-   * MUST be used for L2→L1 withdrawals — the proxy detects Bridge.bridgeEther(0),
-   * queues withdrawal entries via syncrollups_initiateWithdrawal BEFORE forwarding
+   * MUST be used for L2→L1 cross-chain calls — the composer detects
+   * executeCrossChainCall via trace, queues entries BEFORE forwarding
    * the tx to the builder (hold-then-forward pattern).
    */
   const sendL2ProxyTx = useCallback(
