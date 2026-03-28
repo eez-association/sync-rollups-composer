@@ -672,7 +672,8 @@ export function useFlashLoan(
       fullnodeStateRoot,
       stateRootsMatch,
       nftMinted,
-      nftTokenId: null, // token ID not discoverable without event log scanning
+      alreadyClaimed: nftMinted || s.alreadyClaimed,
+      nftTokenId: null,
       endTime,
     }));
 
