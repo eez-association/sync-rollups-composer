@@ -1329,19 +1329,21 @@ export function FlashLoanPanel({
         </div>
       )}
 
-      {/* Execute button */}
-      <button
-        className={btnClass}
-        onClick={handleExecute}
-        disabled={busy || !contractsDeployed || alreadyClaimed}
-        style={{ fontSize: 14, padding: "14px 20px", fontWeight: 700 }}
-      >
-        {busy ? (
-          <><span className="btn-spinner" /> {busyLabel}</>
-        ) : (
-          <><IconLightning size={15} /> {buttonLabel} ({directionLabel})</>
-        )}
-      </button>
+      {/* Execute button — hidden when NFT already claimed */}
+      {!alreadyClaimed && (
+        <button
+          className={btnClass}
+          onClick={handleExecute}
+          disabled={busy || !contractsDeployed}
+          style={{ fontSize: 14, padding: "14px 20px", fontWeight: 700 }}
+        >
+          {busy ? (
+            <><span className="btn-spinner" /> {busyLabel}</>
+          ) : (
+            <><IconLightning size={15} /> {buttonLabel} ({directionLabel})</>
+          )}
+        </button>
+      )}
 
       {/* Step tracker (only shown when active or complete) */}
       {showSteps && (
