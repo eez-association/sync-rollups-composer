@@ -812,6 +812,7 @@ async fn simulate_l1_to_l2_call_on_l2(
             cross_chain_manager_address,
             &trace,
             rollup_id,
+            None, // no prior bundle traces for independent simulation
         )
         .await
     } else {
@@ -875,6 +876,7 @@ async fn simulate_l1_to_l2_call_on_l2(
                 cross_chain_manager_address,
                 &retry_trace,
                 rollup_id,
+                None, // no prior bundle traces for retry
             )
             .await;
             let retry_data = extract_return_data_from_trace(&retry_trace);
@@ -979,6 +981,7 @@ async fn simulate_l1_to_l2_call_on_l2(
             cross_chain_manager_address,
             &retry_trace,
             rollup_id,
+            None, // no prior bundle traces for retry
         )
         .await;
 
@@ -1234,14 +1237,33 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
 
     let current_trace = &traces[traces.len() - 1];
 
-    // Walk trace for child L2→L1 proxy calls.
+    // Scan ALL prior traces in the bundle for createCrossChainProxy calls.
+    // A proxy created in tx[1] (e.g., by receiveTokens deploying BridgeL1 proxy)
+    // must be visible when walking tx[2]'s trace for child detection.
+    let mut bundle_ephemeral_proxies: HashMap<Address, super::trace::ProxyInfo> = HashMap::new();
+    for prior_trace in &traces[..traces.len() - 1] {
+        super::trace::extract_ephemeral_proxies_from_trace(
+            prior_trace,
+            &[cross_chain_manager_address],
+            &mut bundle_ephemeral_proxies,
+        );
+    }
+
+    // Walk trace for child L2→L1 proxy calls, passing ephemeral proxies
+    // from prior bundle traces for cross-bundle visibility.
     let children = if !cross_chain_manager_address.is_zero() {
+        let pre = if bundle_ephemeral_proxies.is_empty() {
+            None
+        } else {
+            Some(&bundle_ephemeral_proxies)
+        };
         walk_l2_simulation_trace(
             client,
             l2_rpc_url,
             cross_chain_manager_address,
             current_trace,
             rollup_id,
+            pre,
         )
         .await
     } else {
@@ -1385,6 +1407,11 @@ impl super::trace::ProxyLookup for L2ProxyLookup<'_> {
 /// selectors. Works for bridgeEther, bridgeTokens, direct proxy calls, wrapper
 /// contracts, and any future cross-chain pattern.
 ///
+/// `pre_populated_ephemeral_proxies` allows callers to pass in ephemeral proxies
+/// discovered from prior traces in a `debug_traceCallMany` bundle. A proxy created
+/// in tx[1] is not visible in tx[2]'s trace, so callers must scan earlier traces
+/// with `trace::extract_ephemeral_proxies_from_trace` and pass the results here.
+///
 /// Returns detected calls as `DiscoveredProxyCall` for compatibility with
 /// existing callers. Calls targeting our own rollup are filtered out (only
 /// L2→L1 calls — those targeting rollup 0 — are returned).
@@ -1394,6 +1421,7 @@ async fn walk_l2_simulation_trace(
     ccm_address: Address,
     trace_node: &Value,
     our_rollup_id: u64,
+    pre_populated_ephemeral_proxies: Option<&HashMap<Address, super::trace::ProxyInfo>>,
 ) -> Vec<super::common::DiscoveredProxyCall> {
     let lookup = L2ProxyLookup {
         client,
@@ -1402,6 +1430,12 @@ async fn walk_l2_simulation_trace(
     };
     let mut proxy_cache: HashMap<Address, Option<super::trace::ProxyInfo>> = HashMap::new();
     let mut ephemeral_proxies = HashMap::new();
+
+    // Pre-populate ephemeral proxies from prior bundle traces (cross-bundle visibility).
+    if let Some(pre) = pre_populated_ephemeral_proxies {
+        ephemeral_proxies.extend(pre.iter().map(|(k, v)| (*k, *v)));
+    }
+
     let mut detected_calls = Vec::new();
 
     // The L2 CCM is the manager contract on L2.
@@ -1420,26 +1454,16 @@ async fn walk_l2_simulation_trace(
     detected_calls
         .into_iter()
         .filter_map(|c| {
-            // Look up the proxy identity to get the original_rollup_id.
-            // The walker already resolved proxy identity when detecting the
-            // call — the destination IS the originalAddress. We need to find
-            // the rollup ID from the proxy cache.
-            //
-            // The walker sets destination = proxy_info.original_address, so
-            // to find the rollup ID we need to check what proxy was resolved.
-            // However, walk_trace_tree doesn't expose the rollup ID in
-            // DetectedCall. We recover it from the proxy_cache by looking up
-            // the proxy address that resolved to this destination.
-            //
-            // Alternative: look for the proxy address in proxy_cache where
-            // original_address matches c.destination. But multiple proxies
-            // could map to different rollups.
-            //
-            // Simplest approach: check all cached entries for a proxy whose
-            // original_address == c.destination and filter by rollup ID.
+            // Recover rollup_id from proxy_cache or ephemeral_proxies.
             let proxy_info = proxy_cache
                 .values()
-                .find_map(|opt| opt.filter(|info| info.original_address == c.destination));
+                .find_map(|opt| opt.filter(|info| info.original_address == c.destination))
+                .or_else(|| {
+                    ephemeral_proxies
+                        .values()
+                        .find(|info| info.original_address == c.destination)
+                        .copied()
+                });
 
             match proxy_info {
                 Some(info) if info.original_rollup_id != our_rollup_id => {

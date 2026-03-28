@@ -293,6 +293,42 @@ pub async fn walk_trace_tree(
     .await;
 }
 
+/// Scan a `callTracer` trace tree for `createCrossChainProxy` calls and
+/// extract ephemeral proxy identity from return data.
+///
+/// Unlike [`walk_trace_tree`], this function does NOT require a `ProxyLookup`
+/// and only populates the ephemeral proxy map — no `DetectedCall` output.
+///
+/// Primary use case: pre-populating ephemeral proxies from earlier traces in a
+/// `debug_traceCallMany` bundle. A proxy created in tx[1] must be visible when
+/// walking tx[2], but `walk_trace_tree` only scans its own trace. By calling
+/// this function on tx[1]'s trace first, the resulting `ephemeral_proxies` map
+/// can be passed to `walk_trace_tree` for tx[2].
+pub fn extract_ephemeral_proxies_from_trace(
+    node: &Value,
+    manager_addresses: &[Address],
+    ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
+) {
+    // Check if this node is a createCrossChainProxy call on a manager.
+    if let Some(parsed) = parse_trace_node(node) {
+        let create_selector = create_cross_chain_proxy_selector();
+        if manager_addresses.contains(&parsed.to)
+            && has_selector(&parsed.input, &create_selector)
+        {
+            if let Some((proxy_addr, info)) = try_extract_ephemeral_proxy(node, &parsed.input) {
+                ephemeral_proxies.insert(proxy_addr, info);
+            }
+        }
+    }
+
+    // Recurse into children.
+    if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+        for child in calls {
+            extract_ephemeral_proxies_from_trace(child, manager_addresses, ephemeral_proxies);
+        }
+    }
+}
+
 /// Inner recursive implementation of [`walk_trace_tree`].
 ///
 /// Separated to allow `Box::pin` wrapping for async recursion without
