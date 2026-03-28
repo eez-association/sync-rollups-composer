@@ -1237,7 +1237,8 @@ where
                     let group_start = self.pending_l1_entries.len();
                     if !call.l1_entries.is_empty() {
                         // Continuation: use pre-built L1 entries directly
-                        self.pending_l1_entries.extend(call.l1_entries.iter().cloned());
+                        self.pending_l1_entries
+                            .extend(call.l1_entries.iter().cloned());
                     } else {
                         // Simple deposit: convert CALL+RESULT pair to L1 format
                         let l1_entry = crate::cross_chain::convert_pairs_to_l1_entries(&[
@@ -1422,8 +1423,7 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
-                    self.pending_l1_trigger_metadata
-                        .truncate(pre_drain_l1_meta);
+                    self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1480,8 +1480,7 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
-                    self.pending_l1_trigger_metadata
-                        .truncate(pre_drain_l1_meta);
+                    self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1549,8 +1548,7 @@ where
                     max = MAX_PENDING_CROSS_CHAIN_ENTRIES,
                     "pending cross-chain entries exceeded cap, dropping oldest"
                 );
-                let excess =
-                    self.pending_l1_entries.len() - MAX_PENDING_CROSS_CHAIN_ENTRIES;
+                let excess = self.pending_l1_entries.len() - MAX_PENDING_CROSS_CHAIN_ENTRIES;
                 self.pending_l1_entries.drain(..excess);
             }
 
@@ -1576,7 +1574,8 @@ where
                     next_hash == e.action_hash
                 })
                 .count();
-            let num_user_triggers = self.pending_l1_trigger_metadata
+            let num_user_triggers = self
+                .pending_l1_trigger_metadata
                 .iter()
                 .filter(|m| m.is_some())
                 .count();
@@ -1805,10 +1804,18 @@ where
         let has_pending_entries = !self.pending_l1_entries.is_empty();
         // Continuation groups have > 2 L1 entries (simple deposits = 1, simple
         // L2→L1 calls = 2, multi-call continuations = 3+).
-        let has_continuation_entries = self.pending_l1_group_starts.iter().enumerate().any(|(i, &start)| {
-            let end = self.pending_l1_group_starts.get(i + 1).copied().unwrap_or(self.pending_l1_entries.len());
-            end - start > 2
-        });
+        let has_continuation_entries =
+            self.pending_l1_group_starts
+                .iter()
+                .enumerate()
+                .any(|(i, &start)| {
+                    let end = self
+                        .pending_l1_group_starts
+                        .get(i + 1)
+                        .copied()
+                        .unwrap_or(self.pending_l1_entries.len());
+                    end - start > 2
+                });
         let batch_size = if has_pending_entries {
             if has_continuation_entries {
                 // Continuation entries (multi-call patterns): include ALL pending blocks.
@@ -2043,49 +2050,46 @@ where
                 // they must land in the SAME L1 block as postBatch
                 // (ExecutionNotInCurrentBlock). Filter out None entries (protocol-
                 // triggered groups that don't need executeL2TX).
-                let effective_trigger_metadata: Vec<TriggerMetadata> =
-                    trigger_metadata
-                        .iter()
-                        .filter_map(|opt| opt.clone())
-                        .collect();
-                let trigger_tx_hashes: Vec<B256> =
-                    if !effective_trigger_metadata.is_empty() {
-                        match self
-                            .send_l2_to_l1_triggers(&effective_trigger_metadata)
-                            .await
-                        {
-                            Ok(hashes) => hashes,
-                            Err(err) => {
-                                error!(
-                                    target: "based_rollup::driver",
-                                    %err,
-                                    "L2→L1 trigger tx failed — rewinding to re-derive"
-                                );
-                                let (rewind_target, rollback_l1_block) =
-                                    if let Some(anchor) = self.l1_confirmed_anchor {
-                                        (
-                                            anchor.l2_block_number,
-                                            anchor.l1_block_number.saturating_sub(1),
-                                        )
-                                    } else {
-                                        (0, self.config.deployment_l1_block)
-                                    };
-                                self.clear_internal_state();
-                                self.derivation
-                                    .set_last_derived_l2_block(rewind_target);
-                                self.derivation.rollback_to(rollback_l1_block);
-                                self.mode = DriverMode::Sync;
-                                self.synced
-                                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                                self.consecutive_rewind_cycles =
-                                    self.consecutive_rewind_cycles.saturating_add(1);
-                                self.set_rewind_target(rewind_target);
-                                return Ok(());
-                            }
+                let effective_trigger_metadata: Vec<TriggerMetadata> = trigger_metadata
+                    .iter()
+                    .filter_map(|opt| opt.clone())
+                    .collect();
+                let trigger_tx_hashes: Vec<B256> = if !effective_trigger_metadata.is_empty() {
+                    match self
+                        .send_l2_to_l1_triggers(&effective_trigger_metadata)
+                        .await
+                    {
+                        Ok(hashes) => hashes,
+                        Err(err) => {
+                            error!(
+                                target: "based_rollup::driver",
+                                %err,
+                                "L2→L1 trigger tx failed — rewinding to re-derive"
+                            );
+                            let (rewind_target, rollback_l1_block) =
+                                if let Some(anchor) = self.l1_confirmed_anchor {
+                                    (
+                                        anchor.l2_block_number,
+                                        anchor.l1_block_number.saturating_sub(1),
+                                    )
+                                } else {
+                                    (0, self.config.deployment_l1_block)
+                                };
+                            self.clear_internal_state();
+                            self.derivation.set_last_derived_l2_block(rewind_target);
+                            self.derivation.rollback_to(rollback_l1_block);
+                            self.mode = DriverMode::Sync;
+                            self.synced
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                            self.consecutive_rewind_cycles =
+                                self.consecutive_rewind_cycles.saturating_add(1);
+                            self.set_rewind_target(rewind_target);
+                            return Ok(());
                         }
-                    } else {
-                        vec![]
-                    };
+                    }
+                } else {
+                    vec![]
+                };
                 // Now wait for the postBatch tx to be confirmed.
                 let proposer = self.proposer.as_ref().expect("checked above");
                 match proposer.wait_for_l1_receipt(tx_hash).await {
@@ -2323,10 +2327,7 @@ where
     ///
     /// On any failure, resets the proposer's nonce cache before returning
     /// the error, so the caller's next `send_to_l1` starts fresh.
-    async fn send_l2_to_l1_triggers(
-        &mut self,
-        triggers: &[TriggerMetadata],
-    ) -> Result<Vec<B256>> {
+    async fn send_l2_to_l1_triggers(&mut self, triggers: &[TriggerMetadata]) -> Result<Vec<B256>> {
         let proposer = self
             .proposer
             .as_ref()
@@ -3384,14 +3385,15 @@ where
         let parent_block_number = block.l2_block_number.saturating_sub(1);
 
         // Step 1: Trial-execute the full block to get receipts.
-        let receipts = self.trial_execute_for_receipts(
-            parent_block_number,
-            block.l2_timestamp,
-            block.l1_info.l1_block_hash,
-            block.l1_info.l1_block_number,
-            &block.transactions,
-        )
-        .wrap_err("failed to trial-execute block for generic §4f filtering")?;
+        let receipts = self
+            .trial_execute_for_receipts(
+                parent_block_number,
+                block.l2_timestamp,
+                block.l1_info.l1_block_hash,
+                block.l1_info.l1_block_number,
+                &block.transactions,
+            )
+            .wrap_err("failed to trial-execute block for generic §4f filtering")?;
 
         // Step 2: Identify trigger tx indices via ExecutionConsumed events.
         let trigger_indices = crate::cross_chain::identify_trigger_tx_indices(

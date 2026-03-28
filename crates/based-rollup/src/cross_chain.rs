@@ -2014,13 +2014,9 @@ pub fn compute_consumed_trigger_prefix(
         // Check that ALL action hashes have remaining > 0 in the L1 map.
         // We must verify BEFORE decrementing — if any fails, we stop without
         // side effects on the counters for this trigger tx.
-        let all_available = action_hashes.iter().all(|hash| {
-            l1_consumed_remaining
-                .get(hash)
-                .copied()
-                .unwrap_or(0)
-                > 0
-        });
+        let all_available = action_hashes
+            .iter()
+            .all(|hash| l1_consumed_remaining.get(hash).copied().unwrap_or(0) > 0);
 
         if !all_available {
             return consumed_count;

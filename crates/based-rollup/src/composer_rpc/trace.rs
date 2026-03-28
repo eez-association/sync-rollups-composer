@@ -314,9 +314,7 @@ pub fn extract_ephemeral_proxies_from_trace(
     // Check if this node is a createCrossChainProxy call on a manager.
     if let Some(parsed) = parse_trace_node(node) {
         let create_selector = create_cross_chain_proxy_selector();
-        if manager_addresses.contains(&parsed.to)
-            && has_selector(&parsed.input, &create_selector)
-        {
+        if manager_addresses.contains(&parsed.to) && has_selector(&parsed.input, &create_selector) {
             if let Some((proxy_addr, info)) = try_extract_ephemeral_proxy(node, &parsed.input) {
                 ephemeral_proxies.insert(proxy_addr, info);
             }
