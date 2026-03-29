@@ -2783,21 +2783,46 @@ async fn trace_and_detect_internal_calls(
 
                     // Enrich child L2→L1 calls with L1 delivery return data.
                     // Children discovered during L2 simulation have empty return_data.
-                    // Simulate their delivery on L1 in a chained bundle so state
-                    // accumulates (e.g., 2 Counter.increment() calls return 1, 2).
+                    // Simulate their delivery on L1 in a chained bundle that includes
+                    // ALL prior L2→L1 children (from previous iterations) as preceding
+                    // transactions. This ensures state accumulates across iterations:
+                    // e.g., 2 Counter.increment() children from different iterations
+                    // return (1, 2) not (1, 1).
                     if !iter_child_calls.is_empty() {
-                        // Group children by source_address for proxy address computation.
-                        // All children from the same L2 source share an L1 proxy.
-                        let mut children_by_source: std::collections::HashMap<Address, Vec<usize>> =
-                            std::collections::HashMap::new();
+                        // Collect prior L2→L1 children from all_calls for state
+                        // accumulation. These were enriched in previous iterations
+                        // and their delivery must execute first in the bundle.
+                        let prior_children: Vec<&DetectedInternalCall> = all_calls
+                            .iter()
+                            .filter(|c| c.parent_call_index.is_some() && c.target_rollup_id == 0)
+                            .collect();
+
+                        // Group ALL children (prior + new) by source_address.
+                        // Each group shares an L1 proxy and needs one chained bundle.
+                        let mut children_by_source: std::collections::HashMap<
+                            Address,
+                            (Vec<&DetectedInternalCall>, Vec<usize>),
+                        > = std::collections::HashMap::new();
+                        for prior in &prior_children {
+                            children_by_source
+                                .entry(prior.source_address)
+                                .or_insert_with(|| (Vec::new(), Vec::new()))
+                                .0
+                                .push(prior);
+                        }
                         for (idx, (_, child)) in iter_child_calls.iter().enumerate() {
                             children_by_source
                                 .entry(child.source_address)
-                                .or_default()
+                                .or_insert_with(|| (Vec::new(), Vec::new()))
+                                .1
                                 .push(idx);
                         }
 
-                        for (source_addr, child_indices) in &children_by_source {
+                        for (source_addr, (prior, new_indices)) in &children_by_source {
+                            if new_indices.is_empty() {
+                                continue;
+                            }
+
                             // Compute L1 proxy address for this source.
                             let proxy_from = match super::l2_to_l1::compute_proxy_address_on_l1(
                                 client,
@@ -2820,8 +2845,6 @@ async fn trace_and_detect_internal_calls(
                                 }
                             };
 
-                            // Build chained debug_traceCallMany on L1 with all
-                            // children from this source in one bundle.
                             let block_ctx = get_l1_block_context(client, l1_rpc_url).await;
                             let (trace_block_num, trace_block_ts) = match block_ctx {
                                 Ok((bn, _bh, _ph)) => {
@@ -2841,19 +2864,29 @@ async fn trace_and_detect_internal_calls(
                                 }
                             };
 
-                            let transactions: Vec<Value> = child_indices
-                                .iter()
-                                .map(|&idx| {
-                                    let (_, child) = &iter_child_calls[idx];
-                                    serde_json::json!({
-                                        "from": format!("{proxy_from}"),
-                                        "to": format!("{}", child.destination),
-                                        "data": format!("0x{}", hex::encode(&child.calldata)),
-                                        "value": format!("0x{:x}", child.value),
-                                        "gas": "0x2faf080"
-                                    })
-                                })
-                                .collect();
+                            // Build chained bundle: prior children first (for state
+                            // accumulation), then new children.
+                            let prior_count = prior.len();
+                            let mut transactions: Vec<Value> = Vec::new();
+                            for p in prior {
+                                transactions.push(serde_json::json!({
+                                    "from": format!("{proxy_from}"),
+                                    "to": format!("{}", p.destination),
+                                    "data": format!("0x{}", hex::encode(&p.calldata)),
+                                    "value": format!("0x{:x}", p.value),
+                                    "gas": "0x2faf080"
+                                }));
+                            }
+                            for &idx in new_indices {
+                                let (_, child) = &iter_child_calls[idx];
+                                transactions.push(serde_json::json!({
+                                    "from": format!("{proxy_from}"),
+                                    "to": format!("{}", child.destination),
+                                    "data": format!("0x{}", hex::encode(&child.calldata)),
+                                    "value": format!("0x{:x}", child.value),
+                                    "gas": "0x2faf080"
+                                }));
+                            }
 
                             let trace_req = serde_json::json!({
                                 "jsonrpc": "2.0",
@@ -2874,7 +2907,8 @@ async fn trace_and_detect_internal_calls(
 
                             tracing::info!(
                                 target: "based_rollup::l1_proxy",
-                                num_children = child_indices.len(),
+                                num_new = new_indices.len(),
+                                num_prior = prior_count,
                                 proxy = %proxy_from,
                                 source = %source_addr,
                                 "enriching child L2→L1 calls via chained L1 delivery simulation"
@@ -2908,24 +2942,28 @@ async fn trace_and_detect_internal_calls(
                                 }
                             };
 
-                            // Parse results: result[0] is array of N trace objects.
+                            // Parse results: result[0] is array of (prior + new) traces.
+                            let total_expected = prior_count + new_indices.len();
                             let traces = match body
                                 .get("result")
                                 .and_then(|r| r.get(0))
                                 .and_then(|b| b.as_array())
                             {
-                                Some(arr) if arr.len() == child_indices.len() => arr,
+                                Some(arr) if arr.len() == total_expected => arr,
                                 _ => {
                                     tracing::warn!(
                                         target: "based_rollup::l1_proxy",
-                                        expected = child_indices.len(),
+                                        expected = total_expected,
                                         "child L1 enrichment: unexpected trace count"
                                     );
                                     continue;
                                 }
                             };
 
-                            for (trace_idx, &child_idx) in child_indices.iter().enumerate() {
+                            // Skip prior traces (indices 0..prior_count), extract
+                            // return data only for new children.
+                            for (new_offset, &child_idx) in new_indices.iter().enumerate() {
+                                let trace_idx = prior_count + new_offset;
                                 let trace = &traces[trace_idx];
                                 let has_error = trace.get("error").is_some()
                                     || trace.get("revertReason").is_some();
@@ -2946,6 +2984,7 @@ async fn trace_and_detect_internal_calls(
                                     return_data_len = output_bytes.len(),
                                     return_data_hex = %format!("0x{}", hex::encode(&output_bytes)),
                                     dest = %child.destination,
+                                    prior_count,
                                     "enriched child L2→L1 call with L1 delivery return data"
                                 );
                             }
