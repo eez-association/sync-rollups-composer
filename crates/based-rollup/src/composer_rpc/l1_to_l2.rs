@@ -2066,12 +2066,23 @@ async fn trace_and_detect_internal_calls(
                             }
                         }
                     } else if let Some(error) = body.get("error") {
+                        // Extract revert data from the JSON-RPC error.
+                        // reth returns revert bytes in error.data (hex-encoded).
+                        let revert_data = error
+                            .get("data")
+                            .and_then(|d| d.as_str())
+                            .and_then(|s| {
+                                let clean = s.strip_prefix("0x").unwrap_or(s);
+                                hex::decode(clean).ok()
+                            })
+                            .unwrap_or_default();
                         tracing::info!(
                             target: "based_rollup::l1_proxy",
                             dest = %child.destination,
-                            ?error,
+                            revert_data_len = revert_data.len(),
                             "L1 delivery simulation reverted for child call"
                         );
+                        child.return_data = revert_data;
                         child.call_success = false;
                     }
                 }
