@@ -1798,27 +1798,22 @@ fn build_l2_to_l1_continuation_entries_inner(
                     }
                 };
             let delivery_result_hash = compute_action_hash(&delivery_result);
-            // Issue #246: carry delivery return data for L1 caller.
-            let l1_subseq_exit =
-                if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
-                    l1_result_void.clone()
-                } else {
-                    CrossChainAction {
-                        action_type: CrossChainActionType::Result,
-                        rollup_id: U256::ZERO,
-                        destination: Address::ZERO,
-                        value: U256::ZERO,
-                        data: l2_call.delivery_return_data.clone(),
-                        failed: l2_call.l2_delivery_failed,
-                        source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
-                        scope: vec![],
-                    }
-                };
+            // Terminal RESULT for L2TX flows: always RESULT(L2, void) per spec §C.6.
+            let l1_terminal = CrossChainAction {
+                action_type: CrossChainActionType::Result,
+                rollup_id: our_rollup_id,
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: vec![],
+                failed: false,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            };
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: empty_deltas.clone(),
                 action_hash: delivery_result_hash,
-                next_action: l1_subseq_exit,
+                next_action: l1_terminal,
             });
         }
 
