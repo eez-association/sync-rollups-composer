@@ -607,6 +607,10 @@ async fn queue_l2_to_l1_fallback(
 /// the continuation path produces chained RESULT→CALL entries with hashes that
 /// depend on delivery return data. Since delivery return data is state-dependent,
 /// each call must be routed independently with its own pre-computed delivery data.
+///
+/// NOTE: No longer used — all multi-call patterns (including duplicates) now go
+/// through `simulate_l1_combined_delivery` for proper entry pre-loading.
+#[allow(dead_code)]
 async fn queue_independent_calls_l2_to_l1(
     client: &reqwest::Client,
     l1_rpc_url: &str,
@@ -2082,6 +2086,10 @@ async fn simulate_l1_delivery(
 ///
 /// Returns `Vec<(return_data, call_success)>` with one entry per call.
 /// On any transport/parse failure, falls back to per-call independent simulation.
+///
+/// NOTE: No longer used — all multi-call patterns now go through
+/// `simulate_l1_combined_delivery` for proper entry pre-loading.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 async fn simulate_chained_delivery_l2_to_l1(
     client: &reqwest::Client,
@@ -2313,6 +2321,7 @@ async fn simulate_chained_delivery_l2_to_l1(
 ///
 /// Used when the chained simulation fails. Runs each call as an independent
 /// `debug_traceCallMany` with a single tx — no state accumulation between calls.
+#[allow(dead_code)]
 async fn fallback_per_call_l2_to_l1_simulation(
     client: &reqwest::Client,
     l1_rpc_url: &str,
@@ -3779,41 +3788,17 @@ async fn trace_and_detect_l2_internal_calls(
     }
 
     // Route through the appropriate queuing path based on call count.
-    // Check for duplicate calls (same action identity). Identical calls must
-    // route independently — the continuation path produces chained RESULT→CALL
-    // entries with return-data-dependent hashes that break for identical calls
-    // because return data is state-dependent (#256).
-    let has_duplicates = crate::cross_chain::has_duplicate_calls(
-        &detected_calls
-            .iter()
-            .map(|c| {
-                (
-                    c.destination,
-                    c.calldata.as_slice(),
-                    c.value,
-                    c.source_address,
-                )
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    if detected_calls.len() >= 2 && has_duplicates {
-        tracing::info!(
-            target: "based_rollup::composer_rpc::l2_to_l1",
-            count = detected_calls.len(),
-            "duplicate calls detected — routing independently with chained simulation"
-        );
-        return queue_independent_calls_l2_to_l1(
-            client,
-            l1_rpc_url,
-            upstream_url,
-            raw_tx_hex,
-            &detected_calls,
-            rollups_address,
-            rollup_id,
-        )
-        .await;
-    }
+    // All multi-call patterns (including duplicates) go through the combined
+    // simulation path which uses postBatch entry pre-loading. This ensures
+    // nested deliveries succeed (entries are available for inner
+    // executeCrossChainCall) and state accumulates across calls (e.g.,
+    // Counter.increment() × 2 returns 1, 2 not 1, 1).
+    //
+    // The former has_duplicates → queue_independent_calls_l2_to_l1 path
+    // used direct simulation without entry pre-loading, which broke nested
+    // patterns (delivery reverted → spurious REVERT_CONTINUE entries).
+    // With combined simulation, duplicate calls are correctly differentiated
+    // by their state-dependent delivery return data.
 
     if detected_calls.len() >= 2 {
         // Multi-call L2→L1: recursive ping-pong discovery loop.

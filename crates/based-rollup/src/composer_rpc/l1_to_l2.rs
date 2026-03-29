@@ -2781,6 +2781,177 @@ async fn trace_and_detect_internal_calls(
                         }
                     }
 
+                    // Enrich child L2→L1 calls with L1 delivery return data.
+                    // Children discovered during L2 simulation have empty return_data.
+                    // Simulate their delivery on L1 in a chained bundle so state
+                    // accumulates (e.g., 2 Counter.increment() calls return 1, 2).
+                    if !iter_child_calls.is_empty() {
+                        // Group children by source_address for proxy address computation.
+                        // All children from the same L2 source share an L1 proxy.
+                        let mut children_by_source: std::collections::HashMap<Address, Vec<usize>> =
+                            std::collections::HashMap::new();
+                        for (idx, (_, child)) in iter_child_calls.iter().enumerate() {
+                            children_by_source
+                                .entry(child.source_address)
+                                .or_default()
+                                .push(idx);
+                        }
+
+                        for (source_addr, child_indices) in &children_by_source {
+                            // Compute L1 proxy address for this source.
+                            let proxy_from = match super::l2_to_l1::compute_proxy_address_on_l1(
+                                client,
+                                l1_rpc_url,
+                                rollups_address,
+                                *source_addr,
+                                rollup_id,
+                            )
+                            .await
+                            {
+                                Ok(addr) => addr,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "based_rollup::l1_proxy",
+                                        %e,
+                                        source = %source_addr,
+                                        "failed to compute L1 proxy for child enrichment — children keep empty return_data"
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Build chained debug_traceCallMany on L1 with all
+                            // children from this source in one bundle.
+                            let block_ctx = get_l1_block_context(client, l1_rpc_url).await;
+                            let (trace_block_num, trace_block_ts) = match block_ctx {
+                                Ok((bn, _bh, _ph)) => {
+                                    let ts = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+                                    (bn + 1, ts)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "based_rollup::l1_proxy",
+                                        %e,
+                                        "failed to get L1 block context for child enrichment"
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            let transactions: Vec<Value> = child_indices
+                                .iter()
+                                .map(|&idx| {
+                                    let (_, child) = &iter_child_calls[idx];
+                                    serde_json::json!({
+                                        "from": format!("{proxy_from}"),
+                                        "to": format!("{}", child.destination),
+                                        "data": format!("0x{}", hex::encode(&child.calldata)),
+                                        "value": format!("0x{:x}", child.value),
+                                        "gas": "0x2faf080"
+                                    })
+                                })
+                                .collect();
+
+                            let trace_req = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "debug_traceCallMany",
+                                "params": [
+                                    [{
+                                        "transactions": transactions,
+                                        "blockOverride": {
+                                            "number": format!("{:#x}", trace_block_num),
+                                            "time": format!("{:#x}", trace_block_ts)
+                                        }
+                                    }],
+                                    null,
+                                    { "tracer": "callTracer" }
+                                ],
+                                "id": 99935
+                            });
+
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                num_children = child_indices.len(),
+                                proxy = %proxy_from,
+                                source = %source_addr,
+                                "enriching child L2→L1 calls via chained L1 delivery simulation"
+                            );
+
+                            let resp = match client
+                                .post(l1_rpc_url)
+                                .json(&trace_req)
+                                .send()
+                                .await
+                            {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "based_rollup::l1_proxy",
+                                        %e,
+                                        "child L1 enrichment traceCallMany failed"
+                                    );
+                                    continue;
+                                }
+                            };
+                            let body: Value = match resp.json().await {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "based_rollup::l1_proxy",
+                                        %e,
+                                        "child L1 enrichment response parse failed"
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Parse results: result[0] is array of N trace objects.
+                            let traces = match body
+                                .get("result")
+                                .and_then(|r| r.get(0))
+                                .and_then(|b| b.as_array())
+                            {
+                                Some(arr) if arr.len() == child_indices.len() => arr,
+                                _ => {
+                                    tracing::warn!(
+                                        target: "based_rollup::l1_proxy",
+                                        expected = child_indices.len(),
+                                        "child L1 enrichment: unexpected trace count"
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            for (trace_idx, &child_idx) in child_indices.iter().enumerate() {
+                                let trace = &traces[trace_idx];
+                                let has_error = trace.get("error").is_some()
+                                    || trace.get("revertReason").is_some();
+                                let output_hex =
+                                    trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+                                let hex_clean =
+                                    output_hex.strip_prefix("0x").unwrap_or(output_hex);
+                                let output_bytes = hex::decode(hex_clean).unwrap_or_default();
+
+                                let (_, child) = &mut iter_child_calls[child_idx];
+                                child.return_data = output_bytes.clone();
+                                child.call_success = !has_error;
+
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    child_idx,
+                                    success = !has_error,
+                                    return_data_len = output_bytes.len(),
+                                    return_data_hex = %format!("0x{}", hex::encode(&output_bytes)),
+                                    dest = %child.destination,
+                                    "enriched child L2→L1 call with L1 delivery return data"
+                                );
+                            }
+                        }
+                    }
+
                     // Compute parent indices for child calls.
                     // Each enriched_new_call will be at index
                     // `all_calls.len() + enriched_idx` in the final all_calls.

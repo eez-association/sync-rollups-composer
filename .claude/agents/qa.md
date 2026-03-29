@@ -258,9 +258,82 @@ them when those services have completed successfully.
 ### Recommendation: ...
 ```
 
+## Protocol E2E Tests (submodule)
+
+The submodule `contracts/sync-rollups-protocol/` has its own E2E test framework. These test
+the protocol entry construction end-to-end: deploy contracts, send a user tx, verify the
+system posts correct entries on L1 and loads them on L2.
+
+### Setup
+
+```bash
+# 1. Load contract addresses
+eval "$(sudo docker compose -f deployments/devnet-eez/docker-compose.yml \
+     -f deployments/devnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env)"
+
+# 2. NEVER use dev#0 — use a dedicated test key (dev#10 is recommended)
+PK="0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897"  # dev#10
+
+# 3. RPC endpoints — MUST use composer RPCs for cross-chain interception
+L1_RPC="http://localhost:11556"   # L1 composer (intercepts L1→L2)
+L2_RPC="http://localhost:11548"   # L2 composer (intercepts L2→L1)
+
+# 4. Prepare network (CREATE2 factories + L2 funding)
+cd contracts/sync-rollups-protocol
+bash script/e2e/shared/prepare-network.sh \
+    --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" --pk "$PK" \
+    --rollups "$ROLLUPS_ADDRESS"
+```
+
+### Running tests
+
+Run sequentially — all tests share one deployer key. NEVER run in parallel.
+
+```bash
+TESTS="counter counterL2 bridge nestedCounter nestedCounterL2 flash-loan \
+       multi-call-twice multi-call-two-diff multi-call-nested multi-call-nestedL2 \
+       nestedCallRevert revertCounter revertCounterL2 reentrantCrossChainCalls"
+
+for TEST in $TESTS; do
+    bash script/e2e/shared/run-network.sh "script/e2e/$TEST/E2E.s.sol" \
+        --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" --pk "$PK" \
+        --rollups "$ROLLUPS_ADDRESS" --manager-l2 "$CROSS_CHAIN_MANAGER_ADDRESS" 2>&1 \
+        | tee "tmp/e2e-failures/${TEST}.txt"
+    sleep 5
+done
+```
+
+### On failure — diagnose with decode-block
+
+```bash
+bash script/e2e/shared/decode-block.sh \
+    --l1-block <BLOCK> --l1-rpc http://localhost:11555 \
+    --l2-rpc http://localhost:11545 \
+    --rollups "$ROLLUPS_ADDRESS" --manager-l2 "$CROSS_CHAIN_MANAGER_ADDRESS"
+```
+
+### Test list (simplest → most complex)
+| # | Test | Direction | Pattern |
+|---|------|-----------|---------|
+| 1 | counter | L1→L2 | Simple call |
+| 2 | counterL2 | L2→L1 | Simple call |
+| 3 | bridge | L1→L2 | ETH bridge |
+| 4 | multi-call-twice | L1→L2 | 2× same target |
+| 5 | multi-call-two-diff | L1→L2 | 2× different targets |
+| 6 | nestedCounter | L1→L2→L1 | Scope navigation |
+| 7 | nestedCounterL2 | L2→L1→L2 | Scope navigation |
+| 8 | flash-loan | L1→L2→L1 | Token scope |
+| 9 | multi-call-nested | L1→L2→L1 | Multicall + nested |
+| 10 | multi-call-nestedL2 | L2→L1→L2 | Multicall + nested |
+| 11 | nestedCallRevert | L1→L2→L1 | Revert handling |
+| 12 | revertCounter | L1→L2 | Terminal revert |
+| 13 | revertCounterL2 | L2→L1 | Terminal revert |
+| 14 | reentrantCrossChainCalls | L1→L2×5 | Depth-5 reentrant |
+
 ## Critical Rules
 - NEVER `docker compose down -v` without approval
 - ALWAYS both `-f` flags on all docker compose commands
+- NEVER use dev#0 (builder key) or dev#4 (crosschain-tx-sender) for test sends
 - When something fails: capture EVERYTHING before recovery (logs, roots, blocks, health, txpool)
 - Always compare ALL 3 nodes
 - Follow the debugging process IN ORDER — never speculate before tracing
