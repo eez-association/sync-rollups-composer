@@ -677,9 +677,12 @@ fn extract_inner_destination_return_data(trace: &Value, destination: Address) ->
     let dest_hex_lower = format!("{destination}").to_lowercase();
 
     fn walk(node: &Value, target: &str) -> Option<Vec<u8>> {
-        // Check if this node targets our destination and succeeded
+        // Check if this node targets our destination — extract output regardless of
+        // success/failure. When the destination reverts, the `output` field contains
+        // the revert reason (e.g., Error(string) encoding). This data is needed for
+        // RESULT(failed=true, data=revertData) entries.
         if let Some(to) = node.get("to").and_then(|v| v.as_str()) {
-            if to.to_lowercase() == target && node.get("error").is_none() {
+            if to.to_lowercase() == target {
                 let output = node.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
                 let data =
                     hex::decode(output.strip_prefix("0x").unwrap_or(output)).unwrap_or_default();

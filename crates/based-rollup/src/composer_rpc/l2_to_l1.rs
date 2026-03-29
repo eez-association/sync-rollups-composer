@@ -1923,14 +1923,14 @@ async fn simulate_l1_delivery(
 
         // Extract delivery output from executeL2TX trace (tx1).
         let trigger_trace = &bundle_traces[1];
-        let (return_data, _delivery_failed) =
+        let (return_data, delivery_failed) =
             extract_delivery_output_from_trigger_trace(trigger_trace, destination);
 
-        // Trigger simulation is unreliable for L2→L1 calls: entries have
-        // placeholder state deltas and the ECDSA proof may not match real L1
-        // state. Always assume delivery succeeds — §4f + rewind handles real
-        // failures on L1.
-        final_delivery_failed = false;
+        // Use the delivery failure status from the simulation trace.
+        // When delivery reverts on L1, the composer must generate
+        // REVERT_CONTINUE entries (§D.6) instead of RESULT(failed).
+        // L2TX cannot end with RESULT(failed) — ScopeReverted is needed.
+        final_delivery_failed = delivery_failed;
 
         // Extract L1→L2 return calls from the trigger trace BEFORE deciding
         // the return data fallback — we need to know whether this is depth-1
