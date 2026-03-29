@@ -2923,16 +2923,14 @@ async fn simulate_l1_combined_delivery(
                     .iter()
                     .any(|rc| rc.parent_call_index == Some(call_idx));
 
-            // Always run per-call simulation if delivery_return_data is empty
-            // (even if return calls are already known).
+            // Skip if this call already has return calls AND delivery data.
             let needs_return_data = per_call_return_data[call_idx].is_empty();
             if has_returns && !needs_return_data {
                 continue;
             }
 
             // Simulate this call's delivery individually on L1.
-            // Also captures delivery return data from the trace output.
-            let (per_call_returns, delivery_output, _delivery_failed) =
+            let (per_call_returns, delivery_output, delivery_failed) =
                 extract_l1_to_l2_return_calls_via_direct_delivery(
                     client,
                     l1_rpc_url,
@@ -2944,13 +2942,20 @@ async fn simulate_l1_combined_delivery(
                     rollup_id,
                 )
                 .await;
-            // Update delivery return data if captured.
-            if !delivery_output.is_empty() && per_call_return_data[call_idx].is_empty() {
+            // Update delivery return data only from SUCCESSFUL deliveries.
+            if !delivery_failed && !delivery_output.is_empty()
+                && per_call_return_data[call_idx].is_empty()
+            {
                 per_call_return_data[call_idx] = delivery_output;
             }
-            for mut rc in per_call_returns {
-                rc.parent_call_index = Some(call_idx);
-                new_return_calls_this_iteration.push(rc);
+            // Only add return calls if this call doesn't already have them.
+            // Otherwise per-call discovery duplicates return calls from the
+            // combined trace, causing extra L2 entries.
+            if !has_returns {
+                for mut rc in per_call_returns {
+                    rc.parent_call_index = Some(call_idx);
+                    new_return_calls_this_iteration.push(rc);
+                }
             }
         }
 
