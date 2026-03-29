@@ -674,15 +674,29 @@ fn destination_call_succeeded_in_trace(trace: &Value, destination: Address) -> b
 }
 
 fn extract_inner_destination_return_data(trace: &Value, destination: Address) -> Option<Vec<u8>> {
+    extract_inner_destination_output(trace, destination, false)
+}
+
+/// Like extract_inner_destination_return_data but also extracts output from reverted calls.
+/// Used for terminal revert patterns where the revert reason bytes are needed for
+/// RESULT(failed, data=revertData) entries.
+fn extract_inner_destination_revert_data(trace: &Value, destination: Address) -> Option<Vec<u8>> {
+    extract_inner_destination_output(trace, destination, true)
+}
+
+fn extract_inner_destination_output(
+    trace: &Value,
+    destination: Address,
+    include_reverted: bool,
+) -> Option<Vec<u8>> {
     let dest_hex_lower = format!("{destination}").to_lowercase();
 
-    fn walk(node: &Value, target: &str) -> Option<Vec<u8>> {
-        // Check if this node targets our destination — extract output regardless of
-        // success/failure. When the destination reverts, the `output` field contains
-        // the revert reason (e.g., Error(string) encoding). This data is needed for
-        // RESULT(failed=true, data=revertData) entries.
+    fn walk(node: &Value, target: &str, include_reverted: bool) -> Option<Vec<u8>> {
         if let Some(to) = node.get("to").and_then(|v| v.as_str()) {
             if to.to_lowercase() == target {
+                if !include_reverted && node.get("error").is_some() {
+                    return None;
+                }
                 let output = node.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
                 let data =
                     hex::decode(output.strip_prefix("0x").unwrap_or(output)).unwrap_or_default();
@@ -692,7 +706,7 @@ fn extract_inner_destination_return_data(trace: &Value, destination: Address) ->
         // Recurse into children
         if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
             for child in calls {
-                if let Some(result) = walk(child, target) {
+                if let Some(result) = walk(child, target, include_reverted) {
                     return Some(result);
                 }
             }
@@ -700,7 +714,7 @@ fn extract_inner_destination_return_data(trace: &Value, destination: Address) ->
         None
     }
 
-    walk(trace, &dest_hex_lower)
+    walk(trace, &dest_hex_lower, include_reverted)
 }
 
 /// Simulate an L1->L2 call on L2 to capture the actual return data.
@@ -920,13 +934,12 @@ async fn simulate_l1_to_l2_call_on_l2(
     // then do a second simulation with the correct RESULT entry loaded.
     let (inner_return_data, inner_success) = if !success {
         // The outer simulation reverted (expected: no RESULT entry in Run 1).
-        // Extract the REAL return data from the inner destination call.
-        // Also check the trace node for an "error" field to determine success.
-        let extracted = extract_inner_destination_return_data(&trace, destination);
+        // Extract return data from the inner destination call.
+        // Use _revert_data variant to also capture revert reason bytes when the
+        // call failed (needed for RESULT(failed, data=revertData) terminal entries).
+        let extracted = extract_inner_destination_revert_data(&trace, destination);
         let inner_data = extracted.unwrap_or_default();
         // Check if the destination call itself succeeded (no "error" in its trace node).
-        // A void function returns empty data but succeeds — the old heuristic
-        // `!inner_data.is_empty()` misclassified void functions as failed.
         let inner_ok = destination_call_succeeded_in_trace(&trace, destination);
         (inner_data, inner_ok)
     } else {
@@ -943,13 +956,24 @@ async fn simulate_l1_to_l2_call_on_l2(
         "extracted return data from inner destination call"
     );
 
-    // Build RESULT entry with the real return data from Run 1
+    // Build RESULT entry for Run 2.
+    // When inner_success=true: use inner_return_data (real return data).
+    // When inner_success=false: use EMPTY data for the Run 2 RESULT entry.
+    //   The inner_return_data has revert bytes from Run 1, but Run 2 may succeed
+    //   (e.g., flash-loan: child entries get loaded, call succeeds). Using revert
+    //   bytes would produce a wrong hash. If Run 2 also fails (terminal revert),
+    //   the final return path uses inner_return_data for the detected call.
+    let run2_result_data = if inner_success {
+        inner_return_data.clone()
+    } else {
+        vec![]
+    };
     let result_action = crate::cross_chain::CrossChainAction {
         action_type: crate::cross_chain::CrossChainActionType::Result,
         rollup_id: U256::from(rollup_id),
         destination: Address::ZERO,
         value: U256::ZERO,
-        data: inner_return_data.clone(),
+        data: run2_result_data,
         failed: !inner_success,
         source_address: Address::ZERO,
         source_rollup: U256::ZERO,

@@ -396,6 +396,24 @@ jobs:
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
 
+      - name: "Protocol E2E: multi-call-nested (L1->L2->L1 multi-call nested)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/multi-call-nested/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: multi-call-nestedL2 (L2->L1->L2 multi-call nested)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/multi-call-nestedL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
       - name: "Protocol E2E: revertCounter (L1->L2 terminal revert)"
         timeout-minutes: 5
         run: |

@@ -1156,9 +1156,26 @@ pub fn convert_l1_entries_to_l2_pairs(
 
     let mut result = Vec::with_capacity(l1_entries.len() * 2);
     for entry in l1_entries {
-        // Skip continuation entries (nextAction is CALL, not RESULT).
-        // These are handled by reconstruct_continuation_l2_entries.
+        // Continuation entries (nextAction is CALL, not RESULT) need special handling.
+        // The scope navigation entries are reconstructed by reconstruct_continuation_l2_entries.
+        // BUT we must still emit the CALL trigger entry that executeIncomingCrossChainCall
+        // uses to start execution on L2. Without it, the L2 loadExecutionTable has fewer
+        // entries than the builder loaded → different state root → MISMATCH.
         if entry.next_action.action_type == CrossChainActionType::Call {
+            // Emit the CALL trigger entry: hash(CALL_action) → CALL_action
+            // This mirrors what the builder does: call_entry in QueuedCrossChainCall.
+            let idx = consumed_idx.entry(entry.action_hash).or_insert(0);
+            if let Some(call_action) = action_map
+                .get(&entry.action_hash)
+                .and_then(|actions| actions.get(*idx))
+            {
+                *idx += 1;
+                result.push(CrossChainExecutionEntry {
+                    state_deltas: entry.state_deltas.clone(),
+                    action_hash: entry.action_hash,
+                    next_action: (*call_action).clone(),
+                });
+            }
             continue;
         }
         let idx = consumed_idx.entry(entry.action_hash).or_insert(0);
