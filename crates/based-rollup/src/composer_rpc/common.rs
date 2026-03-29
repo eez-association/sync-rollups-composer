@@ -373,6 +373,57 @@ pub(crate) async fn get_verification_key(
         .map_err(|e| eyre::eyre!("invalid VK: {e}"))
 }
 
+/// Query the state root for a rollup from the Rollups contract on L1
+/// at a specific block number. This avoids race conditions where the
+/// state root changes between the query and the simulation.
+pub(crate) async fn get_rollup_state_root(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    rollups_address: Address,
+    rollup_id: u64,
+    at_block: u64,
+) -> eyre::Result<alloy_primitives::B256> {
+    let selector = &alloy_primitives::keccak256(b"rollups(uint256)")[..4];
+    let calldata = format!("0x{}{:0>64x}", hex::encode(selector), rollup_id);
+    let block_hex = format!("{:#x}", at_block);
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_call",
+        "params": [{"to": format!("{rollups_address}"), "data": calldata}, block_hex],
+        "id": 99993
+    });
+    let resp = client
+        .post(l1_rpc_url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| eyre::eyre!("eth_call for rollups() failed: {e}"))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| eyre::eyre!("eth_call parse failed: {e}"))?;
+    if let Some(error) = body.get("error") {
+        return Err(eyre::eyre!("eth_call error: {error}"));
+    }
+    let result_hex = body
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("eth_call for rollups() returned no result"))?;
+
+    // rollups() returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)
+    // stateRoot is at offset 128..192 (word 2)
+    let hex_clean = result_hex.strip_prefix("0x").unwrap_or(result_hex);
+    if hex_clean.len() < 192 {
+        return Err(eyre::eyre!("rollups() return too short for stateRoot"));
+    }
+    let sr_hex = &hex_clean[128..192];
+    let sr_str = format!("0x{sr_hex}");
+    sr_str
+        .parse::<alloy_primitives::B256>()
+        .map_err(|e| eyre::eyre!("invalid stateRoot: {e}"))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 //  L2 proxy detection
 // ──────────────────────────────────────────────────────────────────────────────

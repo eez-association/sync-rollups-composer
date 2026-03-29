@@ -2475,83 +2475,63 @@ async fn simulate_l1_combined_delivery(
             "combined L1 delivery simulation iteration"
         );
 
-        // Build combined L1 deferred entries for all calls.
-        let mut combined_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> = Vec::new();
-        for (i, call) in calls.iter().enumerate() {
-            // Collect return calls belonging to this trigger call.
-            let my_return_calls: Vec<&DetectedReturnCall> = all_return_calls
+        // Build combined L1 deferred entries for ALL calls using the unified
+        // table builder. This produces correct inter-call chaining entries
+        // (RESULT(void) → CALL for the next delivery) so the Rollups contract
+        // can process all deliveries sequentially within a single executeL2TX.
+        //
+        // Using per-call entry building would miss chaining entries, causing
+        // the contract to stop after the first delivery.
+        let all_l2_calls: Vec<crate::table_builder::L2DetectedCall> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, call)| crate::table_builder::L2DetectedCall {
+                destination: call.destination,
+                data: call.calldata.to_vec(),
+                value: call.value,
+                source_address: call.source_address,
+                delivery_return_data: per_call_return_data[i].clone(),
+                delivery_failed: per_call_delivery_failed[i],
+            })
+            .collect();
+
+        let all_return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
+            all_return_calls
                 .iter()
-                .filter(|rc| rc.parent_call_index == Some(i))
+                .map(|rc| crate::table_builder::L2ReturnCall {
+                    destination: rc.destination,
+                    data: rc.data.clone(),
+                    value: rc.value,
+                    source_address: rc.source_address,
+                    parent_call_index: rc.parent_call_index,
+                    l2_return_data: rc.l2_return_data.clone(),
+                    l2_delivery_failed: rc.l2_delivery_failed,
+                })
                 .collect();
 
-            let entries = if my_return_calls.is_empty() {
-                // Simple case: just this L2→L1 call.
-                let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
-                    call.destination,
-                    call.calldata.to_vec(),
-                    call.value,
-                    call.source_address,
-                    rollup_id,
-                    rlp_encoded_tx.to_vec(),
-                    per_call_return_data[i].clone(),
-                    per_call_delivery_failed[i],
-                );
-                call_entries.l1_deferred_entries
-            } else {
-                // Continuation case: use the SAME table builder functions as the
-                // real batch to ensure identical entry ordering (same fix as
-                // simulate_l1_delivery).
-                let root_call = crate::table_builder::L2DetectedCall {
-                    destination: call.destination,
-                    data: call.calldata.to_vec(),
-                    value: call.value,
-                    source_address: call.source_address,
-                    delivery_return_data: per_call_return_data[i].clone(),
-                    delivery_failed: per_call_delivery_failed[i],
-                };
+        let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+            &all_l2_calls,
+            &all_return_calls_for_builder,
+            rollup_id,
+        );
+        // Use no-reorder variant: simulation entries need sequential state deltas
+        // in consumption order. Reorder is for the real batch (Solidity swap-and-pop).
+        let continuation = crate::table_builder::build_l2_to_l1_continuation_entries_no_reorder(
+            &analyzed,
+            alloy_primitives::U256::from(rollup_id),
+            rlp_encoded_tx,
+        );
 
-                let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
-                    my_return_calls
-                        .iter()
-                        .map(|rc| crate::table_builder::L2ReturnCall {
-                            destination: rc.destination,
-                            data: rc.data.clone(),
-                            value: rc.value,
-                            source_address: rc.source_address,
-                            // parent_call_index in DetectedReturnCall refers to the
-                            // combined simulation's call index. For the table builder,
-                            // we're building entries for a single root call, so set to
-                            // None (defaults to last L2→L1 call, which is the only one).
-                            parent_call_index: None,
-                            l2_return_data: rc.l2_return_data.clone(),
-                            l2_delivery_failed: rc.l2_delivery_failed,
-                        })
-                        .collect();
+        tracing::info!(
+            target: "based_rollup::proxy",
+            iteration,
+            l1_entry_count = continuation.l1_entries.len(),
+            l2_entry_count = continuation.l2_entries.len(),
+            return_call_count = all_return_calls.len(),
+            "built unified simulation entries via table builder"
+        );
 
-                let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
-                    &[root_call],
-                    &return_calls_for_builder,
-                    rollup_id,
-                );
-                let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
-                    &analyzed,
-                    alloy_primitives::U256::from(rollup_id),
-                    rlp_encoded_tx,
-                );
-
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    call_idx = i,
-                    l1_entry_count = continuation.l1_entries.len(),
-                    return_call_count = my_return_calls.len(),
-                    "built combined simulation entries via table builder"
-                );
-
-                continuation.l1_entries
-            };
-
-            combined_entries.extend(entries);
-        }
+        let mut combined_entries = continuation.l1_entries;
 
         if combined_entries.is_empty() {
             tracing::warn!(
@@ -2561,14 +2541,8 @@ async fn simulate_l1_combined_delivery(
             break;
         }
 
-        tracing::info!(
-            target: "based_rollup::proxy",
-            iteration,
-            total_entries = combined_entries.len(),
-            "built combined L1 deferred entries for all calls"
-        );
-
-        // Get L1 block context for proof signing.
+        // Get L1 block context FIRST — we need block_number for both
+        // the state root query and the proof signing.
         let (block_number, block_hash, _parent_hash) =
             match get_l1_block_context_for_proxy(client, l1_rpc_url).await {
                 Ok(ctx) => ctx,
@@ -2581,6 +2555,52 @@ async fn simulate_l1_combined_delivery(
                     break;
                 }
             };
+
+        // Fix state deltas to chain from the actual on-chain rollup state root
+        // at the SAME block used for blockOverride. This avoids race conditions
+        // where a new postBatch changes the state root between query and simulation.
+        //
+        // Rollups.sol's _findAndApplyExecution checks `stateRoot != delta.currentState`
+        // and rejects mismatches. With correct chained deltas, entries with duplicate
+        // actionHashes are differentiated by their currentState values.
+        {
+            let actual_root = super::common::get_rollup_state_root(
+                client,
+                l1_rpc_url,
+                rollups_address,
+                rollup_id,
+                block_number,
+            )
+            .await
+            .unwrap_or(alloy_primitives::B256::ZERO);
+
+            let mut current = actual_root;
+            for (ei, entry) in combined_entries.iter_mut().enumerate() {
+                for delta in &mut entry.state_deltas {
+                    delta.current_state = current;
+                    let mut hasher_input = Vec::with_capacity(64);
+                    hasher_input.extend_from_slice(current.as_slice());
+                    hasher_input.extend_from_slice(&(ei as u64).to_be_bytes());
+                    delta.new_state = alloy_primitives::keccak256(&hasher_input);
+                    current = delta.new_state;
+                }
+            }
+
+            tracing::info!(
+                target: "based_rollup::proxy",
+                %actual_root,
+                block_number,
+                entry_count = combined_entries.len(),
+                "rewrote simulation entry state deltas from actual rollup state root"
+            );
+        }
+
+        tracing::info!(
+            target: "based_rollup::proxy",
+            iteration,
+            total_entries = combined_entries.len(),
+            "built combined L1 deferred entries for all calls"
+        );
 
         let trace_block_number = block_number + 1;
         let trace_parent_hash = block_hash;
@@ -2640,6 +2660,31 @@ async fn simulate_l1_combined_delivery(
             call_data_bytes,
             proof,
         );
+
+        // Verify L2TX hash consistency between entry and executeL2TX.
+        {
+            let l2tx_action = crate::cross_chain::CrossChainAction {
+                action_type: crate::cross_chain::CrossChainActionType::L2Tx,
+                rollup_id: alloy_primitives::U256::from(rollup_id),
+                destination: alloy_primitives::Address::ZERO,
+                value: alloy_primitives::U256::ZERO,
+                data: rlp_encoded_tx.to_vec(),
+                failed: false,
+                source_address: alloy_primitives::Address::ZERO,
+                source_rollup: alloy_primitives::U256::ZERO,
+                scope: vec![],
+            };
+            let expected_hash = crate::table_builder::compute_action_hash(&l2tx_action);
+            let entry0_hash = combined_entries.first().map(|e| e.action_hash);
+            tracing::info!(
+                target: "based_rollup::proxy",
+                %expected_hash,
+                entry0_hash = ?entry0_hash,
+                rlp_len = rlp_encoded_tx.len(),
+                match_ok = entry0_hash == Some(expected_hash),
+                "L2TX hash verification"
+            );
+        }
 
         // Build the traceCallMany bundle:
         //   tx0: postBatch(combined_entries)
@@ -2753,6 +2798,19 @@ async fn simulate_l1_combined_delivery(
 
         // Check postBatch result (tx0).
         let tx0_trace = &bundle_traces[0];
+        let tx0_ok = tx0_trace.get("error").is_none();
+        let tx1_output = bundle_traces.get(1)
+            .and_then(|t| t.get("output"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        tracing::info!(
+            target: "based_rollup::proxy",
+            tx0_ok,
+            tx1_output_prefix = &tx1_output[..std::cmp::min(20, tx1_output.len())],
+            "combined simulation: postBatch={}, executeL2TX output={}",
+            if tx0_ok { "ok" } else { "REVERTED" },
+            &tx1_output[..std::cmp::min(20, tx1_output.len())]
+        );
         if tx0_trace.get("error").is_some() || tx0_trace.get("revertReason").is_some() {
             let error_msg = tx0_trace
                 .get("error")
@@ -2788,17 +2846,109 @@ async fn simulate_l1_combined_delivery(
             per_call_delivery_failed[call_idx] = false;
 
             // Extract L1→L2 return calls from this trigger trace.
-            let new_returns = extract_l1_to_l2_return_calls(
-                client,
-                l1_rpc_url,
-                rollups_address,
-                trigger_trace,
-                rollup_id,
-            )
-            .await;
+            // Only run once per unique trigger_tx_idx (all calls share executeL2TX).
+            let already_extracted = call_idx > 0
+                && call_trigger_tx_indices[..call_idx].contains(&trigger_tx_idx);
+            if !already_extracted {
+                // Diagnostic: dump trace tree structure to understand what the walker sees.
+                fn dump_trace_tree(node: &serde_json::Value, depth: usize, max_depth: usize) {
+                    if depth > max_depth { return; }
+                    let ty = node.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                    let from = node.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                    let to = node.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+                    let input = node.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
+                    let sel = if input.len() >= 10 { &input[..10] } else { input };
+                    let err = node.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                    let children = node.get("calls").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                    let indent = "  ".repeat(depth);
+                    tracing::info!(
+                        target: "based_rollup::proxy::trace_dump",
+                        "{indent}{ty} from={from_short} to={to_short} sel={sel} children={children} err={err}",
+                        indent = indent,
+                        from_short = &from[..std::cmp::min(10, from.len())],
+                        to_short = &to[..std::cmp::min(10, to.len())],
+                        sel = sel,
+                        children = children,
+                        err = if err.is_empty() { "ok" } else { err },
+                    );
+                    if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+                        for child in calls {
+                            dump_trace_tree(child, depth + 1, max_depth);
+                        }
+                    }
+                }
+                tracing::info!(
+                    target: "based_rollup::proxy::trace_dump",
+                    "=== executeL2TX trace tree (trigger_tx_idx={}) ===",
+                    trigger_tx_idx
+                );
+                dump_trace_tree(trigger_trace, 0, 6);
 
-            // Tag return calls with parent_call_index so we know which trigger produced them.
-            for mut rc in new_returns {
+                let new_returns = extract_l1_to_l2_return_calls(
+                    client,
+                    l1_rpc_url,
+                    rollups_address,
+                    trigger_trace,
+                    rollup_id,
+                )
+                .await;
+
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    call_idx,
+                    trigger_tx_idx,
+                    return_call_count = new_returns.len(),
+                    "extracted return calls from trigger trace"
+                );
+
+                // Tag return calls with parent_call_index.
+                // For shared executeL2TX, all return calls belong to the call
+                // whose delivery produced them. Since the trace shows only ONE
+                // delivery (the first call), assign parent=0 (first call).
+                for mut rc in new_returns {
+                    rc.parent_call_index = Some(call_idx);
+                    new_return_calls_this_iteration.push(rc);
+                }
+            }
+        }
+
+        // Per-call delivery simulation: for EACH call, run an individual delivery
+        // on L1 to (a) discover inner return calls and (b) capture delivery return data.
+        // The combined executeL2TX trace may not show all deliveries or their return data.
+        for (call_idx, call) in calls.iter().enumerate() {
+            let has_returns = all_return_calls
+                .iter()
+                .any(|rc| rc.parent_call_index == Some(call_idx))
+                || new_return_calls_this_iteration
+                    .iter()
+                    .any(|rc| rc.parent_call_index == Some(call_idx));
+
+            // Always run per-call simulation if delivery_return_data is empty
+            // (even if return calls are already known).
+            let needs_return_data = per_call_return_data[call_idx].is_empty();
+            if has_returns && !needs_return_data {
+                continue;
+            }
+
+            // Simulate this call's delivery individually on L1.
+            // Also captures delivery return data from the trace output.
+            let (per_call_returns, delivery_output, _delivery_failed) =
+                extract_l1_to_l2_return_calls_via_direct_delivery(
+                    client,
+                    l1_rpc_url,
+                    rollups_address,
+                    call.destination,
+                    &call.calldata,
+                    call.value,
+                    call.source_address,
+                    rollup_id,
+                )
+                .await;
+            // Update delivery return data if captured.
+            if !delivery_output.is_empty() && per_call_return_data[call_idx].is_empty() {
+                per_call_return_data[call_idx] = delivery_output;
+            }
+            for mut rc in per_call_returns {
                 rc.parent_call_index = Some(call_idx);
                 new_return_calls_this_iteration.push(rc);
             }
@@ -3002,6 +3152,125 @@ fn extract_delivery_output_from_trigger_trace(
         "could not find delivery call to destination in trigger trace — returning empty"
     );
     (vec![], false)
+}
+
+/// Discover L1→L2 return calls from a single L2→L1 delivery via direct simulation.
+///
+/// Runs `debug_traceCallMany` with a single tx: `from=proxy, to=destination, data=calldata`.
+/// This simulates the delivery on L1 WITHOUT postBatch entry pre-loading. The delivery
+/// may revert (inner executeCrossChainCall has no entry), but the trace still captures
+/// the inner call attempt — allowing the walker to detect L1→L2 return calls.
+///
+/// Used to discover return calls for individual deliveries when the combined executeL2TX
+/// trace doesn't show all deliveries (e.g., second call's inner entries are missing).
+/// Returns (return_calls, delivery_output, delivery_failed).
+async fn extract_l1_to_l2_return_calls_via_direct_delivery(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    rollups_address: Address,
+    destination: Address,
+    calldata: &[u8],
+    value: U256,
+    source_address: Address,
+    rollup_id: u64,
+) -> (Vec<DetectedReturnCall>, Vec<u8>, bool) {
+    // Compute L1 proxy address for the source (the L2 caller).
+    let proxy_from = match compute_proxy_address_on_l1(
+        client,
+        l1_rpc_url,
+        rollups_address,
+        source_address,
+        rollup_id,
+    )
+    .await
+    {
+        Ok(addr) => addr,
+        Err(_) => return (vec![], vec![], false),
+    };
+
+    // Single delivery call: proxy → destination with the original calldata.
+    let block_ctx = match super::common::get_l1_block_context(client, l1_rpc_url).await {
+        Ok(ctx) => ctx,
+        Err(_) => return (vec![], vec![], false),
+    };
+    let trace_block_num = block_ctx.0 + 1;
+    let trace_block_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let trace_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "debug_traceCallMany",
+        "params": [
+            [{
+                "transactions": [{
+                    "from": format!("{proxy_from}"),
+                    "to": format!("{destination}"),
+                    "data": format!("0x{}", hex::encode(calldata)),
+                    "value": format!("0x{:x}", value),
+                    "gas": "0x2faf080"
+                }],
+                "blockOverride": {
+                    "number": format!("{:#x}", trace_block_num),
+                    "time": format!("{:#x}", trace_block_ts)
+                }
+            }],
+            null,
+            { "tracer": "callTracer" }
+        ],
+        "id": 99932
+    });
+
+    let resp = match client.post(l1_rpc_url).json(&trace_req).send().await {
+        Ok(r) => r,
+        Err(_) => return (vec![], vec![], false),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(_) => return (vec![], vec![], false),
+    };
+
+    let trace = match body
+        .get("result")
+        .and_then(|r| r.get(0))
+        .and_then(|b| b.as_array())
+        .and_then(|a| a.first())
+    {
+        Some(t) => t,
+        None => return (vec![], vec![], false),
+    };
+
+    // Walk the delivery trace for L1→L2 return calls.
+    let returns = extract_l1_to_l2_return_calls(
+        client,
+        l1_rpc_url,
+        rollups_address,
+        trace,
+        rollup_id,
+    )
+    .await;
+
+    // Extract delivery return data from trace output.
+    let has_error = trace.get("error").is_some() || trace.get("revertReason").is_some();
+    let output_hex = trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+    let hex_clean = output_hex.strip_prefix("0x").unwrap_or(output_hex);
+    let delivery_output = hex::decode(hex_clean).unwrap_or_default();
+    let delivery_failed = has_error;
+
+    if !returns.is_empty() || !delivery_output.is_empty() {
+        tracing::info!(
+            target: "based_rollup::proxy",
+            return_calls = returns.len(),
+            delivery_output_len = delivery_output.len(),
+            delivery_failed,
+            dest = %destination,
+            source = %source_address,
+            "per-call direct delivery simulation result"
+        );
+    }
+
+    (returns, delivery_output, delivery_failed)
 }
 
 /// Recursively search the call trace for a CALL to the given destination address.
