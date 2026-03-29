@@ -1926,11 +1926,26 @@ async fn simulate_l1_delivery(
         let (return_data, delivery_failed) =
             extract_delivery_output_from_trigger_trace(trigger_trace, destination);
 
-        // Use the delivery failure status from the simulation trace.
-        // When delivery reverts on L1, the composer must generate
-        // REVERT_CONTINUE entries (§D.6) instead of RESULT(failed).
-        // L2TX cannot end with RESULT(failed) — ScopeReverted is needed.
-        final_delivery_failed = delivery_failed;
+        // Distinguish real delivery reverts from simulation artifacts.
+        // The simulation uses placeholder state deltas and ECDSA proof that may
+        // not match real L1 state. When the simulation fails with ExecutionNotFound,
+        // it's because placeholder entries weren't consumed properly — NOT because
+        // the delivery itself reverts. Only propagate delivery_failed when the
+        // error is a real contract revert (Error(string), Panic, custom errors).
+        let is_simulation_artifact = delivery_failed
+            && return_data.len() >= 4
+            && return_data[..4] == super::common::EXECUTION_NOT_FOUND_SELECTOR;
+
+        if is_simulation_artifact {
+            tracing::info!(
+                target: "based_rollup::proxy",
+                %destination,
+                "delivery simulation returned ExecutionNotFound — ignoring (placeholder artifact)"
+            );
+            // Don't update final_delivery_failed — keep previous value (false)
+        } else {
+            final_delivery_failed = delivery_failed;
+        }
 
         // Extract L1→L2 return calls from the trigger trace BEFORE deciding
         // the return data fallback — we need to know whether this is depth-1

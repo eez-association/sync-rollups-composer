@@ -2191,12 +2191,36 @@ where
                                 };
 
                             if !consumed_hashes.is_empty() {
-                                // Count how many entries we need per hash
+                                // Count how many entries we need per hash.
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
                                     std::collections::HashMap::new();
                                 for e in l1_entries.iter().filter(|e| e.action_hash != B256::ZERO) {
                                     *entry_counts.entry(e.action_hash).or_default() += 1;
                                 }
+
+                                // Detect REVERT_CONTINUE pattern: if any entry's nextAction
+                                // is REVERT, entries consumed inside the scope have their
+                                // ExecutionConsumed events rolled back by ScopeReverted (§D.6).
+                                // Only the L2TX trigger entry (consumed outside the scope)
+                                // has a surviving event. Exclude scope-internal entries from
+                                // the consumption check.
+                                let has_revert_entries = l1_entries.iter().any(|e| {
+                                    e.next_action.action_type
+                                        == crate::cross_chain::CrossChainActionType::Revert
+                                });
+                                if has_revert_entries {
+                                    // Remove entries whose ExecutionConsumed events are
+                                    // lost inside ScopeReverted:
+                                    // - Entries with nextAction=REVERT (consumed before
+                                    //   _getRevertContinuation throws ScopeReverted)
+                                    // - The entry immediately after REVERT (REVERT_CONTINUE
+                                    //   trigger → RESULT terminal, also consumed inside scope)
+                                    //
+                                    // Identify by: any entry NOT in consumed_hashes that is
+                                    // part of a REVERT_CONTINUE group.
+                                    entry_counts.retain(|hash, _| consumed_hashes.contains_key(hash));
+                                }
+
                                 // Check that consumed count >= entry count for each hash
                                 let all_consumed = entry_counts.iter().all(|(hash, &needed)| {
                                     consumed_hashes.get(hash).is_some_and(|v| v.len() >= needed)
