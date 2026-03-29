@@ -2034,56 +2034,77 @@ async fn trace_and_detect_internal_calls(
             "enriching child L2→L1 calls with L1 delivery simulation"
         );
         for (_parent_idx, child) in &mut all_child_calls {
-            // Simulate the child's L1 delivery via eth_call.
-            // This is a read-only view call to get the return data from the
-            // destination contract on L1. Exception per spec: read-only view
-            // calls may use eth_call instead of debug_traceCallMany.
-            let delivery_data = format!("0x{}", hex::encode(&child.calldata));
-            let dest_hex = format!("{}", child.destination);
-            let call_req = serde_json::json!({
+            // Simulate the child's L1 delivery via debug_traceCallMany.
+            // Matches real execution: _processCallAtScope computes the L1 proxy
+            // for (sourceAddress, sourceRollup), then proxy.executeOnBehalf calls
+            // destination.call{value}(data) — so msg.sender = proxy address.
+
+            // Step 1: Compute L1 proxy address for this child's source.
+            let proxy_from = super::l2_to_l1::compute_proxy_address_on_l1(
+                client,
+                l1_rpc_url,
+                rollups_address,
+                child.source_address,
+                rollup_id,
+            )
+            .await
+            .unwrap_or(Address::ZERO);
+
+            // Step 2: Simulate delivery via debug_traceCallMany (from=proxy, to=destination).
+            let trace_req = serde_json::json!({
                 "jsonrpc": "2.0",
-                "method": "eth_call",
-                "params": [{
-                    "to": dest_hex,
-                    "data": delivery_data,
-                    "value": format!("0x{:x}", child.value)
-                }, "latest"],
+                "method": "debug_traceCallMany",
+                "params": [[{
+                    "transactions": [{
+                        "from": format!("{proxy_from}"),
+                        "to": format!("{}", child.destination),
+                        "data": format!("0x{}", hex::encode(&child.calldata)),
+                        "value": format!("0x{:x}", child.value),
+                        "gas": "0x2faf080"
+                    }]
+                }], null, { "tracer": "callTracer" }],
                 "id": 99987
             });
-            if let Ok(resp) = client.post(l1_rpc_url).json(&call_req).send().await {
+
+            if let Ok(resp) = client.post(l1_rpc_url).json(&trace_req).send().await {
                 if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(result_hex) = body.get("result").and_then(|v| v.as_str()) {
-                        let hex_clean = result_hex.strip_prefix("0x").unwrap_or(result_hex);
-                        if let Ok(delivery_bytes) = hex::decode(hex_clean) {
-                            if !delivery_bytes.is_empty() {
-                                tracing::info!(
-                                    target: "based_rollup::l1_proxy",
-                                    dest = %child.destination,
-                                    return_data_len = delivery_bytes.len(),
-                                    "enriched L2→L1 child with L1 delivery return data"
-                                );
-                                child.return_data = delivery_bytes;
-                            }
+                    // Extract trace: result[bundle_idx=0][tx_idx=0]
+                    let trace = body
+                        .get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                        .and_then(|arr| arr.first());
+
+                    if let Some(t) = trace {
+                        let has_error =
+                            t.get("error").is_some() || t.get("revertReason").is_some();
+                        let output_hex =
+                            t.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+                        let output_bytes = hex::decode(
+                            output_hex.strip_prefix("0x").unwrap_or(output_hex),
+                        )
+                        .unwrap_or_default();
+
+                        if has_error {
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                dest = %child.destination,
+                                proxy = %proxy_from,
+                                revert_data_len = output_bytes.len(),
+                                "L1 delivery simulation reverted for child call"
+                            );
+                            child.return_data = output_bytes;
+                            child.call_success = false;
+                        } else if !output_bytes.is_empty() {
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                dest = %child.destination,
+                                proxy = %proxy_from,
+                                return_data_len = output_bytes.len(),
+                                "enriched L2→L1 child with L1 delivery return data"
+                            );
+                            child.return_data = output_bytes;
                         }
-                    } else if let Some(error) = body.get("error") {
-                        // Extract revert data from the JSON-RPC error.
-                        // reth returns revert bytes in error.data (hex-encoded).
-                        let revert_data = error
-                            .get("data")
-                            .and_then(|d| d.as_str())
-                            .and_then(|s| {
-                                let clean = s.strip_prefix("0x").unwrap_or(s);
-                                hex::decode(clean).ok()
-                            })
-                            .unwrap_or_default();
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            dest = %child.destination,
-                            revert_data_len = revert_data.len(),
-                            "L1 delivery simulation reverted for child call"
-                        );
-                        child.return_data = revert_data;
-                        child.call_success = false;
                     }
                 }
             }

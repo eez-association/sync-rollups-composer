@@ -2878,7 +2878,7 @@ async fn simulate_l1_combined_delivery(
 ///
 /// Calls `computeCrossChainProxyAddress(originalAddress, originalRollupId)`
 /// on the Rollups contract.
-async fn compute_proxy_address_on_l1(
+pub(crate) async fn compute_proxy_address_on_l1(
     client: &reqwest::Client,
     l1_rpc_url: &str,
     rollups_address: Address,

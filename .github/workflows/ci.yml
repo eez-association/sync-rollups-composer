@@ -414,11 +414,11 @@ jobs:
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
 
-      - name: "Protocol E2E: nestedCallRevertContinue (L1->L2->L1 nested revert)"
+      - name: "Protocol E2E: nestedCallRevert (L1->L2->L1 nested revert)"
         timeout-minutes: 5
         run: |
           cd contracts/sync-rollups-protocol
-          bash script/e2e/shared/run-network.sh script/e2e/nestedCallRevertContinue/E2E.s.sol \
+          bash script/e2e/shared/run-network.sh script/e2e/nestedCallRevert/E2E.s.sol \
             --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
