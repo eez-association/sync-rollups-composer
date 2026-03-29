@@ -200,6 +200,25 @@ export function useFlashLoanDeploy(
   const deploy = useCallback(async () => {
     const rollupId = config.rollupId || "1";
 
+    // Validate that flash loan infrastructure is deployed on this network.
+    // Without these contracts, the FlashExecutor will be deployed with zero
+    // addresses and execute() will always revert.
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const missingContracts: string[] = [];
+    if (!config.flashPoolAddress || config.flashPoolAddress === ZERO)
+      missingContracts.push("Flash Pool");
+    if (!config.flashTokenAddress || config.flashTokenAddress === ZERO)
+      missingContracts.push("Flash Token");
+    if (!config.l1Bridge || config.l1Bridge === ZERO)
+      missingContracts.push("L1 Bridge");
+
+    if (missingContracts.length > 0) {
+      const msg = `Flash loan infrastructure not deployed on this network: ${missingContracts.join(", ")}. Run the deploy-l2 service first.`;
+      log(msg, "err");
+      setState((s) => ({ ...s, error: msg, phase: "need-deploy" }));
+      return;
+    }
+
     setState((s) => ({
       ...s,
       phase: "deploying-l2",
