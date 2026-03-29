@@ -47,7 +47,7 @@ services:
   # for local dev convenience. Production deployments should use separate keys
   # for contract deployment and block building.
   deploy:
-    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
+    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollups-composer:deploy-latest}
     # Root required to write to the shared volume
     user: root
     entrypoint: ["bash", "-c"]
@@ -73,7 +73,7 @@ services:
   # L2 deployment — runs after builder is healthy.
   # Sets canonicalBridgeAddress + deploys flash loan contracts on L2.
   deploy-l2:
-    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
+    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollups-composer:deploy-latest}
     user: root
     entrypoint: ["bash", "-c"]
     command:
@@ -174,7 +174,7 @@ services:
   # Uses dev key #5 (same as deploy-l2), so must not overlap with it.
   # If FLASH_TOKEN_ADDRESS is zero (flash loan infra not deployed), exits cleanly.
   deploy-reverse-flash-loan:
-    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
+    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollups-composer:deploy-latest}
     user: root
     restart: "no"
     entrypoint: ["bash", "-c"]

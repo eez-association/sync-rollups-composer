@@ -8,7 +8,7 @@
 
 services:
   builder:
-    image: ${ROLLUP_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:latest}
+    image: ${ROLLUP_IMAGE:-ghcr.io/eez-association/sync-rollups-composer:latest}
     restart: unless-stopped
     deploy:
       resources:
@@ -36,7 +36,7 @@ services:
       start_period: 30s
 
   fullnode:
-    image: ${ROLLUP_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:latest}
+    image: ${ROLLUP_IMAGE:-ghcr.io/eez-association/sync-rollups-composer:latest}
     restart: unless-stopped
     deploy:
       resources:
