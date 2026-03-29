@@ -9,7 +9,7 @@ Senior QA engineer. You validate the running system and investigate failures.
 
 ## First Steps
 1. Read CLAUDE.md for Docker rules and "Lessons Learned"
-3. Load environment: `sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env`
+3. Load environment: `sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env`
 
 ## NOT Your Files
 You don't modify any source code. You run commands, read logs, and report findings.
@@ -30,14 +30,14 @@ When a tx fails or a test fails, follow this EXACT order. Never speculate.
 ## Environment Reference
 
 ### Ports
-- L1 RPC: `localhost:9555`
-- Builder RPC: `localhost:9545`
-- Builder WS: `localhost:9550`
-- Builder L2→L1 composer RPC: `localhost:9548` (intercepts L2→L1 cross-chain calls — hold-then-forward)
-- Builder L1→L2 composer RPC: `localhost:9556` (intercepts L1→L2 cross-chain calls — hold-then-forward)
-- Builder Health: `localhost:9560/health`
-- Fullnode1: `localhost:9546`
-- Fullnode2: `localhost:9547`
+- L1 RPC: `localhost:11555`
+- Builder RPC: `localhost:11545`
+- Builder WS: `localhost:11550`
+- Builder L2→L1 composer RPC: `localhost:11548` (intercepts L2→L1 cross-chain calls — hold-then-forward)
+- Builder L1→L2 composer RPC: `localhost:11556` (intercepts L1→L2 cross-chain calls — hold-then-forward)
+- Builder Health: `localhost:11560/health`
+- Fullnode1: `localhost:11546`
+- Fullnode2: `localhost:11547`
 - Sync UI: `localhost:8080`
 - Blockscout L1: Frontend `localhost:4000` / API `localhost:4002`
 - Blockscout L2: Frontend `localhost:4001` / API `localhost:4003`
@@ -85,75 +85,75 @@ cast sig "InvalidRevertData()"
 ```
 
 ### Key Addresses (from rollup.env)
-Load with: `sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env`
+Load with: `sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env`
 
 ## Investigation Toolkit
 
 ### System Health
 ```bash
-curl -s localhost:9560/health | jq
+curl -s localhost:11560/health | jq
 # Returns: { healthy, mode, l2_head, l1_derivation_head, pending_submissions, consecutive_rewind_cycles, commit }
 ```
 
 ### Node Comparison
 ```bash
 # Block numbers (should be within ±1)
-echo "Builder: $(cast bn --rpc-url localhost:9545) FN1: $(cast bn --rpc-url localhost:9546) FN2: $(cast bn --rpc-url localhost:9547)"
+echo "Builder: $(cast bn --rpc-url localhost:11545) FN1: $(cast bn --rpc-url localhost:11546) FN2: $(cast bn --rpc-url localhost:11547)"
 
 # State roots at specific block (MUST match)
-BN=$(cast bn --rpc-url localhost:9546)
-echo "Builder: $(cast block $BN --rpc-url localhost:9545 --json | jq -r .stateRoot)"
-echo "FN1:     $(cast block $BN --rpc-url localhost:9546 --json | jq -r .stateRoot)"
-echo "FN2:     $(cast block $BN --rpc-url localhost:9547 --json | jq -r .stateRoot)"
+BN=$(cast bn --rpc-url localhost:11546)
+echo "Builder: $(cast block $BN --rpc-url localhost:11545 --json | jq -r .stateRoot)"
+echo "FN1:     $(cast block $BN --rpc-url localhost:11546 --json | jq -r .stateRoot)"
+echo "FN2:     $(cast block $BN --rpc-url localhost:11547 --json | jq -r .stateRoot)"
 ```
 
 ### Transaction Investigation
 ```bash
 # Receipt (check status: 0x1=success, 0x0=reverted)
-cast receipt <HASH> --rpc-url localhost:9545
+cast receipt <HASH> --rpc-url localhost:11545
 
 # Trace with callTracer (shows revert reason)
-cast rpc debug_traceTransaction <HASH> '{"tracer":"callTracer"}' --rpc-url localhost:9545
+cast rpc debug_traceTransaction <HASH> '{"tracer":"callTracer"}' --rpc-url localhost:11545
 
 # Decode error selector
 cast 4byte <SELECTOR>
 
 # Check all txs in an L1 block (ordering matters!)
-cast block <N> --rpc-url localhost:9555 --json | jq '.transactions'
+cast block <N> --rpc-url localhost:11555 --json | jq '.transactions'
 ```
 
 ### L1 State
 ```bash
 # On-chain state root
-cast call $ROLLUPS_ADDRESS "rollups(uint256)" 1 --rpc-url localhost:9555
+cast call $ROLLUPS_ADDRESS "rollups(uint256)" 1 --rpc-url localhost:11555
 
 # Nonce comparison (critical for diagnosing divergence)
-cast nonce $BUILDER_ADDRESS --block <N> --rpc-url localhost:9545   # builder
-cast nonce $BUILDER_ADDRESS --block <N> --rpc-url localhost:9546   # fullnode1
+cast nonce $BUILDER_ADDRESS --block <N> --rpc-url localhost:11545   # builder
+cast nonce $BUILDER_ADDRESS --block <N> --rpc-url localhost:11546   # fullnode1
 
 # Nonce gap detection (stuck submissions)
-cast rpc txpool_inspect --rpc-url localhost:9555
+cast rpc txpool_inspect --rpc-url localhost:11555
 ```
 
 ### Logs
 ```bash
 # Builder logs (strip ANSI, last 5 min)
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml logs builder --no-log-prefix --since 5m 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml logs builder --no-log-prefix --since 5m 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
 
 # Key patterns to grep
 # ... | grep -E "rewind|deferral|mismatch|hold|forwarded|failed to forward|replacement|entry_count|entry-bearing|consumed|filtering"
 
 # Fullnode errors
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml logs fullnode1 --no-log-prefix --since 5m 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "ERROR|failed to execute"
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml logs fullnode1 --no-log-prefix --since 5m 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E "ERROR|failed to execute"
 ```
 
 ### Bridge Testing
 ```bash
 # L1→L2 deposit (through L1→L2 composer RPC — REQUIRED for entry detection)
-cast send $BRIDGE_ADDRESS "bridgeEther(uint256,address)" 1 "$USER_ADDR" --value 0.1ether --rpc-url localhost:9556 --private-key $KEY
+cast send $BRIDGE_ADDRESS "bridgeEther(uint256,address)" 1 "$USER_ADDR" --value 0.1ether --rpc-url localhost:11556 --private-key $KEY
 
 # L2→L1 withdrawal (through L2→L1 composer RPC — REQUIRED for entry detection)
-cast send $BRIDGE_L2_ADDRESS "bridgeEther(uint256,address)" 0 "$USER_ADDR" --value 0.1ether --rpc-url localhost:9548 --private-key $KEY --gas-limit 500000
+cast send $BRIDGE_L2_ADDRESS "bridgeEther(uint256,address)" 0 "$USER_ADDR" --value 0.1ether --rpc-url localhost:11548 --private-key $KEY --gas-limit 500000
 ```
 
 ## Common Failure Patterns
@@ -165,7 +165,7 @@ cast send $BRIDGE_L2_ADDRESS "bridgeEther(uint256,address)" 0 "$USER_ADDR" --val
 4. If in different blocks → ExecutionNotInCurrentBlock constraint violated
 
 ### Fullnode stuck (nonce divergence)
-1. Compare nonces: `cast nonce $BUILDER --block <stuck_block> --rpc-url :9545` vs `:9546`
+1. Compare nonces: `cast nonce $BUILDER --block <stuck_block> --rpc-url :11545` vs `:9546`
 2. If off by 1 → a protocol tx was filtered by §4f but nonces weren't corrected
 3. Check if builder did rewind: grep "rewinding" in builder logs
 4. Check if rewind target was correct: should be `entry_block - 1`

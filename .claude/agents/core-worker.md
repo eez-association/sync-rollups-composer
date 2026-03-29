@@ -69,7 +69,7 @@ cargo build --release
 cargo nextest run --workspace && cargo clippy --workspace --all-features
 
 # Deploy iteration
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml restart builder fullnode1 fullnode2
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml restart builder fullnode1 fullnode2
 
 # NEVER docker compose down -v without user approval
 # NEVER docker compose build during development
@@ -79,17 +79,17 @@ sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments
 ## Debugging
 ```bash
 # Health
-curl -s localhost:9560/health | jq
+curl -s localhost:11560/health | jq
 # Logs
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml logs builder --tail 100
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml logs builder --tail 100
 # State roots
-cast rpc syncrollups_getStateRoot --rpc-url localhost:9545
+cast rpc syncrollups_getStateRoot --rpc-url localhost:11545
 # L1 on-chain
-cast call $ROLLUPS_ADDRESS "rollups(uint256)" 1 --rpc-url localhost:9555
+cast call $ROLLUPS_ADDRESS "rollups(uint256)" 1 --rpc-url localhost:11555
 # Nonce gap detection
-cast rpc txpool_inspect --rpc-url localhost:9555
+cast rpc txpool_inspect --rpc-url localhost:11555
 # Config
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml exec -T builder cat /shared/rollup.env
 ```
 
 ## Commits

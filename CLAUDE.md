@@ -1,5 +1,7 @@
 ## CRITICAL — Docker Environment Rules
 
+**NEVER operate on testnet-eez** (ports 9xxx) unless the user explicitly asks. All development, debugging, and testing uses **devnet-eez** (ports 11xxx). Testnet is the public-facing deployment (eez.dev) — touching it destroys user-visible state.
+
 When debugging or investigating issues:
 
 1. **NEVER run `docker compose down -v`** without explicit user approval. This wipes all data and is almost never the right action during debugging.
@@ -14,19 +16,19 @@ Debugging order: logs → compare state across nodes → health endpoint → res
 ```bash
 # Standard iteration (devnet)
 cargo build --release
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml \
-     -f deployments/testnet-eez/docker-compose.dev.yml restart builder fullnode1 fullnode2
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml \
+     -f deployments/devnet-eez/docker-compose.dev.yml restart builder fullnode1 fullnode2
 
 # First time or after compose changes
 cargo build --release
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml \
-     -f deployments/testnet-eez/docker-compose.dev.yml up -d
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml \
+     -f deployments/devnet-eez/docker-compose.dev.yml up -d
 
 # With explorers
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml \
-     -f deployments/testnet-eez/docker-compose.dev.yml \
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml \
+     -f deployments/devnet-eez/docker-compose.dev.yml \
      -f deployments/shared/docker-compose.explorer.yml \
-     -f deployments/testnet-eez/docker-compose.explorer.yml up -d
+     -f deployments/devnet-eez/docker-compose.explorer.yml up -d
 ```
 
 Rules:
@@ -43,7 +45,7 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 ### Nonce Management
 - **NEVER use alloy auto-nonce for withdrawal triggers or any multi-tx L1 sequence.** Alloy's CachedNonceManager desynchronizes when gas estimation fails, permanently bricking all L1 submissions. Use `send_l1_tx_with_nonce()` with explicit nonces.
 - **ALWAYS call `reset_nonce()` after any L1 tx failure.** Recreates the provider and clears corrupted cache. Without this: permanent livelock (builder builds but never submits).
-- **Nonce gap = invisible death.** Builder keeps building while submissions are stuck in "queued" pool. Diagnose with `cast rpc txpool_inspect --rpc-url localhost:9555`.
+- **Nonce gap = invisible death.** Builder keeps building while submissions are stuck in "queued" pool. Diagnose with `cast rpc txpool_inspect --rpc-url localhost:11555`.
 
 ### Cross-Chain Entry Safety
 - **NEVER align state roots by overwriting pre_state_root** — NO EXCEPTIONS. If roots don't match, there is a real bug in derivation or filtering. The builder must keep rewinding until the root cause is fixed. Fabricating pre_state_roots produces blocks that fullnodes cannot reproduce.
@@ -280,10 +282,10 @@ sync-rollup-composer/
 - **L2→L1 multi-call continuation**: `build_l2_to_l1_continuation_entries()` generates 3 L2 entries (with scope navigation on Entry 1: `callReturn{scope=[0]}`) and 5 L1 entries (with nested delivery on Entry 0). Return calls are constructed analytically from the forward trip's `receiveTokens` params — simulation is not used for the second call due to token availability ordering. Mirrors the L1→L2 pattern: scope navigation is required on both sides so tokens are returned within the same tx. NOTE: `table_builder.rs` still uses `IBridge::receiveTokensCall` for flash loan ABI decode (to be refactored separately to eliminate the last Bridge-specific dependency).
 - **Configurable-depth cross-chain (issue #236)**: `composer_rpc/l2_to_l1.rs` supports up to `MAX_RECURSIVE_DEPTH=5` (defined in `composer_rpc/l2_to_l1.rs`) hops via iterative `debug_traceCallMany` expansion. Both the multi-call path and the single-call path use the same constant. PingPong contracts (`contracts/test-depth2/`) use generic `ping(round, maxRounds)` and `pong(round, maxRounds)` signatures; `start(maxRounds)` triggers N rounds of L2→L1 with (N-1) L1→L2 returns. Deployed via `scripts/e2e/deploy-ping-pong.sh` using dev#10.
 
-## Docker Services (Devnet)
+## Docker Services (Devnet — devnet-eez)
 
-- **L1**: port 9555 | **builder**: 9545 (RPC), 9550 (WS), 9548 (L2→L1 composer RPC), 9556 (L1→L2 composer RPC), 9560 (health)
-- **fullnode1**: 9546 | **fullnode2**: 9547 | **sync-ui**: 8080
+- **L1**: port 11555 | **builder**: 11545 (RPC), 11550 (WS), 11548 (L2→L1 composer RPC), 11556 (L1→L2 composer RPC), 11560 (health)
+- **fullnode1**: 11546 | **fullnode2**: 11547 | **sync-ui**: 8081
 - **deploy**: L1 contracts (Rollups.sol, tmpECDSAVerifier, Bridge, etc.) — runs once at startup
 - **deploy-l2**: L2 contracts (canonicalBridgeAddress verify + flash loan contracts) — runs after builder healthy
 - **tx-sender**: sends test L1 transactions (funds L2 accounts via dev#1) — runs after deploy
@@ -296,12 +298,12 @@ All core services start by default. Explorers require the explorer overlay files
 ### Deployment-specific compose commands
 
 ```bash
-# Devnet (standard — uses Docker-built binary, CI/production only)
-docker compose -f deployments/testnet-eez/docker-compose.yml up -d
+# Devnet-eez (standard — uses Docker-built binary, CI/production only)
+docker compose -f deployments/devnet-eez/docker-compose.yml up -d
 
-# Devnet (dev mode — mount local binary) ← USE THIS FOR DEVELOPMENT
-docker compose -f deployments/testnet-eez/docker-compose.yml \
-               -f deployments/testnet-eez/docker-compose.dev.yml up -d
+# Devnet-eez (dev mode — mount local binary) ← USE THIS FOR DEVELOPMENT
+docker compose -f deployments/devnet-eez/docker-compose.yml \
+               -f deployments/devnet-eez/docker-compose.dev.yml up -d
 
 # Gnosis
 docker compose -f deployments/gnosis-100/docker-compose.yml --env-file deployments/gnosis-100/.env up -d

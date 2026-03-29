@@ -25,9 +25,9 @@ Read CLAUDE.md for Docker rules and dev workflow. Read docs/DERIVATION.md when a
 
 ## Docker Commands (always with both -f flags)
 ```bash
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml up -d
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml logs builder --tail 50
-sudo docker compose -f deployments/testnet-eez/docker-compose.yml -f deployments/testnet-eez/docker-compose.dev.yml restart builder
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml up -d
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml logs builder --tail 50
+sudo docker compose -f deployments/devnet-eez/docker-compose.yml -f deployments/devnet-eez/docker-compose.dev.yml restart builder
 # NEVER down -v without approval
 ```
 
