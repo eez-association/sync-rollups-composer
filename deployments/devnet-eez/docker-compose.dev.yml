@@ -14,6 +14,24 @@
 #                       restart builder fullnode1 fullnode2
 
 services:
+  l1:
+    command:
+      - node
+      - --dev
+      - --dev.block-time=${L1_BLOCK_TIME:-12s}
+      - --chain=/genesis/l1-genesis.json
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --http.api=debug,trace,txpool,eth,net,web3
+      - --http.corsdomain=*
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.port=8546
+      - --ws.api=debug,trace,txpool,eth,net,web3
+      - --ws.origins=*
+      - --log.stdout.format=terminal
+
   deploy:
     build:
       context: ../..
@@ -49,6 +67,7 @@ services:
     image: based-rollup:dev
     environment:
       GENESIS: /shared/genesis.json
+      BLOCK_TIME: "${BLOCK_TIME:-12}"
     volumes:
       - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
       - ./genesis-l2.json:/etc/based-rollup/genesis.json
@@ -57,6 +76,7 @@ services:
     image: based-rollup:dev
     environment:
       GENESIS: /shared/genesis.json
+      BLOCK_TIME: "${BLOCK_TIME:-12}"
     volumes:
       - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
       - ./genesis-l2.json:/etc/based-rollup/genesis.json
@@ -65,6 +85,7 @@ services:
     image: based-rollup:dev
     environment:
       GENESIS: /shared/genesis.json
+      BLOCK_TIME: "${BLOCK_TIME:-12}"
     volumes:
       - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
       - ./genesis-l2.json:/etc/based-rollup/genesis.json
