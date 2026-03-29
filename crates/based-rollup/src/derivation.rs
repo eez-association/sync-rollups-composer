@@ -414,8 +414,24 @@ impl DerivationPipeline {
                 // Continuation L1 entries have nextAction.type == CALL instead of RESULT,
                 // signaling a reentrant cross-chain call. The additional L2 entries are
                 // needed for the CCM execution table to resolve the full call chain.
+                //
+                // Only use CONSUMED entries for reconstruction. Entries whose triggers
+                // reverted on L1 were not consumed (no ExecutionConsumed event) and must
+                // not generate continuation entries — otherwise the derivation attempts
+                // to load entries that don't exist, causing permanent stuck state.
+                //
+                // An entry is "consumed" if its action_hash has remaining consumption
+                // count > 0 in the consumed map. Immediate entries (hash=0) always pass.
+                let consumed_deferred: Vec<_> = deferred_entries
+                    .iter()
+                    .filter(|e| {
+                        e.action_hash.is_zero()
+                            || remaining.get(&e.action_hash).copied().unwrap_or(0) > 0
+                    })
+                    .cloned()
+                    .collect();
                 let continuation = cross_chain::reconstruct_continuation_l2_entries(
-                    &deferred_entries,
+                    &consumed_deferred,
                     &call_actions,
                 );
                 info!(
