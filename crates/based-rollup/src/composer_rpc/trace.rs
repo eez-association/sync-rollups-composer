@@ -158,6 +158,77 @@ fn has_selector(input: &[u8], selector: &[u8; 4]) -> bool {
 /// Check if any **direct** child of `node` calls `executeCrossChainCall` on a
 /// known manager address.
 fn has_execute_cross_chain_call_child(node: &Value, manager_addresses: &[Address]) -> bool {
+    has_execute_cross_chain_call_child_impl(node, manager_addresses)
+}
+
+/// Like [`has_execute_cross_chain_call_child`] but only returns true when the
+/// entry was CONSUMED (not ExecutionNotFound). Used to decide whether to recurse
+/// into proxy children for nested call discovery.
+///
+/// Returns true when:
+/// - executeCrossChainCall succeeded (entry consumed, no error), OR
+/// - executeCrossChainCall failed with an error OTHER than ExecutionNotFound
+///   (entry was consumed but scope navigation failed internally — nested calls exist)
+///
+/// Returns false when:
+/// - executeCrossChainCall failed with ExecutionNotFound (entry not consumed, nothing to explore)
+fn has_consumed_execute_cross_chain_call_child(
+    node: &Value,
+    manager_addresses: &[Address],
+) -> bool {
+    let selector = execute_cross_chain_call_selector();
+    let execution_not_found = super::common::EXECUTION_NOT_FOUND_SELECTOR;
+
+    let children = match node.get("calls").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    for child in children {
+        let child_to = child
+            .get("to")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<Address>().ok());
+
+        let child_input_hex = child.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
+        let child_input_clean = child_input_hex
+            .strip_prefix("0x")
+            .unwrap_or(child_input_hex);
+        let child_input = hex::decode(child_input_clean).unwrap_or_default();
+
+        if let Some(to_addr) = child_to {
+            if manager_addresses.contains(&to_addr) && has_selector(&child_input, &selector) {
+                let has_error =
+                    child.get("error").is_some() || child.get("revertReason").is_some();
+                if !has_error {
+                    // Succeeded — entry consumed, scope navigation completed
+                    return true;
+                }
+                // Check if the error is ExecutionNotFound (entry NOT consumed)
+                let output_hex = child
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0x");
+                let output_clean = output_hex.strip_prefix("0x").unwrap_or(output_hex);
+                let output_bytes = hex::decode(output_clean).unwrap_or_default();
+                let is_exec_not_found =
+                    output_bytes.len() >= 4 && output_bytes[..4] == execution_not_found;
+                if !is_exec_not_found {
+                    // Entry WAS consumed but scope navigation failed (nested calls exist)
+                    return true;
+                }
+                // ExecutionNotFound → entry not consumed → nothing useful inside
+            }
+        }
+    }
+
+    false
+}
+
+fn has_execute_cross_chain_call_child_impl(
+    node: &Value,
+    manager_addresses: &[Address],
+) -> bool {
     let selector = execute_cross_chain_call_selector();
     let children = match node.get("calls").and_then(|v| v.as_array()) {
         Some(arr) => arr,
@@ -453,8 +524,23 @@ async fn walk_trace_tree_inner(
             .await;
         }
 
-        // When proxy was found: do NOT recurse into proxy children —
-        // the executeCrossChainCall and everything beneath are protocol internals.
+        // Only recurse into proxy children when the executeCrossChainCall
+        // child SUCCEEDED (entry was consumed → scope navigation followed).
+        // If it reverted (ExecutionNotFound), there's nothing useful inside.
+        // Recursing unconditionally causes infinite loops when entries are
+        // consumed and scope navigation calls the same proxy recursively.
+        if has_consumed_execute_cross_chain_call_child(node, manager_addresses) {
+            recurse_children(
+                node,
+                manager_addresses,
+                lookup,
+                proxy_cache,
+                ephemeral_proxies,
+                detected_calls,
+                unresolved_proxies,
+            )
+            .await;
+        }
         return;
     }
 

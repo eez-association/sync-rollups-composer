@@ -1529,3 +1529,235 @@ fn test_void_children_still_use_result_void() {
         "void delivery → L1 uses result_void"
     );
 }
+
+/// Nested reentrant cross-chain calls test (5 calls, depth-5 L1→L2→L1 alternation).
+///
+/// Matches the `reentrantCrossChainCalls` E2E test in
+/// contracts/sync-rollups-protocol/script/e2e/reentrantCrossChainCalls/E2E.s.sol
+///
+/// Detected calls (from L1 trace + L2 simulation):
+///   CALL[0] L1→L2: DC_L1 → DC_L2.deepCall(4)
+///   CALL[1] L2→L1: DC_L2 → DC_L1.deepCall(3), child of [0]
+///   CALL[2] L1→L2: DC_L1 → DC_L2.deepCall(2) (continuation from [1]'s L1 execution)
+///   CALL[3] L2→L1: DC_L2 → DC_L1.deepCall(1), child of [2]
+///   CALL[4] L1→L2: DC_L1 → DC_L2.deepCall(0) (continuation from [3]'s L1 execution)
+///
+/// Expected L1 entries (5):
+///   [0] CALL(L2, deepCall(4)) → CALL(MAINNET, deepCall(3), scope=[0])
+///   [1] CALL(L2, deepCall(2)) → CALL(MAINNET, deepCall(1), scope=[0])
+///   [2] CALL(L2, deepCall(0)) → RESULT(L2, return_data)
+///   [3] RESULT(MAINNET, return_data) → RESULT(L2, return_data) (innermost scope resolution)
+///   [4] RESULT(MAINNET, return_data) → RESULT(L2, return_data) (outermost scope resolution)
+///
+/// Expected L2 entries (5):
+///   [0] CALL(MAINNET, deepCall(3), scope=[]) → CALL(L2, deepCall(2), scope=[0])
+///   [1] CALL(MAINNET, deepCall(1), scope=[]) → CALL(L2, deepCall(0), scope=[0])
+///   [2] RESULT(L2) → RESULT(MAINNET) (innermost scope resolution)
+///   [3] RESULT(L2) → RESULT(MAINNET) (outermost scope resolution)
+///   [4] RESULT(L2) → RESULT(L2) [terminal self-ref]
+#[test]
+fn test_nested_reentrant_5_calls() {
+    let l2_id = U256::from(1);
+    let mainnet_id = U256::ZERO;
+
+    let dc_l1 = address!("d89ceeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    let dc_l2 = address!("cabeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+
+    // deepCall selector + abi-encoded uint256 arg
+    let deep_call_selector = [0x42, 0x42, 0x42, 0x42]; // simplified for test
+    let make_deepcall_data = |n: u8| -> Vec<u8> {
+        let mut data = deep_call_selector.to_vec();
+        data.extend_from_slice(&[0u8; 31]);
+        data.push(n);
+        data
+    };
+
+    // CALL[0]: L1→L2 deepCall(4), has child [1]
+    let call_0 = DetectedCall {
+        direction: CallDirection::L1ToL2,
+        call_action: make_l1_to_l2_call(dc_l2, make_deepcall_data(4), dc_l1, l2_id),
+        parent_call_index: None,
+        is_continuation: false,
+        depth: 0,
+        delivery_return_data: vec![],
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
+    };
+
+    // CALL[1]: L2→L1 deepCall(3), child of [0]
+    let call_1 = DetectedCall {
+        direction: CallDirection::L2ToL1,
+        call_action: make_l2_to_l1_call(dc_l1, make_deepcall_data(3), dc_l2, l2_id),
+        parent_call_index: Some(0),
+        is_continuation: false,
+        depth: 1,
+        delivery_return_data: vec![],
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
+    };
+
+    // CALL[2]: L1→L2 deepCall(2), continuation of [1]'s L1 execution, has child [3]
+    let call_2 = DetectedCall {
+        direction: CallDirection::L1ToL2,
+        call_action: make_l1_to_l2_call(dc_l2, make_deepcall_data(2), dc_l1, l2_id),
+        parent_call_index: None,
+        is_continuation: true,
+        depth: 0,
+        delivery_return_data: vec![],
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
+    };
+
+    // CALL[3]: L2→L1 deepCall(1), child of [2]
+    let call_3 = DetectedCall {
+        direction: CallDirection::L2ToL1,
+        call_action: make_l2_to_l1_call(dc_l1, make_deepcall_data(1), dc_l2, l2_id),
+        parent_call_index: Some(2),
+        is_continuation: false,
+        depth: 1,
+        delivery_return_data: vec![],
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
+    };
+
+    // CALL[4]: L1→L2 deepCall(0), continuation of [3]'s L1 execution, terminal
+    let call_4 = DetectedCall {
+        direction: CallDirection::L1ToL2,
+        call_action: make_l1_to_l2_call(dc_l2, make_deepcall_data(0), dc_l1, l2_id),
+        parent_call_index: None,
+        is_continuation: true,
+        depth: 0,
+        delivery_return_data: vec![],
+        l2_return_data: vec![],
+        l2_delivery_failed: false,
+    };
+
+    let calls = vec![call_0.clone(), call_1.clone(), call_2.clone(), call_3.clone(), call_4.clone()];
+    let result = build_continuation_entries(&calls, l2_id);
+
+    // ── Verify counts ──
+    assert_eq!(result.l2_entries.len(), 5, "L2 should have 5 entries");
+    assert_eq!(result.l1_entries.len(), 5, "L1 should have 5 entries");
+
+    // ── Verify L2 entries ──
+    // After reorder_for_swap_and_pop, same-hash groups (RESULT(L2, void)) are placed
+    // first with [E0, E(N-1), ..., E1] ordering, then unique-hash entries follow.
+    // Pre-reorder order: [CALL_child1, CALL_child3, RESULT_inner, RESULT_outer, RESULT_terminal]
+    // RESULT entries share hash(RESULT(L2, void)) → 3 entries in same-hash group.
+    // Reordered: [RESULT_inner(E0), RESULT_terminal(E2), RESULT_outer(E1), CALL_child1, CALL_child3]
+    let l2_result_void = result_void(l2_id);
+    let l1_result_void = result_void(mainnet_id);
+    let l2_result_void_hash = compute_action_hash(&l2_result_void);
+
+    // Verify by content rather than position (reorder changes positions).
+    // Count entries by type:
+    let l2_call_entries: Vec<_> = result.l2_entries.iter()
+        .filter(|e| e.next_action.action_type == CrossChainActionType::Call)
+        .collect();
+    let l2_result_entries: Vec<_> = result.l2_entries.iter()
+        .filter(|e| e.next_action.action_type == CrossChainActionType::Result)
+        .collect();
+
+    assert_eq!(l2_call_entries.len(), 2, "L2 should have 2 CALL entries (scope navigation)");
+    assert_eq!(l2_result_entries.len(), 3, "L2 should have 3 RESULT entries (2 resolution + 1 terminal)");
+
+    // Verify L2 CALL entries (scope navigation)
+    let child1_hash = compute_action_hash(&call_1.call_action);
+    let child3_hash = compute_action_hash(&call_3.call_action);
+
+    let l2_call_child1 = l2_call_entries.iter()
+        .find(|e| e.action_hash == child1_hash)
+        .expect("L2 should have entry triggered by child[1] CALL hash");
+    assert_eq!(l2_call_child1.next_action.destination, dc_l2);
+    assert_eq!(l2_call_child1.next_action.data, make_deepcall_data(2));
+    assert_eq!(l2_call_child1.next_action.scope, vec![U256::ZERO], "scope=[0]");
+
+    let l2_call_child3 = l2_call_entries.iter()
+        .find(|e| e.action_hash == child3_hash)
+        .expect("L2 should have entry triggered by child[3] CALL hash");
+    assert_eq!(l2_call_child3.next_action.destination, dc_l2);
+    assert_eq!(l2_call_child3.next_action.data, make_deepcall_data(0));
+    assert_eq!(l2_call_child3.next_action.scope, vec![U256::ZERO], "scope=[0]");
+
+    // Verify L2 RESULT entries
+    // All triggered by hash(RESULT(L2, void))
+    for entry in &l2_result_entries {
+        assert_eq!(entry.action_hash, l2_result_void_hash,
+            "L2 RESULT entry trigger should be hash(RESULT(L2, void))");
+    }
+    // 2 scope resolution → RESULT(MAINNET), 1 terminal → RESULT(L2)
+    let l2_to_mainnet: Vec<_> = l2_result_entries.iter()
+        .filter(|e| e.next_action.rollup_id == mainnet_id)
+        .collect();
+    let l2_to_l2: Vec<_> = l2_result_entries.iter()
+        .filter(|e| e.next_action.rollup_id == l2_id)
+        .collect();
+    assert_eq!(l2_to_mainnet.len(), 2, "2 scope resolutions → RESULT(MAINNET)");
+    assert_eq!(l2_to_l2.len(), 1, "1 terminal → RESULT(L2)");
+
+    // ── Verify L1 entries ──
+
+    // L1[0]: hash(CALL(L2, deepCall(4))) → CALL(MAINNET, deepCall(3), scope=[0])
+    let l1_e0 = &result.l1_entries[0];
+    assert_eq!(
+        l1_e0.action_hash,
+        compute_action_hash(&call_0.call_action),
+        "L1[0] trigger is CALL(L2, deepCall(4))"
+    );
+    assert_eq!(l1_e0.next_action.action_type, CrossChainActionType::Call);
+    assert_eq!(l1_e0.next_action.rollup_id, mainnet_id, "L1[0] next targets MAINNET");
+    assert_eq!(l1_e0.next_action.destination, dc_l1);
+    assert_eq!(l1_e0.next_action.data, make_deepcall_data(3));
+    assert_eq!(l1_e0.next_action.scope, vec![U256::ZERO], "L1[0] scope=[0]");
+
+    // L1[1]: hash(CALL(L2, deepCall(2))) → CALL(MAINNET, deepCall(1), scope=[0])
+    let l1_e1 = &result.l1_entries[1];
+    assert_eq!(
+        l1_e1.action_hash,
+        compute_action_hash(&call_2.call_action),
+        "L1[1] trigger is CALL(L2, deepCall(2))"
+    );
+    assert_eq!(l1_e1.next_action.action_type, CrossChainActionType::Call);
+    assert_eq!(l1_e1.next_action.destination, dc_l1);
+    assert_eq!(l1_e1.next_action.data, make_deepcall_data(1));
+    assert_eq!(l1_e1.next_action.scope, vec![U256::ZERO], "L1[1] scope=[0]");
+
+    // L1[2]: hash(CALL(L2, deepCall(0))) → RESULT(L2, void)
+    let l1_e2 = &result.l1_entries[2];
+    assert_eq!(
+        l1_e2.action_hash,
+        compute_action_hash(&call_4.call_action),
+        "L1[2] trigger is CALL(L2, deepCall(0))"
+    );
+    assert_eq!(l1_e2.next_action.action_type, CrossChainActionType::Result);
+    assert_eq!(l1_e2.next_action.rollup_id, l2_id, "L1[2] terminal RESULT targets L2");
+
+    // L1[3]: hash(RESULT(MAINNET, void)) → RESULT(L2, void) (innermost scope resolution)
+    let l1_e3 = &result.l1_entries[3];
+    assert_eq!(
+        l1_e3.action_hash,
+        compute_action_hash(&l1_result_void),
+        "L1[3] trigger is hash(RESULT(MAINNET, void))"
+    );
+    assert_eq!(l1_e3.next_action.action_type, CrossChainActionType::Result);
+    assert_eq!(l1_e3.next_action.rollup_id, l2_id, "L1[3] resolution targets L2");
+
+    // L1[4]: hash(RESULT(MAINNET, void)) → RESULT(L2, void) (outermost scope resolution)
+    let l1_e4 = &result.l1_entries[4];
+    assert_eq!(
+        l1_e4.action_hash,
+        compute_action_hash(&l1_result_void),
+        "L1[4] trigger is hash(RESULT(MAINNET, void))"
+    );
+    assert_eq!(l1_e4.next_action.action_type, CrossChainActionType::Result);
+    assert_eq!(l1_e4.next_action.rollup_id, l2_id, "L1[4] resolution targets L2");
+
+    // ── Verify state deltas ──
+    // CALL entries (L1[0], L1[1], L1[2]) should have state deltas.
+    // RESULT resolution entries (L1[3], L1[4]) should have empty state deltas.
+    assert_eq!(result.l1_entries[0].state_deltas.len(), 1);
+    assert_eq!(result.l1_entries[1].state_deltas.len(), 1);
+    assert_eq!(result.l1_entries[2].state_deltas.len(), 1);
+    assert_eq!(result.l1_entries[3].state_deltas.len(), 0);
+    assert_eq!(result.l1_entries[4].state_deltas.len(), 0);
+}

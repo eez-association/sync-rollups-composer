@@ -63,6 +63,7 @@ services:
       SHARED_DIR: /shared
       CONTRACTS_DIR: /app/contracts
       GENESIS_JSON: /etc/based-rollup/genesis.json
+      DEPLOY_FLASH_LOAN: "true"
       # Bootstrap test accounts with 100 ETH each at block 1.
       # #2=crosschain-test, #3=bridge-test, #5=double-deposit-user1, #6=double-deposit-user2
       BOOTSTRAP_ACCOUNTS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC:100,0x90F79bf6EB2c4f870365E785982E1f101E93b906:100,0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc:100,0x976EA74026E726554dB657fA54763abd0C3a0aa9:100"
@@ -87,6 +88,7 @@ services:
     environment:
       SHARED_DIR: /shared
       CONTRACTS_DIR: /app/contracts
+      DEPLOY_FLASH_LOAN: "true"
     depends_on:
       deploy:
         condition: service_completed_successfully

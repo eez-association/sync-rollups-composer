@@ -832,10 +832,10 @@ where
         // Build continuation entries using the table builder
         let continuation = build_continuation_entries(&detected_calls, rollup_id);
 
-        if continuation.l2_entries.is_empty() || continuation.l1_entries.is_empty() {
+        if continuation.l1_entries.is_empty() {
             return Err(ErrorObjectOwned::owned(
                 -32000,
-                "table builder produced no entries",
+                "table builder produced no L1 entries",
                 None::<()>,
             ));
         }

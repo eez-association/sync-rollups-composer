@@ -1220,14 +1220,23 @@ where
                         had_continuation = true;
                     }
 
-                    rpc_entries.push(call.call_entry.clone());
-                    if call.extra_l2_entries.is_empty() {
-                        // Simple deposit: CALL trigger + RESULT table entry
-                        rpc_entries.push(call.result_entry.clone());
-                    } else {
-                        // Multi-call continuation: continuation entries provide their own RESULT entries.
-                        // Skip result_entry to avoid conflicting actionHash.
-                        rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                    // Terminal revert: L1 entries exist but no L2 entries needed.
+                    // The L2 call failed terminally — no loadExecutionTable or
+                    // executeIncomingCrossChainCall on L2. Only post L1 deferred entries
+                    // and forward the user's L1 tx (which will revert on L1 as expected).
+                    let terminal_revert =
+                        call.extra_l2_entries.is_empty() && !call.l1_entries.is_empty();
+
+                    if !terminal_revert {
+                        rpc_entries.push(call.call_entry.clone());
+                        if call.extra_l2_entries.is_empty() {
+                            // Simple deposit: CALL trigger + RESULT table entry
+                            rpc_entries.push(call.result_entry.clone());
+                        } else {
+                            // Multi-call continuation: continuation entries provide their own RESULT entries.
+                            // Skip result_entry to avoid conflicting actionHash.
+                            rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                        }
                     }
                     if !call.raw_l1_tx.is_empty() {
                         queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
