@@ -4101,17 +4101,87 @@ async fn trace_and_detect_l2_internal_calls(
         };
 
         if !detected_return_calls.is_empty() {
+            // Duplicate NESTED calls: each gets return calls with REAL chained data.
+            // The return calls target the same L1 contract (e.g., Counter) but each
+            // invocation returns different data (state-dependent: 1, 2, 3...).
+            // Simulate ALL return calls in a single chained debug_traceCallMany bundle
+            // so each sees cumulative state from prior calls.
+            let first = &detected_calls[0];
+            let matching_count = detected_calls.iter()
+                .filter(|c| c.destination == first.destination && c.calldata == first.calldata)
+                .count();
+
+            // Simulate return calls CHAINED on the DESTINATION chain (L2 for L2→L1→L2).
+            // Return calls go back to L2 via executeIncomingCrossChainCall. The actual
+            // destination is the L2 contract (e.g., CounterL2). We simulate calling
+            // that contract directly on L2 to get sequential return data.
+            //
+            // For Counter.increment() called twice: returns [1, 2] (state-dependent).
+            let rc_template = &detected_return_calls[0];
+            let mut rc_txs: Vec<Value> = Vec::new();
+            for _ in 0..matching_count {
+                rc_txs.push(serde_json::json!({
+                    "from": format!("{}", rc_template.source_address),
+                    "to": format!("{}", rc_template.destination),
+                    "data": format!("0x{}", hex::encode(&rc_template.data)),
+                    "value": format!("0x{:x}", rc_template.value),
+                    "gas": "0x2faf080"
+                }));
+            }
+
+            // Simulate chained on L2 (upstream_url = L2 RPC)
+            let sim_req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "debug_traceCallMany",
+                "params": [
+                    [{ "transactions": rc_txs }],
+                    null,
+                    { "tracer": "callTracer" }
+                ],
+                "id": 99976
+            });
+
+            let mut chained_rc_data: Vec<(Vec<u8>, bool)> = Vec::new();
+            if let Ok(resp) = client.post(upstream_url).json(&sim_req).send().await {
+                if let Ok(body) = resp.json::<Value>().await {
+                    if let Some(traces) = body.get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                    {
+                        for trace in traces {
+                            let has_error = trace.get("error").is_some();
+                            let output = trace.get("output")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("0x");
+                            let hex = output.strip_prefix("0x").unwrap_or(output);
+                            let bytes = hex::decode(hex).unwrap_or_default();
+                            chained_rc_data.push((bytes, has_error));
+                        }
+                    }
+                }
+            }
+
             tracing::info!(
                 target: "based_rollup::composer_rpc::l2_to_l1",
                 count = detected_calls.len(),
-                return_calls = detected_return_calls.len(),
-                "duplicate NESTED calls detected — routing via multi-call with pre-detected return calls"
+                matching_nested = matching_count,
+                return_calls_simulated = chained_rc_data.len(),
+                "duplicate NESTED calls — chained L1 return call simulation"
             );
-            // Route directly to buildL2ToL1ExecutionTable with the return calls.
-            // Only calls that MATCH the first call (same dest+calldata) get return calls.
-            // Other calls (different destination/calldata) are simple — no return calls.
-            let first = &detected_calls[0];
+            for (idx, (data, failed)) in chained_rc_data.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::composer_rpc::l2_to_l1",
+                    idx,
+                    return_data_len = data.len(),
+                    return_data_hex = %format!("0x{}", hex::encode(&data[..data.len().min(32)])),
+                    delivery_failed = failed,
+                    "chained return call result"
+                );
+            }
+
+            // Build return calls with REAL sequential data
             let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
+            let mut rc_data_idx = 0;
             for (i, call) in detected_calls.iter().enumerate() {
                 let is_same_pattern = call.destination == first.destination
                     && call.calldata == first.calldata;
@@ -4119,10 +4189,18 @@ async fn trace_and_detect_l2_internal_calls(
                     for rc in &detected_return_calls {
                         let mut rc_clone = rc.clone();
                         rc_clone.parent_call_index = Some(i);
+                        // Use REAL chained data instead of cloned data
+                        if rc_data_idx < chained_rc_data.len() {
+                            let (ref data, failed) = chained_rc_data[rc_data_idx];
+                            rc_clone.l2_return_data = data.clone();
+                            rc_clone.l2_delivery_failed = failed;
+                        }
                         all_return_calls.push(rc_clone);
                     }
+                    rc_data_idx += 1;
                 }
             }
+
             return queue_l2_to_l1_multi_call_entries(
                 client,
                 upstream_url,
