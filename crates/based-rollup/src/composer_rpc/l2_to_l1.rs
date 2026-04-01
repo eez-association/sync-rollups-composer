@@ -3208,9 +3208,13 @@ async fn extract_l1_to_l2_return_calls(
                         rollup_id = info.original_rollup_id,
                         "detected L1->L2 return call in delivery trace via walk_trace_tree"
                     );
-                    // Accumulated scope: parent's scope ++ [0; trace_depth on L1]
+                    // Accumulated scope: parent's scope ++ [0].
+                    // Return calls are always first-children of their triggering scope
+                    // (per reentrantCrossChainCalls E2E spec). The trace_depth from the
+                    // L1 trigger trace is NOT used because it includes protocol-internal
+                    // frames (Rollups.newScope, executeOnBehalf) that inflate the depth.
                     let mut accumulated = parent_scope.to_vec();
-                    accumulated.extend(vec![U256::ZERO; c.trace_depth]);
+                    accumulated.push(U256::ZERO);
                     Some(DetectedReturnCall {
                         destination: c.destination,
                         data: c.calldata,
