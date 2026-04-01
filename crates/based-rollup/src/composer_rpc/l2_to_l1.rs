@@ -586,7 +586,7 @@ async fn queue_l2_to_l1_fallback(
         target: "based_rollup::proxy",
         "falling back to initiateL2CrossChainCall for L2→L1 multi-call continuation"
     );
-    let l1_scope: Vec<String> = (0..trace_depth.saturating_sub(1))
+    let l1_scope: Vec<String> = (0..if trace_depth <= 1 { 0 } else { trace_depth })
         .map(|_| "0x0".to_string())
         .collect();
     let initiate_req = serde_json::json!({
@@ -671,7 +671,7 @@ async fn queue_independent_calls_l2_to_l1(
         let raw_l2_tx = if i == 0 { raw_tx_hex } else { "" };
 
         // Build the RPC request WITH pre-computed delivery return data.
-        let l1_scope: Vec<String> = (0..call.trace_depth.saturating_sub(1)).map(|_| "0x0".to_string()).collect();
+        let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 { 0 } else { call.trace_depth }).map(|_| "0x0".to_string()).collect();
         let initiate_req = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "syncrollups_initiateL2CrossChainCall",
@@ -2492,11 +2492,11 @@ async fn simulate_l1_combined_delivery(
             // Scope: for single calls, use trace_depth-1 (direct caller excluded).
             // For multi-call (siblings), append sibling_index for routing.
             let call_scope = if is_multi_call {
-                let mut s = vec![U256::ZERO; call.trace_depth.saturating_sub(1)];
+                let mut s = if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] };
                 s.push(U256::from(i));
                 s
             } else {
-                vec![U256::ZERO; call.trace_depth.saturating_sub(1)]
+                if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] }
             };
 
             let entries = if my_return_calls.is_empty() {
@@ -2808,11 +2808,11 @@ async fn simulate_l1_combined_delivery(
             // Extract L1→L2 return calls from this trigger trace.
             // Parent scope = this call's scope from L2 trace depth.
             let call_scope: Vec<U256> = if calls.len() > 1 {
-                let mut s = vec![U256::ZERO; calls[call_idx].trace_depth.saturating_sub(1)];
+                let mut s = if calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; calls[call_idx].trace_depth] };
                 s.push(U256::from(call_idx));
                 s
             } else {
-                vec![U256::ZERO; calls[call_idx].trace_depth.saturating_sub(1)]
+                if calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; calls[call_idx].trace_depth] }
             };
             let new_returns = extract_l1_to_l2_return_calls(
                 client,
@@ -4171,7 +4171,7 @@ async fn trace_and_detect_l2_internal_calls(
 
     // Single call path: simulate on L1 to get delivery data + return calls.
     let call = &detected_calls[0];
-    let root_scope: Vec<U256> = vec![U256::ZERO; call.trace_depth.saturating_sub(1)];
+    let root_scope: Vec<U256> = if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] };
     let (delivery_return_data, delivery_failed, return_calls) = simulate_l1_delivery(
         client,
         l1_rpc_url,
@@ -4545,7 +4545,7 @@ async fn trace_and_detect_l2_internal_calls(
 
     // Simple single-call path (no depth > 1): use initiateL2CrossChainCall
     // Scope = vec![0; trace_depth] — determines newScope nesting in executeL2TX on L1.
-    let l1_scope: Vec<String> = (0..call.trace_depth.saturating_sub(1))
+    let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 { 0 } else { call.trace_depth })
         .map(|_| "0x0".to_string())
         .collect();
     let initiate_req = serde_json::json!({
