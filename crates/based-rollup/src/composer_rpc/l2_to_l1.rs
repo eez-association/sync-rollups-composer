@@ -3687,17 +3687,70 @@ async fn trace_and_detect_l2_internal_calls(
                             if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
                                 let hex = output.strip_prefix("0x").unwrap_or(output);
                                 if let Ok(bytes) = hex::decode(hex) {
-                                    call.delivery_return_data = bytes.clone();
-                                    call.delivery_failed = has_error;
-                                    tracing::info!(
-                                        target: "based_rollup::proxy",
-                                        iteration,
-                                        destination = %call.destination,
-                                        return_data_len = bytes.len(),
-                                        return_data_hex = %format!("0x{}", hex::encode(&bytes[..bytes.len().min(32)])),
-                                        delivery_failed = has_error,
-                                        "iterative discovery: L1 delivery return data via debug_traceCallMany"
+                                    // Check if the error is a PROTOCOL error (entry not loaded yet)
+                                    // vs a real delivery failure. Protocol errors should NOT be used
+                                    // as delivery_return_data — they mean the simulation context is
+                                    // incomplete, not that the delivery itself fails.
+                                    let is_protocol_error = has_error && bytes.len() == 4 && (
+                                        // ExecutionNotInCurrentBlock() = 0xf9d330ad
+                                        bytes == [0xf9, 0xd3, 0x30, 0xad] ||
+                                        // ExecutionNotFound() = 0xed6bc750
+                                        bytes == [0xed, 0x6b, 0xc7, 0x50]
                                     );
+                                    if is_protocol_error {
+                                        tracing::info!(
+                                            target: "based_rollup::proxy",
+                                            iteration,
+                                            destination = %call.destination,
+                                            error_hex = %format!("0x{}", hex::encode(&bytes)),
+                                            "iterative discovery: L1 delivery returned protocol error — using full simulate_l1_delivery"
+                                        );
+                                        // The direct L1 call failed because entries aren't loaded.
+                                        // Use the full simulate_l1_delivery (with postBatch) to get
+                                        // REAL return data. This is heavier but correct for nested
+                                        // L2→L1→L2 patterns where the L1 delivery triggers further
+                                        // cross-chain calls via executeCrossChainCall.
+                                        if let Some((ret_data, failed, _return_calls)) = simulate_l1_delivery(
+                                            client,
+                                            l1_rpc_url,
+                                            upstream_url,
+                                            cross_chain_manager_address,
+                                            rollups_address,
+                                            builder_address,
+                                            builder_private_key,
+                                            rollup_id,
+                                            call.source_address,
+                                            call.destination,
+                                            &call.calldata,
+                                            call.value,
+                                            &tx_bytes,
+                                            &vec![U256::ZERO; call.trace_depth.max(1)],
+                                        ).await {
+                                            call.delivery_return_data = ret_data.clone();
+                                            call.delivery_failed = failed;
+                                            tracing::info!(
+                                                target: "based_rollup::proxy",
+                                                iteration,
+                                                destination = %call.destination,
+                                                return_data_len = ret_data.len(),
+                                                return_data_hex = %format!("0x{}", hex::encode(&ret_data[..ret_data.len().min(32)])),
+                                                delivery_failed = failed,
+                                                "iterative discovery: L1 delivery return data via full simulate_l1_delivery"
+                                            );
+                                        }
+                                    } else {
+                                        call.delivery_return_data = bytes.clone();
+                                        call.delivery_failed = has_error;
+                                        tracing::info!(
+                                            target: "based_rollup::proxy",
+                                            iteration,
+                                            destination = %call.destination,
+                                            return_data_len = bytes.len(),
+                                            return_data_hex = %format!("0x{}", hex::encode(&bytes[..bytes.len().min(32)])),
+                                            delivery_failed = has_error,
+                                            "iterative discovery: L1 delivery return data via debug_traceCallMany"
+                                        );
+                                    }
                                 }
                             } else if has_error {
                                 call.delivery_failed = true;
