@@ -71,6 +71,12 @@ pub struct DetectedCall {
     /// Used to compute scope arrays: `scope_depth = trace_depth`.
     /// Each CALL/DELEGATECALL/STATICCALL frame increments depth by 1.
     pub trace_depth: usize,
+    /// Raw output bytes from the proxy call's trace node. For reentrant
+    /// patterns, this captures the return value of the proxy's
+    /// `executeOnBehalf` call (which includes scope-resolved return data).
+    /// Used by post-convergence enrichment to extract delivery return data
+    /// from intermediate hops without additional simulation.
+    pub output: Vec<u8>,
 }
 
 /// Identity of a cross-chain proxy.
@@ -435,12 +441,22 @@ async fn walk_trace_tree_inner(
                 "detected cross-chain proxy call via executeCrossChainCall child"
             );
 
+            // Capture proxy call output for post-convergence enrichment.
+            // The output contains the return value from executeOnBehalf,
+            // which includes scope-resolved return data for reentrant patterns.
+            let proxy_output = node
+                .get("output")
+                .and_then(|v| v.as_str())
+                .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok())
+                .unwrap_or_default();
+
             detected_calls.push(DetectedCall {
                 destination: proxy_info.original_address,
                 calldata: parsed.input,
                 value: parsed.value,
                 source_address: parsed.from,
                 trace_depth: depth,
+                output: proxy_output,
             });
         } else {
             // Proxy identity not found — record as unresolved so callers can
