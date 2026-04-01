@@ -4069,21 +4069,62 @@ async fn trace_and_detect_l2_internal_calls(
     );
 
     if detected_calls.len() >= 2 && has_duplicates {
-        tracing::info!(
-            target: "based_rollup::composer_rpc::l2_to_l1",
-            count = detected_calls.len(),
-            "duplicate calls detected — routing independently with chained simulation"
-        );
-        return queue_independent_calls_l2_to_l1(
-            client,
-            l1_rpc_url,
-            upstream_url,
-            raw_tx_hex,
-            &detected_calls,
-            rollups_address,
-            rollup_id,
-        )
-        .await;
+        // Check if any duplicate call has return calls (nested L2→L1→L2 pattern).
+        // If so, route via buildL2ToL1ExecutionTable (supports return calls)
+        // instead of initiateL2CrossChainCall (simple only).
+        let any_has_return_calls = {
+            // Run simulate_l1_delivery for ONE call to check for return calls.
+            // If it finds return calls, ALL duplicate calls need the continuation path.
+            let first = &detected_calls[0];
+            let root_scope: Vec<U256> = if first.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; first.trace_depth] };
+            let has_returns = if let Some((_ret, _failed, returns)) = simulate_l1_delivery(
+                client,
+                l1_rpc_url,
+                upstream_url,
+                cross_chain_manager_address,
+                rollups_address,
+                builder_address,
+                builder_private_key,
+                rollup_id,
+                first.source_address,
+                first.destination,
+                &first.calldata,
+                first.value,
+                &tx_bytes,
+                &root_scope,
+            ).await {
+                !returns.is_empty()
+            } else {
+                false
+            };
+            has_returns
+        };
+
+        if any_has_return_calls {
+            tracing::info!(
+                target: "based_rollup::composer_rpc::l2_to_l1",
+                count = detected_calls.len(),
+                "duplicate NESTED calls detected — routing via multi-call continuation path (not independent)"
+            );
+            // Fall through to the multi-call continuation path (line below)
+            // which handles return calls correctly via buildL2ToL1ExecutionTable.
+        } else {
+            tracing::info!(
+                target: "based_rollup::composer_rpc::l2_to_l1",
+                count = detected_calls.len(),
+                "duplicate simple calls detected — routing independently with chained simulation"
+            );
+            return queue_independent_calls_l2_to_l1(
+                client,
+                l1_rpc_url,
+                upstream_url,
+                raw_tx_hex,
+                &detected_calls,
+                rollups_address,
+                rollup_id,
+            )
+            .await;
+        }
     }
 
     if detected_calls.len() >= 2 {
