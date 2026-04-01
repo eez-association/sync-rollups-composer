@@ -271,6 +271,9 @@ pub struct BuildExecutionTableCall {
     /// meaning the target is our L2 rollup).
     #[serde(default)]
     pub target_rollup_id: Option<u64>,
+    /// Accumulated scope for this call.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// Result of building a multi-call execution table.
@@ -322,6 +325,9 @@ pub struct BuildL2ToL1Call {
     /// Whether the L1 delivery simulation reverted.
     #[serde(default)]
     pub delivery_failed: bool,
+    /// Accumulated scope for L1 delivery.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// A return call (L1→L2) for the reverse multi-call continuation execution table builder.
@@ -347,6 +353,9 @@ pub struct BuildL2ToL1ReturnCall {
     /// Whether the L2 simulation reverted.
     #[serde(default)]
     pub l2_delivery_failed: bool,
+    /// Accumulated scope for this return call.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// Parameters for computing an action hash.
@@ -807,7 +816,7 @@ where
                 call_success: c.call_success,
                 parent_call_index: c.parent_call_index,
                 target_rollup_id: c.target_rollup_id,
-                scope: vec![], // TODO: propagate from RPC params
+                scope: c.scope.clone(),
             })
             .collect();
 
@@ -950,7 +959,7 @@ where
                 source_address: c.source_address,
                 delivery_return_data: c.delivery_return_data.to_vec(),
                 delivery_failed: c.delivery_failed,
-                scope: vec![], // TODO: propagate from RPC params
+                scope: c.scope.clone(),
             })
             .collect();
 
@@ -969,7 +978,7 @@ where
                     .map(|b| b.to_vec())
                     .unwrap_or_default(),
                 l2_delivery_failed: c.l2_delivery_failed,
-                scope: vec![], // TODO: propagate from RPC params
+                scope: c.scope.clone(),
             })
             .collect();
 

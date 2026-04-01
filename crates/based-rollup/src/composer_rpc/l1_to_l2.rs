@@ -521,6 +521,9 @@ struct DetectedInternalCall {
     /// `None` for root-level L1→L2 calls; `Some(i)` for L2→L1 child calls
     /// discovered inside call[i]'s L2 simulation (the L1→L2→L1 pattern).
     parent_call_index: Option<usize>,
+    /// Depth in the source chain trace. For L1→L2 root calls: depth on L1 trace.
+    /// Used to compute symmetric scope on L2: scope = [0; trace_depth].
+    trace_depth: usize,
 }
 
 /// Execute a `debug_traceCallMany` bundle on L2:
@@ -1024,6 +1027,7 @@ async fn simulate_l1_to_l2_call_on_l2(
 /// Used for multi-call patterns like CallTwice where identical calls need to see
 /// each other's state effects (e.g., Counter.increment() twice → returns 1, then 2).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn simulate_l1_to_l2_call_chained_on_l2(
     client: &reqwest::Client,
     l2_rpc_url: &str,
@@ -1036,6 +1040,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
     prior_result_entries: &[crate::cross_chain::CrossChainExecutionEntry],
     prior_exec_calldatas: &[(Vec<u8>, U256)],
     sys_addr: Option<Address>,
+    l2_scope: &[U256],
 ) -> (Vec<u8>, bool, Vec<super::common::DiscoveredProxyCall>) {
     let sys_addr = match sys_addr {
         Some(a) => a,
@@ -1050,7 +1055,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &[],  // l2_scope: TODO propagate from L1 trace_depth
+                &l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1069,7 +1074,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
         failed: false,
         source_address,
         source_rollup: U256::ZERO,
-        scope: vec![], // TODO: propagate l2_scope to chained simulation
+        scope: l2_scope.to_vec(),
     };
     let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
 
@@ -1160,7 +1165,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &[],  // l2_scope: TODO propagate from L1 trace_depth
+                &l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1183,7 +1188,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &[],  // l2_scope: TODO propagate from L1 trace_depth
+                &l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1211,7 +1216,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &[],  // l2_scope: TODO propagate from L1 trace_depth
+                &l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1235,7 +1240,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
             value,
             source_address,
             rollup_id,
-                &[],  // l2_scope: TODO propagate from L1 trace_depth
+                &l2_scope,  // l2_scope from L1 trace_depth
         )
         .await;
     }
@@ -1730,6 +1735,7 @@ async fn walk_l1_trace_generic(
             call_success: true,
             return_data: vec![],
             parent_call_index: None, // root-level L1→L2 call
+            trace_depth: c.trace_depth,
         })
         .collect()
 }
@@ -1889,6 +1895,7 @@ async fn trace_and_detect_internal_calls(
             let call_calldata = detected_calls[call_idx].calldata.clone();
             let call_value = detected_calls[call_idx].value;
             let call_source = detected_calls[call_idx].source_address;
+            let scope_for_call: Vec<U256> = vec![U256::ZERO; detected_calls[call_idx].trace_depth];
 
             let (ret_data, success, child_calls) =
                 if call_idx == 0 || prior_result_entries.is_empty() {
@@ -1902,7 +1909,7 @@ async fn trace_and_detect_internal_calls(
                         call_value,
                         call_source,
                         rollup_id,
-                &[],  // l2_scope: TODO propagate from L1 trace_depth
+                &scope_for_call,  // l2_scope from L1 trace_depth
                     )
                     .await
                 } else {
@@ -1923,6 +1930,7 @@ async fn trace_and_detect_internal_calls(
                         &prior_result_entries,
                         &prior_exec_calldatas,
                         sys_addr,
+                        &scope_for_call,
                     )
                     .await
                 };
@@ -2023,6 +2031,7 @@ async fn trace_and_detect_internal_calls(
                         call_success: true, // defaults to true; will be enriched later if needed
                         return_data: vec![], // will be enriched via L1 simulation
                         parent_call_index: Some(call_idx), // linked to parent L1→L2 call
+                        trace_depth: 0, // L2→L1 child: depth in L2 simulation
                     },
                 ));
             }
@@ -2134,7 +2143,7 @@ async fn trace_and_detect_internal_calls(
                             } else {
                                 None
                             },
-                            scope: vec![], // TODO: propagate accumulated scope
+                            scope: vec![U256::ZERO; c.trace_depth],
                         })
                         .collect();
 
@@ -2618,7 +2627,7 @@ async fn trace_and_detect_internal_calls(
                                         call.value,
                                         call.source_address,
                                         rollup_id,
-                &[],  // l2_scope: TODO propagate from L1 trace_depth
+                                        &vec![U256::ZERO; call.trace_depth],
                                     )
                                     .await
                                 } else {
@@ -2638,6 +2647,7 @@ async fn trace_and_detect_internal_calls(
                                         &prior_result_entries,
                                         &prior_exec_calldatas,
                                         sys_addr,
+                                        &vec![U256::ZERO; call.trace_depth],
                                     )
                                     .await
                                 };
@@ -2727,6 +2737,7 @@ async fn trace_and_detect_internal_calls(
                                         call_success: true,
                                         return_data: vec![],
                                         parent_call_index: None, // set below
+                                        trace_depth: 0, // L2→L1 child
                                     },
                                 ));
                             }
