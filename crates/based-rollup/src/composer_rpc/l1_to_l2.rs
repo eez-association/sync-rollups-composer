@@ -1895,7 +1895,7 @@ async fn trace_and_detect_internal_calls(
             let call_calldata = detected_calls[call_idx].calldata.clone();
             let call_value = detected_calls[call_idx].value;
             let call_source = detected_calls[call_idx].source_address;
-            let scope_for_call: Vec<U256> = vec![U256::ZERO; detected_calls[call_idx].trace_depth];
+            let scope_for_call: Vec<U256> = vec![U256::ZERO; detected_calls[call_idx].trace_depth.saturating_sub(1)];
 
             let (ret_data, success, child_calls) =
                 if call_idx == 0 || prior_result_entries.is_empty() {
@@ -2143,7 +2143,7 @@ async fn trace_and_detect_internal_calls(
                             } else {
                                 None
                             },
-                            scope: vec![U256::ZERO; c.trace_depth],
+                            scope: vec![U256::ZERO; c.trace_depth.saturating_sub(1)],
                         })
                         .collect();
 
@@ -2627,7 +2627,7 @@ async fn trace_and_detect_internal_calls(
                                         call.value,
                                         call.source_address,
                                         rollup_id,
-                                        &vec![U256::ZERO; call.trace_depth],
+                                        &vec![U256::ZERO; call.trace_depth.saturating_sub(1)],
                                     )
                                     .await
                                 } else {
@@ -2647,7 +2647,7 @@ async fn trace_and_detect_internal_calls(
                                         &prior_result_entries,
                                         &prior_exec_calldatas,
                                         sys_addr,
-                                        &vec![U256::ZERO; call.trace_depth],
+                                        &vec![U256::ZERO; call.trace_depth.saturating_sub(1)],
                                     )
                                     .await
                                 };
