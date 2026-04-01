@@ -2173,6 +2173,14 @@ async fn trace_and_detect_internal_calls(
                         "╚══════════════════════════════════════════════════"
                     );
 
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        iteration,
+                        analyzed_count = analyzed.len(),
+                        l1_detected_count = l1_detected.len(),
+                        "iterative discovery: building entries for postBatch simulation"
+                    );
+
                     let entries = if analyzed.is_empty() {
                         // Fallback: build simple CALL+RESULT pairs, then convert to L1 format.
                         // L2 format: [CALL trigger, RESULT table entry] per call
@@ -2218,6 +2226,20 @@ async fn trace_and_detect_internal_calls(
                         // For traceCallMany we need L1 entries (posted via postBatch)
                         cont.l1_entries
                     };
+
+                    // Log each entry for traceability
+                    for (idx, e) in entries.iter().enumerate() {
+                        tracing::info!(
+                            target: "based_rollup::l1_proxy",
+                            iteration, idx,
+                            action_hash = %e.action_hash,
+                            next_type = ?e.next_action.action_type,
+                            next_dest = %e.next_action.destination,
+                            next_scope_len = e.next_action.scope.len(),
+                            next_data_len = e.next_action.data.len(),
+                            "iterative discovery: L1 entry for postBatch simulation"
+                        );
+                    }
 
                     // Clear state deltas for simulation-only entries.
                     // build_continuation_entries produces entries with placeholder
@@ -2479,7 +2501,7 @@ async fn trace_and_detect_internal_calls(
                     } else {
                         ""
                     };
-                    tracing::debug!(
+                    tracing::info!(
                         target: "based_rollup::l1_proxy",
                         iteration,
                         postbatch_ok = tx1_trace.get("error").is_none(),
@@ -2501,7 +2523,7 @@ async fn trace_and_detect_internal_calls(
                     )
                     .await;
 
-                    tracing::debug!(
+                    tracing::info!(
                         target: "based_rollup::l1_proxy",
                         new_detected_count = new_detected.len(),
                         all_calls_count = all_calls.len(),
