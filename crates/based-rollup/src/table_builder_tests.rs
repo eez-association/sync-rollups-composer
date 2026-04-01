@@ -689,15 +689,15 @@ fn test_l2_to_l1_depth2_entry_generation() {
         1,
         "chained model: only 1 L2TX trigger entry (first call only)"
     );
-    // L2TX entry → CALL(A, scope=[0])
+    // L2TX entry → CALL(A, scope=[])  — nested pattern (B has children), no sibling scope
     assert_eq!(
         entries_l2tx[0].next_action.action_type,
         CrossChainActionType::Call
     );
     assert_eq!(
         entries_l2tx[0].next_action.scope,
-        vec![U256::ZERO],
-        "delivery must have scope=[0] for multi-call sibling routing"
+        vec![] as Vec<U256>,
+        "nested pattern: delivery scope must be [] (no sibling routing)"
     );
     assert_eq!(entries_l2tx[0].next_action.destination, dest_a);
 
@@ -982,7 +982,8 @@ fn test_l2_to_l1_depth1_regression() {
     );
 
     // ── L1 entries: chained pattern ──
-    // New model: L2TX→CALL(A,scope=[0]), RESULT(A)→CALL(B,scope=[1]), child_C, RESULT(B)→terminal
+    // Nested pattern (B has child C): has_any_nested=true, so ALL L1 scopes are [].
+    // Chained model: L2TX→CALL(A,scope=[]), RESULT(A)→CALL(B,scope=[]), child_C, RESULT(B)→terminal
     assert_eq!(
         result.l1_entries.len(),
         4,
@@ -1014,18 +1015,18 @@ fn test_l2_to_l1_depth1_regression() {
     let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
     let child_trigger_c_hash = compute_action_hash(&child_trigger_c);
 
-    // L1[0]: L2TX → CALL(A, scope=[0])
+    // L1[0]: L2TX → CALL(A, scope=[])  — nested pattern, no sibling scope
     let l1_e0 = &result.l1_entries[0];
     assert_eq!(l1_e0.action_hash, l2tx_trigger_hash, "L1[0] trigger = L2TX");
     assert_eq!(l1_e0.next_action.action_type, CrossChainActionType::Call, "L1[0] next = CALL");
-    assert_eq!(l1_e0.next_action.scope, vec![U256::ZERO], "L1[0] scope=[0]");
+    assert_eq!(l1_e0.next_action.scope, vec![] as Vec<U256>, "L1[0] scope=[]");
     assert_eq!(l1_e0.next_action.destination, dest_a, "L1[0] dest = A");
 
-    // L1[1]: RESULT(A,void) → CALL(B, scope=[1])  (chained to next sibling)
+    // L1[1]: RESULT(A,void) → CALL(B, scope=[])  (chained, nested pattern → no scope)
     let l1_e1 = &result.l1_entries[1];
     assert_eq!(l1_e1.action_hash, l1_result_hash, "L1[1] trigger = RESULT(void)");
     assert_eq!(l1_e1.next_action.action_type, CrossChainActionType::Call, "L1[1] next = CALL (chained)");
-    assert_eq!(l1_e1.next_action.scope, vec![U256::from(1u64)], "L1[1] scope=[1]");
+    assert_eq!(l1_e1.next_action.scope, vec![] as Vec<U256>, "L1[1] scope=[]");
     assert_eq!(l1_e1.next_action.destination, dest_b, "L1[1] dest = B");
 
     // L1[2]: reentrant leaf child CALL_C

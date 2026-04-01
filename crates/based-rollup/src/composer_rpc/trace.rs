@@ -453,21 +453,25 @@ async fn walk_trace_tree_inner(
                 "node has executeCrossChainCall child but proxy identity not found — marking unresolved"
             );
             unresolved_proxies.insert(parsed.to);
-            recurse_children(
-                node,
-                manager_addresses,
-                lookup,
-                proxy_cache,
-                ephemeral_proxies,
-                detected_calls,
-                unresolved_proxies,
-                depth,
-            )
-            .await;
         }
 
-        // When proxy was found: do NOT recurse into proxy children —
-        // the executeCrossChainCall and everything beneath are protocol internals.
+        // ALWAYS recurse into proxy children to find reentrant cross-chain
+        // calls. In deep patterns (e.g., reentrantCrossChainCalls), the
+        // protocol's scope navigation (newScope → executeOnBehalf) triggers
+        // additional proxy calls deeper in the trace tree. Step 2 (line 378)
+        // already skips manager-originated calls, preventing false positives
+        // from protocol-internal forward deliveries.
+        recurse_children(
+            node,
+            manager_addresses,
+            lookup,
+            proxy_cache,
+            ephemeral_proxies,
+            detected_calls,
+            unresolved_proxies,
+            depth,
+        )
+        .await;
         return;
     }
 

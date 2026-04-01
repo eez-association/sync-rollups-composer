@@ -1504,15 +1504,25 @@ pub fn build_l2_to_l1_continuation_entries(
     let num_l2_to_l1 = l2_to_l1_calls.len();
     let is_multi_call = num_l2_to_l1 > 1;
 
+    // Check if ANY call has reentrant children (nested L2→L1→L2 round-trips).
+    // When nested calls are present, the protocol executes them within their own
+    // executeCrossChainCall context — no sibling scope routing needed (scope=[]).
+    // Pure sibling patterns (all simple, no children) use scope=[sibling_index].
+    let has_any_nested = l2_to_l1_calls
+        .iter()
+        .any(|&(orig_idx, _)| !find_children(detected, orig_idx).is_empty());
+    // Use sibling scopes ONLY for pure simple multi-call (no nested children).
+    let use_sibling_scopes = is_multi_call && !has_any_nested;
+
     for (root_pos, &(orig_idx, l2_call)) in l2_to_l1_calls.iter().enumerate() {
         // Find children belonging to THIS call using original detected index.
         let this_call_children = find_children(detected, orig_idx);
 
-        // Compute the delivery CALL action for this call.
-        // For multi-call siblings, use scope=[sibling_index] for routing.
-        // For single calls, use scope from call.scope (trace_depth-1).
-        let call_scope_for_delivery = if is_multi_call {
-            let mut s = vec![U256::ZERO; l2_call.scope.len().max(if l2_call.scope.is_empty() { 0 } else { l2_call.scope.len() })];
+        // Compute the delivery CALL scope:
+        // - Pure simple siblings: scope=[sibling_index] for routing within executeL2TX
+        // - Any nested pattern: scope=[] (sequential chaining, no scope navigation)
+        // - Single call: scope from trace depth
+        let call_scope_for_delivery = if use_sibling_scopes {
             // For simple siblings at depth 1: scope=[root_pos]
             // For deep siblings: scope=[0,...,root_pos]
             if l2_call.scope.is_empty() {
@@ -1523,9 +1533,11 @@ pub fn build_l2_to_l1_continuation_entries(
                 s
             }
         } else if l2_call.scope.is_empty() {
-            vec![] // single call: scope from trace_depth (empty = direct)
+            vec![] // single call or nested pattern: no scope navigation
+        } else if !has_any_nested {
+            l2_call.scope.clone() // single call with trace depth scope
         } else {
-            l2_call.scope.clone()
+            vec![] // nested multi-call: always scope=[]
         };
 
         let delivery = CrossChainAction {
@@ -1615,7 +1627,9 @@ pub fn build_l2_to_l1_continuation_entries(
             let next_action = if root_pos < num_l2_to_l1 - 1 {
                 // Chain to next call: RESULT → CALL(next)
                 let next_call = l2_to_l1_calls[root_pos + 1].1;
-                let next_scope = if is_multi_call {
+                // Scope: pure simple siblings need scope=[i+1] for routing.
+                // Any nested pattern uses scope=[] (sequential chaining).
+                let next_scope = if use_sibling_scopes {
                     vec![U256::from(root_pos + 1)]
                 } else {
                     vec![]
@@ -1701,9 +1715,10 @@ pub fn build_l2_to_l1_continuation_entries(
             );
 
             // Scope resolution: chain to next call or terminal.
+            // Nested pattern → scope=[] for chaining.
             let scope_next_action = if root_pos < num_l2_to_l1 - 1 {
                 let next_call = l2_to_l1_calls[root_pos + 1].1;
-                let next_scope = if is_multi_call {
+                let next_scope = if use_sibling_scopes {
                     vec![U256::from(root_pos + 1)]
                 } else {
                     vec![]
@@ -1750,7 +1765,12 @@ pub fn build_l2_to_l1_continuation_entries(
             // RESULT(this_call) → next_action (CALL(next) or terminal).
             let next_action = if root_pos < num_l2_to_l1 - 1 {
                 let next_call = l2_to_l1_calls[root_pos + 1].1;
-                let next_scope = vec![U256::from(root_pos + 1)];
+                // Use sibling scope for pure simple patterns, empty for nested.
+                let next_scope = if use_sibling_scopes {
+                    vec![U256::from(root_pos + 1)]
+                } else {
+                    vec![]
+                };
                 CrossChainAction {
                     action_type: CrossChainActionType::Call,
                     rollup_id: U256::ZERO,
