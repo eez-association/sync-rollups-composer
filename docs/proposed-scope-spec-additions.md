@@ -34,27 +34,46 @@ Where:
 2. Traverse from root to the proxy call:
    - The root node (tx entry) is at depth 0
    - Each child frame (CALL, DELEGATECALL, STATICCALL) increments depth by 1
-3. At each depth level, assign **ordinal index** (0, 1, 2, ...) among cross-chain calls in detection order
-4. `local_tree_path = [ordinal_0, ordinal_1, ..., ordinal_d]` where `d` = depth of proxy call
+3. **Subtract 1 from the depth** — the contract that directly calls the proxy is NOT a scope level.
+   It only executes; it does not "wrap" the cross-chain operation. Per §D.6: "Each level in the scope
+   array corresponds to one level of the L2 call stack that **wraps** the cross-chain operation."
+4. At each depth level, assign **ordinal index** (0, 1, 2, ...) among cross-chain calls in detection order
+5. `local_tree_path = [ordinal_0, ordinal_1, ..., ordinal_d]` where `d` = trace_depth - 1
+
+**Critical rule — single direct calls use scope=[]:**
+
+When there is exactly one cross-chain call and the calling contract calls the proxy directly
+(no intermediate wrappers), the scope is empty `[]`. The `_resolveScopes` function processes
+the CALL directly via `_processCallAtScope` without entering any `newScope()` frame.
+
+Scope is only non-empty when the builder needs scope navigation:
+- **Multiple siblings**: scope=[0], [1], ... to route between calls
+- **Deep nesting**: scope=[0,0], ... to descend through wrapper contracts
+- **Return calls**: scope=[0] when a callback executes inside a scope frame
 
 **Rules:**
 
-1. **DELEGATECALL counts as depth:** Every frame (CALL, DELEGATECALL, STATICCALL) contributes one depth level.
-2. **Ordinal is detection order:** Among cross-chain calls at a given depth, index by trace order (0, 1, 2...).
-3. **Symmetric L1↔L2:** Identical rules apply on both chains.
-4. **Scope accumulates across hops:** Each new hop appends to the previous hop's scope prefix.
-5. **No on-chain validation:** Wrong scope causes `ExecutionNotFound`, not a specific error.
+1. **Direct caller excluded:** `scope_length = trace_depth - 1`. The contract that calls the proxy does NOT contribute a scope level.
+2. **DELEGATECALL counts as depth:** Every frame (CALL, DELEGATECALL, STATICCALL) contributes one depth level.
+3. **Ordinal is detection order:** Among cross-chain calls at a given depth, index by trace order (0, 1, 2...).
+4. **Symmetric L1↔L2:** Identical rules apply on both chains.
+5. **Scope accumulates across hops:** Each new hop appends to the previous hop's scope prefix.
+6. **Return calls always append [0]:** Return calls detected in L1 trigger traces always use `parent_scope ++ [0]`, not trace_depth from the trigger trace (which includes protocol-internal frames).
+7. **No on-chain validation:** Wrong scope causes `ExecutionNotFound`, not a specific error.
 
 **Examples:**
 
-| Pattern | Trace | local_tree_path | accumulated | scope |
-|---------|-------|-----------------|-------------|-------|
-| Simple (depth 1) | User→proxy | [0] | [] | [0] |
-| Deep nesting (depth 2) | User→A→B→proxy | [0,0] | [] | [0,0] |
-| Two siblings | User→proxyA, User→proxyB | [0], [1] | [] | [0], [1] |
-| PingPong hop 2 | PingPong→proxy | [0] | [0] | [0,0] |
-| PingPong hop 3 | PingPong→proxy | [0] | [0,0] | [0,0,0] |
-| Mixed depth | User→A→proxy1, User→proxy2 | [0,0], [1] | [] | [0,0], [1] |
+| Pattern | Trace (depth) | scope_len=depth-1 | accumulated | scope |
+|---------|---------------|-------------------|-------------|-------|
+| Simple direct (depth 1) | User→proxy | 0 | [] | **[]** |
+| 1 wrapper (depth 2) | User→A→proxy | 1 | [] | **[0]** |
+| 2 wrappers (depth 3) | User→A→B→proxy | 2 | [] | **[0,0]** |
+| Two siblings (depth 1) | User→proxyA, proxyB | 0 | [] | **[0], [1]** *(siblings)* |
+| Deep siblings (depth 2) | User→A→proxyX, proxyY | 1 | [] | **[0,0], [0,1]** |
+| Return call (any hop) | inside trigger trace | - | parent | **parent++[0]** |
+| PingPong hop 1 | PingPong→proxy (d=1) | 0 | [] | **[]** |
+| PingPong hop 2 (return) | inside trigger | - | [] | **[0]** |
+| PingPong hop 3 (return) | inside trigger | - | [0] | **[0,0]** |
 
 ---
 
