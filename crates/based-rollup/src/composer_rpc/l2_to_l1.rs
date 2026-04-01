@@ -4072,12 +4072,12 @@ async fn trace_and_detect_l2_internal_calls(
         // Check if any duplicate call has return calls (nested L2→L1→L2 pattern).
         // If so, route via buildL2ToL1ExecutionTable (supports return calls)
         // instead of initiateL2CrossChainCall (simple only).
-        let any_has_return_calls = {
+        let detected_return_calls: Vec<DetectedReturnCall> = {
             // Run simulate_l1_delivery for ONE call to check for return calls.
             // If it finds return calls, ALL duplicate calls need the continuation path.
             let first = &detected_calls[0];
             let root_scope: Vec<U256> = if first.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; first.trace_depth] };
-            let has_returns = if let Some((_ret, _failed, returns)) = simulate_l1_delivery(
+            let returns = if let Some((_ret, _failed, returns)) = simulate_l1_delivery(
                 client,
                 l1_rpc_url,
                 upstream_url,
@@ -4093,21 +4093,41 @@ async fn trace_and_detect_l2_internal_calls(
                 &tx_bytes,
                 &root_scope,
             ).await {
-                !returns.is_empty()
+                returns
             } else {
-                false
+                vec![]
             };
-            has_returns
+            returns
         };
 
-        if any_has_return_calls {
+        if !detected_return_calls.is_empty() {
             tracing::info!(
                 target: "based_rollup::composer_rpc::l2_to_l1",
                 count = detected_calls.len(),
-                "duplicate NESTED calls detected — routing via multi-call continuation path (not independent)"
+                return_calls = detected_return_calls.len(),
+                "duplicate NESTED calls detected — routing via multi-call with pre-detected return calls"
             );
-            // Fall through to the multi-call continuation path (line below)
-            // which handles return calls correctly via buildL2ToL1ExecutionTable.
+            // Route directly to buildL2ToL1ExecutionTable with the return calls
+            // we already detected. Each duplicate call gets the SAME return call
+            // pattern (they call the same nested contract).
+            let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
+            for (i, _call) in detected_calls.iter().enumerate() {
+                for rc in &detected_return_calls {
+                    let mut rc_clone = rc.clone();
+                    rc_clone.parent_call_index = Some(i);
+                    all_return_calls.push(rc_clone);
+                }
+            }
+            return queue_l2_to_l1_multi_call_entries(
+                client,
+                upstream_url,
+                raw_tx_hex,
+                &detected_calls,
+                &all_return_calls,
+                rollup_id,
+            )
+            .await
+            .is_some();
         } else {
             tracing::info!(
                 target: "based_rollup::composer_rpc::l2_to_l1",
