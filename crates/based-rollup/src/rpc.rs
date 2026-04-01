@@ -155,6 +155,11 @@ pub struct L2CrossChainCallParams {
     /// When present alongside `l2_return_data`, skips independent L2 simulation.
     #[serde(default)]
     pub l2_call_success: Option<bool>,
+    /// Scope array for the L1 delivery CALL action (determines newScope nesting
+    /// depth in executeL2TX). Computed from trace_depth of the proxy call in the
+    /// L2 trace: scope = vec![0; trace_depth]. Empty for direct proxy calls.
+    #[serde(default)]
+    pub l1_delivery_scope: Vec<U256>,
 }
 
 /// A queued cross-chain call with its entry pair, gas price, and raw L1 tx.
@@ -721,6 +726,7 @@ where
             params.raw_l2_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger on L1
             params.delivery_return_data.to_vec(),
             params.delivery_failed,
+            params.l1_delivery_scope, // scope from trace depth
         );
 
         let call_id = entries.l2_table_entries[0].action_hash;

@@ -702,6 +702,7 @@ pub fn build_l2_to_l1_call_entries(
     rlp_encoded_tx: Vec<u8>,
     delivery_return_data: Vec<u8>,
     delivery_failed: bool,
+    l1_delivery_scope: Vec<U256>,
 ) -> WithdrawalEntries {
     let rollup_id_u256 = U256::from(rollup_id);
 
@@ -801,9 +802,10 @@ pub fn build_l2_to_l1_call_entries(
     );
 
     // nextAction for L2TX trigger = delivery CALL (executes on L1 via _resolveScopes)
-    // Per spec: scope=[] (empty). _resolveScopes sees CALL with empty scope → enters
-    // _processCallAtScope directly to execute the delivery.
-    // For withdrawals: sends ETH to user. For general calls: calls destination with data.
+    // Scope determines how deeply _resolveScopes nests newScope() calls before
+    // executing at _processCallAtScope. Depth = number of user contract boundaries
+    // between the L2 tx entry and the proxy call in the L2 trace.
+    // Example: SCA→SCB→proxy = scope=[0,0] (2 levels of wrapping).
     let l1_delivery_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: U256::ZERO, // L1 scope
@@ -813,7 +815,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_u256,
-        scope: vec![],
+        scope: l1_delivery_scope,
     };
 
     // Entry 2 action_hash: matches what _processCallAtScope builds after executing

@@ -2258,6 +2258,7 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
         return_data.clone(),
         false,
+        vec![], // l1_delivery_scope: empty for tests (no deep nesting)
     );
 
     // L2 table entry 0: CALL entry, nextAction = RESULT with delivery return data.
@@ -2320,6 +2321,7 @@ fn test_build_withdrawal_entries_still_void() {
         vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
         vec![],     // delivery_return_data: EOA recipient
         false,      // delivery_failed
+        vec![],     // l1_delivery_scope
     );
 
     // L2 RESULT entries should have empty data (EOA target, no return data).
@@ -2359,6 +2361,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         vec![0xc0], // rlp_encoded_tx placeholder
         vec![],
         false,
+        vec![], // l1_delivery_scope
     );
 
     // Build entries with non-empty return data.
@@ -2372,6 +2375,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         vec![0xc0], // rlp_encoded_tx placeholder
         return_data,
         false,
+        vec![], // l1_delivery_scope
     );
 
     // The CALL entry hash should be the same (same CALL action regardless of return data).
@@ -2384,5 +2388,105 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
     assert_ne!(
         entries_void.l2_table_entries[1].action_hash, entries_data.l2_table_entries[1].action_hash,
         "RESULT hash must change when return data differs"
+    );
+}
+
+/// Verify that `build_l2_to_l1_call_entries` with deep scope produces correct L1 entries.
+///
+/// The deepScope protocol test requires scope=[0,0] on the L1 delivery CALL action
+/// when the L2 trace has 2 levels of contract nesting before the proxy call.
+/// L2 entries must always have scope=[] regardless of depth.
+#[test]
+fn test_build_l2_to_l1_call_entries_deep_scope() {
+    let destination = Address::with_last_byte(0x42);
+    let source = Address::with_last_byte(0x01);
+    let rollup_id = 1u64;
+    let return_data = U256::from(1).to_be_bytes_vec();
+
+    // Build with deep scope [0,0] (depth 2: SCA → SCB → proxy)
+    let deep_scope = vec![U256::ZERO, U256::ZERO];
+    let entries_deep = build_l2_to_l1_call_entries(
+        destination,
+        vec![0xd0, 0x9d, 0xe0, 0x8a], // increment() selector
+        U256::ZERO,
+        source,
+        rollup_id,
+        vec![0xc0],
+        return_data.clone(),
+        false,
+        deep_scope.clone(),
+    );
+
+    // Build with empty scope (direct call)
+    let entries_flat = build_l2_to_l1_call_entries(
+        destination,
+        vec![0xd0, 0x9d, 0xe0, 0x8a],
+        U256::ZERO,
+        source,
+        rollup_id,
+        vec![0xc0],
+        return_data.clone(),
+        false,
+        vec![],
+    );
+
+    // L1 entry 0 nextAction (delivery CALL) must carry the deep scope.
+    let l1_entry_0_deep = &entries_deep.l1_deferred_entries[0];
+    assert_eq!(
+        l1_entry_0_deep.next_action.scope, deep_scope,
+        "L1 delivery CALL must have scope=[0,0] for deep nesting"
+    );
+    assert_eq!(
+        l1_entry_0_deep.next_action.action_type,
+        CrossChainActionType::Call,
+        "L1 entry 0 nextAction must be CALL"
+    );
+
+    // L1 entry 0 nextAction with empty scope must have empty scope.
+    let l1_entry_0_flat = &entries_flat.l1_deferred_entries[0];
+    assert!(
+        l1_entry_0_flat.next_action.scope.is_empty(),
+        "L1 delivery CALL with empty scope must have scope=[]"
+    );
+
+    // Deep and flat entries must have DIFFERENT action hashes on L1 entry 0,
+    // because the L2TX trigger is the same (same rlp_encoded_tx) but the
+    // nextAction differs (scope changes the ABI encoding).
+    // Actually: entry 0's action_hash = hash(L2TX action) which doesn't include scope.
+    // The entries SHARE the same action_hash on entry 0 (L2TX trigger is identical).
+    assert_eq!(
+        l1_entry_0_deep.action_hash, l1_entry_0_flat.action_hash,
+        "L2TX trigger hash must be the same regardless of scope"
+    );
+
+    // But the entry hashes (hash of the full entry including nextAction) differ
+    // because nextAction.scope differs. This means on-chain, different scope
+    // entries can coexist without collision.
+    let deep_entry_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l1_entry_0_deep.next_action.to_sol_action(),
+    ));
+    let flat_entry_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &l1_entry_0_flat.next_action.to_sol_action(),
+    ));
+    assert_ne!(
+        deep_entry_hash, flat_entry_hash,
+        "L1 delivery CALL hash must differ between scope=[0,0] and scope=[]"
+    );
+
+    // L2 entries must ALWAYS have scope=[] regardless of L1 scope.
+    for (i, entry) in entries_deep.l2_table_entries.iter().enumerate() {
+        assert!(
+            entry.next_action.scope.is_empty(),
+            "L2 entry {} nextAction scope must be empty (got {:?})",
+            i,
+            entry.next_action.scope
+        );
+    }
+
+    // L1 entry 1 (RESULT → terminal) must have empty scope on both entries.
+    let l1_entry_1_deep = &entries_deep.l1_deferred_entries[1];
+    assert!(
+        l1_entry_1_deep.next_action.scope.is_empty(),
+        "L1 terminal RESULT must have scope=[]"
     );
 }
