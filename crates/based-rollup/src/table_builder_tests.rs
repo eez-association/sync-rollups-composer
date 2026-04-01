@@ -625,14 +625,13 @@ fn test_l2_to_l1_depth2_entry_generation() {
         "L2[4] scope resolution must target L1"
     );
 
-    // ── L1 entries: 7 total ──
-    // NOTE: After reorder_for_swap_and_pop, entries may be physically reordered
-    // to ensure correct FIFO consumption with the CCM's swap-and-pop mechanism.
-    // We verify entry CONTENTS by action_hash lookup, not by index position.
+    // ── L1 entries: 6 total (chained model) ──
+    // Chained: L2TX→A, RESULT(A)→B, child_C→D, leaf_D, scope_D, RESULT(B)→terminal
+    // NOTE: After reorder_for_swap_and_pop, entries may be physically reordered.
     assert_eq!(
         result.l1_entries.len(),
-        7,
-        "expected 7 L1 entries for depth-2 tree"
+        6,
+        "expected 6 L1 entries for depth-2 tree (chained model)"
     );
 
     // Build trigger actions to compute expected hashes.
@@ -683,32 +682,27 @@ fn test_l2_to_l1_depth2_entry_generation() {
             .collect()
     };
 
-    // L2TX trigger entries: both root calls A and B share the same L2TX trigger hash.
-    // There should be exactly 2 entries with this hash (one per root call).
+    // L2TX trigger: only 1 entry (chained model: only first call has L2TX trigger).
     let entries_l2tx = find_l1(l2tx_trigger_hash);
     assert_eq!(
         entries_l2tx.len(),
-        2,
-        "must have exactly 2 L2TX trigger entries (one per root call)"
+        1,
+        "chained model: only 1 L2TX trigger entry (first call only)"
     );
-    // First L2TX entry → delivery_A{scope=[]}
+    // L2TX entry → CALL(A, scope=[0])
     assert_eq!(
         entries_l2tx[0].next_action.action_type,
         CrossChainActionType::Call
     );
     assert_eq!(
         entries_l2tx[0].next_action.scope,
-        vec![] as Vec<U256>,
-        "delivery must have scope=[] (per spec)"
+        vec![U256::ZERO],
+        "delivery must have scope=[0] for multi-call sibling routing"
     );
     assert_eq!(entries_l2tx[0].next_action.destination, dest_a);
-    // Second L2TX entry → execution_B{scope=[0]}
-    assert_eq!(
-        entries_l2tx[1].next_action.action_type,
-        CrossChainActionType::Call
-    );
-    assert_eq!(entries_l2tx[1].next_action.scope, vec![U256::ZERO]);
-    assert_eq!(entries_l2tx[1].next_action.destination, dest_b);
+
+    // In the chained model, RESULT(A) → CALL(B, scope=[1]) is a RESULT-triggered entry.
+    // It uses the same RESULT hash as other void results, verified via find_l1 below.
 
     // child_trigger_C → execution_C{scope=[0]}
     let entries_c = find_l1(child_trigger_c_hash);
@@ -736,18 +730,21 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
     assert_eq!(entries_d[0].next_action.rollup_id, U256::ZERO);
 
-    // 3 RESULT(L1,void) entries: delivery resolution + C scope + B scope
+    // 3 RESULT(L1,void)-triggered entries:
+    //   1. RESULT(A) → CALL(B, scope=[1])  (chained sibling)
+    //   2. scope_D resolution → RESULT
+    //   3. RESULT(B) → RESULT(terminal)
     let entries_result = find_l1(l1_result_hash);
     assert_eq!(
         entries_result.len(),
         3,
-        "must have 3 RESULT(L1,void) entries"
+        "must have 3 RESULT(L1,void)-triggered entries"
     );
-    for e in &entries_result {
-        assert_eq!(e.next_action.action_type, CrossChainActionType::Result);
-        // §C.6: L2TX terminal RESULT rollupId is either L1 (0) for inner scope
-        // or L2 (1) for the outermost terminal. Allow both.
-    }
+    // At least one must chain to CALL (the sibling chain), rest are RESULT
+    let call_count = entries_result.iter().filter(|e| e.next_action.action_type == CrossChainActionType::Call).count();
+    let result_count = entries_result.iter().filter(|e| e.next_action.action_type == CrossChainActionType::Result).count();
+    assert_eq!(call_count, 1, "one RESULT entry chains to CALL(B)");
+    assert_eq!(result_count, 2, "two RESULT entries are terminal/scope resolution");
 
     // All entries must have empty state deltas (driver fills later).
     for (i, e) in result.l2_entries.iter().enumerate() {
@@ -984,20 +981,20 @@ fn test_l2_to_l1_depth1_regression() {
         "L2[2] RESULT must target L1"
     );
 
-    // ── L1 entries: exactly 5 ──
+    // ── L1 entries: chained pattern ──
+    // New model: L2TX→CALL(A,scope=[0]), RESULT(A)→CALL(B,scope=[1]), child_C, RESULT(B)→terminal
     assert_eq!(
         result.l1_entries.len(),
-        5,
-        "depth-1 must produce exactly 5 L1 entries"
+        4,
+        "chained multi-call must produce exactly 4 L1 entries (L2TX→A, RESULT→B, child_C, RESULT→terminal)"
     );
 
-    // L2TX trigger: all root calls share the same L2TX hash (same rlp_encoded_tx).
     let l2tx_trigger = CrossChainAction {
         action_type: CrossChainActionType::L2Tx,
         rollup_id: l2_id,
         destination: Address::ZERO,
         value: U256::ZERO,
-        data: vec![0xc0], // placeholder rlp_encoded_tx
+        data: vec![0xc0],
         failed: false,
         source_address: Address::ZERO,
         source_rollup: U256::ZERO,
@@ -1017,88 +1014,30 @@ fn test_l2_to_l1_depth1_regression() {
     let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
     let child_trigger_c_hash = compute_action_hash(&child_trigger_c);
 
-    // L1 Entry 0: L2TX trigger → delivery_A{scope=[]}
+    // L1[0]: L2TX → CALL(A, scope=[0])
     let l1_e0 = &result.l1_entries[0];
-    assert_eq!(
-        l1_e0.action_hash, l2tx_trigger_hash,
-        "L1[0] must be hash(L2TX trigger)"
-    );
-    assert_eq!(
-        l1_e0.next_action.action_type,
-        CrossChainActionType::Call,
-        "L1[0] must be delivery CALL"
-    );
-    assert_eq!(
-        l1_e0.next_action.scope,
-        vec![] as Vec<U256>,
-        "L1[0] delivery must have scope=[] (per spec)"
-    );
-    assert_eq!(
-        l1_e0.next_action.destination, dest_a,
-        "L1[0] delivery.destination must be CALL_A.destination"
-    );
+    assert_eq!(l1_e0.action_hash, l2tx_trigger_hash, "L1[0] trigger = L2TX");
+    assert_eq!(l1_e0.next_action.action_type, CrossChainActionType::Call, "L1[0] next = CALL");
+    assert_eq!(l1_e0.next_action.scope, vec![U256::ZERO], "L1[0] scope=[0]");
+    assert_eq!(l1_e0.next_action.destination, dest_a, "L1[0] dest = A");
 
-    // L1 Entry 1: delivery result resolution
+    // L1[1]: RESULT(A,void) → CALL(B, scope=[1])  (chained to next sibling)
     let l1_e1 = &result.l1_entries[1];
-    assert_eq!(
-        l1_e1.action_hash, l1_result_hash,
-        "L1[1] must be hash(RESULT(L1,void))"
-    );
-    assert_eq!(
-        l1_e1.next_action.action_type,
-        CrossChainActionType::Result,
-        "L1[1] must be terminal RESULT"
-    );
+    assert_eq!(l1_e1.action_hash, l1_result_hash, "L1[1] trigger = RESULT(void)");
+    assert_eq!(l1_e1.next_action.action_type, CrossChainActionType::Call, "L1[1] next = CALL (chained)");
+    assert_eq!(l1_e1.next_action.scope, vec![U256::from(1u64)], "L1[1] scope=[1]");
+    assert_eq!(l1_e1.next_action.destination, dest_b, "L1[1] dest = B");
 
-    // L1 Entry 2: L2TX trigger → execution_B{scope=[0]}
+    // L1[2]: reentrant leaf child CALL_C
     let l1_e2 = &result.l1_entries[2];
-    assert_eq!(
-        l1_e2.action_hash, l2tx_trigger_hash,
-        "L1[2] must be hash(L2TX trigger) — same hash as L1[0]"
-    );
-    assert_eq!(
-        l1_e2.next_action.action_type,
-        CrossChainActionType::Call,
-        "L1[2] must be execution CALL"
-    );
-    assert_eq!(
-        l1_e2.next_action.scope,
-        vec![U256::ZERO],
-        "L1[2] execution must have scope=[0]"
-    );
-    assert_eq!(
-        l1_e2.next_action.destination, dest_b,
-        "L1[2] execution.destination must be CALL_B.destination"
-    );
+    assert_eq!(l1_e2.action_hash, child_trigger_c_hash, "L1[2] trigger = child_C");
+    assert_eq!(l1_e2.next_action.action_type, CrossChainActionType::Result, "L1[2] next = RESULT (leaf)");
 
-    // L1 Entry 3: reentrant leaf child CALL_C
+    // L1[3]: RESULT(B,void) → RESULT(terminal)  (last call)
     let l1_e3 = &result.l1_entries[3];
-    assert_eq!(
-        l1_e3.action_hash, child_trigger_c_hash,
-        "L1[3] must be hash(child_trigger_C)"
-    );
-    assert_eq!(
-        l1_e3.next_action.action_type,
-        CrossChainActionType::Result,
-        "L1[3] reentrant leaf must be terminal RESULT"
-    );
-    assert_eq!(
-        l1_e3.next_action.rollup_id,
-        U256::ZERO,
-        "L1[3] RESULT rollupId must be L1 (0)"
-    );
-
-    // L1 Entry 4: CALL_B's scope resolution
-    let l1_e4 = &result.l1_entries[4];
-    assert_eq!(
-        l1_e4.action_hash, l1_result_hash,
-        "L1[4] must be hash(RESULT(L1,void)) — B scope resolution"
-    );
-    assert_eq!(
-        l1_e4.next_action.action_type,
-        CrossChainActionType::Result,
-        "L1[4] must be RESULT"
-    );
+    assert_eq!(l1_e3.action_hash, l1_result_hash, "L1[3] trigger = RESULT(void)");
+    assert_eq!(l1_e3.next_action.action_type, CrossChainActionType::Result, "L1[3] next = terminal");
+    assert_eq!(l1_e3.next_action.rollup_id, l2_id, "L1[3] terminal rollupId = L2");
 }
 
 /// Test that L2 entries have empty state deltas (driver fills them later).
