@@ -807,6 +807,7 @@ where
                 call_success: c.call_success,
                 parent_call_index: c.parent_call_index,
                 target_rollup_id: c.target_rollup_id,
+                scope: vec![], // TODO: propagate from RPC params
             })
             .collect();
 
@@ -949,6 +950,7 @@ where
                 source_address: c.source_address,
                 delivery_return_data: c.delivery_return_data.to_vec(),
                 delivery_failed: c.delivery_failed,
+                scope: vec![], // TODO: propagate from RPC params
             })
             .collect();
 
@@ -967,6 +969,7 @@ where
                     .map(|b| b.to_vec())
                     .unwrap_or_default(),
                 l2_delivery_failed: c.l2_delivery_failed,
+                scope: vec![], // TODO: propagate from RPC params
             })
             .collect();
 

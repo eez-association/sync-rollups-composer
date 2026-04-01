@@ -1612,6 +1612,7 @@ async fn simulate_l1_delivery(
     data: &[u8],
     value: U256,
     rlp_encoded_tx: &[u8],
+    root_scope: &[U256],
 ) -> Option<(Vec<u8>, bool, Vec<DetectedReturnCall>)> {
     // First check if destination has code on L1.
     // If it's an EOA, return data is empty and we skip simulation.
@@ -1697,6 +1698,7 @@ async fn simulate_l1_delivery(
                 source_address: _trigger_user,
                 delivery_return_data: final_return_data.clone(),
                 delivery_failed: final_delivery_failed,
+                scope: root_scope.to_vec(),
             };
 
             let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
@@ -1710,6 +1712,7 @@ async fn simulate_l1_delivery(
                         parent_call_index: rc.parent_call_index,
                         l2_return_data: rc.l2_return_data.clone(),
                         l2_delivery_failed: rc.l2_delivery_failed,
+                        scope: rc.scope.clone(),
                     })
                     .collect();
 
@@ -1964,6 +1967,7 @@ async fn simulate_l1_delivery(
             rollups_address,
             trigger_trace,
             rollup_id,
+            root_scope,
         )
         .await;
 
@@ -2507,6 +2511,7 @@ async fn simulate_l1_combined_delivery(
                     source_address: call.source_address,
                     delivery_return_data: per_call_return_data[i].clone(),
                     delivery_failed: per_call_delivery_failed[i],
+                    scope: vec![], // TODO: compute from trace_depth for multi-call
                 };
 
                 let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
@@ -2524,6 +2529,7 @@ async fn simulate_l1_combined_delivery(
                             parent_call_index: None,
                             l2_return_data: rc.l2_return_data.clone(),
                             l2_delivery_failed: rc.l2_delivery_failed,
+                            scope: rc.scope.clone(),
                         })
                         .collect();
 
@@ -2787,12 +2793,15 @@ async fn simulate_l1_combined_delivery(
             per_call_delivery_failed[call_idx] = false;
 
             // Extract L1→L2 return calls from this trigger trace.
+            // Parent scope for these return calls comes from the triggering call.
+            let call_scope: Vec<U256> = vec![U256::ZERO]; // TODO: use real accumulated scope per call
             let new_returns = extract_l1_to_l2_return_calls(
                 client,
                 l1_rpc_url,
                 rollups_address,
                 trigger_trace,
                 rollup_id,
+                &call_scope,
             )
             .await;
 
@@ -3055,6 +3064,9 @@ struct DetectedReturnCall {
     /// Whether the L2 simulation of this call reverted.
     /// Used for the L2 RESULT entry `failed` flag (#246 audit).
     l2_delivery_failed: bool,
+    /// Accumulated scope for this return call's entries.
+    /// = parent call's scope ++ [0; trace_depth on L1].
+    scope: Vec<U256>,
 }
 
 /// Maximum number of iterative discovery rounds in `simulate_l1_delivery`.
@@ -3134,6 +3146,7 @@ async fn extract_l1_to_l2_return_calls(
     rollups_address: Address,
     trigger_trace: &Value,
     our_rollup_id: u64,
+    parent_scope: &[U256],
 ) -> Vec<DetectedReturnCall> {
     let lookup = L1ProxyLookup {
         client,
@@ -3195,6 +3208,9 @@ async fn extract_l1_to_l2_return_calls(
                         rollup_id = info.original_rollup_id,
                         "detected L1->L2 return call in delivery trace via walk_trace_tree"
                     );
+                    // Accumulated scope: parent's scope ++ [0; trace_depth on L1]
+                    let mut accumulated = parent_scope.to_vec();
+                    accumulated.extend(vec![U256::ZERO; c.trace_depth]);
                     Some(DetectedReturnCall {
                         destination: c.destination,
                         data: c.calldata,
@@ -3203,6 +3219,7 @@ async fn extract_l1_to_l2_return_calls(
                         parent_call_index: None,
                         l2_return_data: vec![],
                         l2_delivery_failed: false,
+                        scope: accumulated,
                     })
                 }
                 _ => None, // Not targeting our rollup — skip (forward call or other rollup)
@@ -4131,6 +4148,7 @@ async fn trace_and_detect_l2_internal_calls(
 
     // Single call path: simulate on L1 to get delivery data + return calls.
     let call = &detected_calls[0];
+    let root_scope: Vec<U256> = vec![U256::ZERO; call.trace_depth];
     let (delivery_return_data, delivery_failed, return_calls) = simulate_l1_delivery(
         client,
         l1_rpc_url,
@@ -4145,6 +4163,7 @@ async fn trace_and_detect_l2_internal_calls(
         &call.calldata,
         call.value,
         &tx_bytes,
+        &root_scope,
     )
     .await
     .unwrap_or((vec![], false, vec![]));

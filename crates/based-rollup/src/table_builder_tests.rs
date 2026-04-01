@@ -67,6 +67,7 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     };
 
     let result = build_continuation_entries(std::slice::from_ref(&call_a), l2_id);
@@ -133,6 +134,7 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     };
 
     // CALL_B: executor → executorL2.claimAndBridgeBack (continuation of A)
@@ -147,6 +149,7 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     };
 
     // CALL_C: Bridge_L2 → Bridge_L1.receiveTokens (child of B)
@@ -160,6 +163,7 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     };
 
     let calls = vec![call_a, call_b, call_c];
@@ -357,6 +361,7 @@ fn test_two_continuations_no_children() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     };
     let call_b = DetectedCall {
         direction: CallDirection::L1ToL2,
@@ -367,6 +372,7 @@ fn test_two_continuations_no_children() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     };
 
     let result = build_continuation_entries(&[call_a, call_b], l2_id);
@@ -425,6 +431,7 @@ fn make_l2_to_l1_detected(
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     }
 }
 
@@ -1110,6 +1117,7 @@ fn test_all_entries_have_empty_state_deltas() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
     };
 
     let result = build_continuation_entries(&[call], l2_id);
@@ -1172,6 +1180,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
             delivery_return_data: counter_return.clone(), // L1 delivery also returns the counter value
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
         },
         DetectedCall {
             direction: CallDirection::L2ToL1,
@@ -1192,6 +1201,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
             delivery_return_data: vec![],
             l2_return_data: counter_return.clone(),
             l2_delivery_failed: false,
+            scope: vec![],
         },
     ];
 
@@ -1276,6 +1286,7 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: root_delivery_return.clone(),
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
         },
         // Child A: void return (return call targeting our rollup)
         DetectedCall {
@@ -1297,6 +1308,7 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: vec![],
             l2_return_data: vec![], // void
             l2_delivery_failed: false,
+            scope: vec![],
         },
         // Child B: non-void return
         DetectedCall {
@@ -1318,6 +1330,7 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: vec![],
             l2_return_data: child_b_return.clone(),
             l2_delivery_failed: false,
+            scope: vec![],
         },
     ];
 
@@ -1397,6 +1410,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
             delivery_return_data: delivery_data.clone(), // L1 delivery returns data
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
         },
         DetectedCall {
             direction: CallDirection::L2ToL1,
@@ -1417,6 +1431,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
             delivery_return_data: vec![0xCA, 0xFE], // child also has delivery data
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
         },
     ];
 
@@ -1482,6 +1497,7 @@ fn test_void_children_still_use_result_void() {
             delivery_return_data: vec![], // void
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
         },
         DetectedCall {
             direction: CallDirection::L2ToL1,
@@ -1502,6 +1518,7 @@ fn test_void_children_still_use_result_void() {
             delivery_return_data: vec![], // void
             l2_return_data: vec![],       // void
             l2_delivery_failed: false,
+            scope: vec![],
         },
     ];
 

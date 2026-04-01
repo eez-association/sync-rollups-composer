@@ -2126,6 +2126,7 @@ async fn trace_and_detect_internal_calls(
                             } else {
                                 None
                             },
+                            scope: vec![], // TODO: propagate accumulated scope
                         })
                         .collect();
 

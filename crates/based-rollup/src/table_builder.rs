@@ -65,6 +65,12 @@ pub struct DetectedCall {
     /// Whether the L2 return call simulation reverted (#246 audit: failed flag).
     #[serde(default)]
     pub l2_delivery_failed: bool,
+    /// Scope for this call's L1 delivery CALL action.
+    /// Accumulates across hops: hop1=[0], hop2=[0,0], hop3=[0,0,0].
+    /// Computed as accumulated_prefix ++ local_tree_path.
+    /// Used by table_builder instead of hardcoded vec![U256::ZERO].
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// Output of `build_continuation_entries`: L2 table entries and L1 deferred entries.
@@ -435,11 +441,15 @@ pub fn build_continuation_entries(
                 next_action: l1_terminal,
             });
         } else {
-            // Has children: CALL → first child CALL with scope=[0]
-            // (For multiple children, scope indices would be [0], [1], etc.)
+            // Has children: CALL → first child CALL with accumulated scope.
+            // The child's scope is its pre-computed accumulated scope from detection.
             let first_child = &children[0].1;
             let mut scoped_child_action = first_child.call_action.clone();
-            scoped_child_action.scope = vec![U256::ZERO];
+            scoped_child_action.scope = if first_child.scope.is_empty() {
+                vec![U256::ZERO] // fallback: depth 1 if no scope computed
+            } else {
+                first_child.scope.clone()
+            };
 
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: l1_entry_deltas.clone(),
@@ -550,6 +560,9 @@ pub struct L1DetectedCall {
     /// L1→L2 continuation calls from L2→L1 child calls.
     #[serde(default)]
     pub target_rollup_id: Option<u64>,
+    /// Accumulated scope for this call's delivery action.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// Serde default for `call_success` — defaults to `true` (success).
@@ -612,6 +625,7 @@ pub fn analyze_continuation_calls(
                     delivery_return_data: call.l2_return_data.clone(),
                     l2_return_data: vec![],
                     l2_delivery_failed: !call.call_success,
+                    scope: call.scope.clone(),
                 }
             } else {
                 // L1→L2 call (root-level or continuation)
@@ -640,6 +654,7 @@ pub fn analyze_continuation_calls(
                     delivery_return_data: vec![],
                     l2_return_data: call.l2_return_data.clone(),
                     l2_delivery_failed: !call.call_success,
+                    scope: vec![], // L1→L2 root calls start with empty scope
                 }
             }
         })
@@ -667,6 +682,10 @@ pub struct L2DetectedCall {
     /// matching what `_processCallAtScope` computes on-chain.
     #[serde(default)]
     pub delivery_failed: bool,
+    /// Accumulated scope for this call's L1 delivery CALL action.
+    /// Includes accumulated prefix from parent hops + local trace depth.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// Parameters for an L1→L2 return call discovered during L1 delivery simulation.
@@ -694,6 +713,9 @@ pub struct L2ReturnCall {
     /// Whether the L2 simulation of this call reverted.
     #[serde(default)]
     pub l2_delivery_failed: bool,
+    /// Accumulated scope for this return call. Inherited from parent + local trace depth.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// Output of `build_l2_to_l1_continuation_entries`: L2 table entries and L1 deferred entries.
@@ -763,6 +785,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
             delivery_return_data: call.delivery_return_data.clone(),
             l2_return_data: vec![],
             l2_delivery_failed: call.delivery_failed,
+            scope: call.scope.clone(),
         });
     }
 
@@ -810,6 +833,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
                 delivery_return_data: vec![], // child executes on L2, no L1 delivery data
                 l2_return_data: rc.l2_return_data.clone(),
                 l2_delivery_failed: rc.l2_delivery_failed,
+                scope: rc.scope.clone(),
             });
         }
     } else if l2_calls.len() >= 2 {
@@ -962,9 +986,14 @@ fn push_reentrant_child_entries(
                 next_action: leaf_next,
             });
         } else {
-            // Internal child (has grandchildren): trigger → execution with scope=[0],
+            // Internal child (has grandchildren): trigger → execution with accumulated scope,
             // plus recursive reentrant entries, plus scope resolution.
             // This mirrors the "subsequent call WITH children" pattern for root calls.
+            let child_scope = if child.scope.is_empty() {
+                vec![U256::ZERO]
+            } else {
+                child.scope.clone()
+            };
             let execution = CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: U256::ZERO, // L1, where the call executes
@@ -974,7 +1003,7 @@ fn push_reentrant_child_entries(
                 failed: false,
                 source_address: child.call_action.source_address, // L2 initiator
                 source_rollup: our_rollup_id,
-                scope: vec![U256::ZERO],
+                scope: child_scope,
             };
 
             tracing::info!(
@@ -1208,6 +1237,11 @@ pub fn build_l2_to_l1_continuation_entries(
                     first_child.call_action.destination,
                 )
             };
+            let first_child_scope = if first_child.scope.is_empty() {
+                vec![U256::ZERO]
+            } else {
+                first_child.scope.clone()
+            };
             let call_return = CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: our_rollup_id,
@@ -1217,7 +1251,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 failed: false,
                 source_address: cr_source,
                 source_rollup: U256::ZERO, // MAINNET
-                scope: vec![U256::ZERO],
+                scope: first_child_scope,
             };
 
             tracing::info!(
@@ -1253,6 +1287,13 @@ pub fn build_l2_to_l1_continuation_entries(
                         child.call_action.destination,
                     )
                 };
+                // Sibling scope: use child's pre-computed scope if available,
+                // otherwise fall back to simple positional index.
+                let sibling_scope = if child.scope.is_empty() {
+                    vec![U256::from(child_pos)]
+                } else {
+                    child.scope.to_vec()
+                };
                 let child_call_return = CrossChainAction {
                     action_type: CrossChainActionType::Call,
                     rollup_id: our_rollup_id,
@@ -1262,7 +1303,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: false,
                     source_address: ccr_source,
                     source_rollup: U256::ZERO, // MAINNET
-                    scope: vec![U256::from(child_pos)],
+                    scope: sibling_scope,
                 };
 
                 tracing::info!(
@@ -1591,9 +1632,14 @@ pub fn build_l2_to_l1_continuation_entries(
                 next_action: l1_delivery_exit,
             });
         } else if !this_call_children.is_empty() {
-            // Subsequent call WITH children: EXECUTION with scope=[0].
+            // Subsequent call WITH children: EXECUTION with accumulated scope.
             // _processCallAtScope creates the proxy and calls executeOnBehalf,
             // which may trigger reentrant child calls.
+            let call_scope = if l2_call.scope.is_empty() {
+                vec![U256::ZERO]
+            } else {
+                l2_call.scope.clone()
+            };
             let execution = CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: U256::ZERO, // L1, where the call executes
@@ -1603,7 +1649,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 failed: false,
                 source_address: l2_call.call_action.source_address, // L2 initiator
                 source_rollup: our_rollup_id,
-                scope: vec![U256::ZERO],
+                scope: call_scope,
             };
 
             tracing::info!(
@@ -1680,9 +1726,12 @@ pub fn build_l2_to_l1_continuation_entries(
                 next_action: l1_scope_exit_subseq,
             });
         } else {
-            // Subsequent call WITHOUT children: nested DELIVERY with scope=[0].
-            // Without scope navigation, Rollups returns RESULT without executing
-            // the call on L1 — the same pattern as root_pos==0.
+            // Subsequent call WITHOUT children: nested DELIVERY with accumulated scope.
+            let call_scope = if l2_call.scope.is_empty() {
+                vec![U256::ZERO]
+            } else {
+                l2_call.scope.clone()
+            };
             let delivery = CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: U256::ZERO,
@@ -1692,7 +1741,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 failed: false,
                 source_address: l2_call.call_action.source_address, // L2 source
                 source_rollup: our_rollup_id,
-                scope: vec![U256::ZERO],
+                scope: call_scope,
             };
 
             tracing::info!(
