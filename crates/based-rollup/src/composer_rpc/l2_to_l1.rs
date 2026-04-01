@@ -2478,6 +2478,9 @@ async fn simulate_l1_combined_delivery(
         );
 
         // Build combined L1 deferred entries for all calls.
+        // For multi-call patterns (siblings), each call needs scope=[..., sibling_index]
+        // for executeL2TX to route between them via scope navigation.
+        let is_multi_call = calls.len() > 1;
         let mut combined_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> = Vec::new();
         for (i, call) in calls.iter().enumerate() {
             // Collect return calls belonging to this trigger call.
@@ -2485,6 +2488,16 @@ async fn simulate_l1_combined_delivery(
                 .iter()
                 .filter(|rc| rc.parent_call_index == Some(i))
                 .collect();
+
+            // Scope: for single calls, use trace_depth-1 (direct caller excluded).
+            // For multi-call (siblings), append sibling_index for routing.
+            let call_scope = if is_multi_call {
+                let mut s = vec![U256::ZERO; call.trace_depth.saturating_sub(1)];
+                s.push(U256::from(i));
+                s
+            } else {
+                vec![U256::ZERO; call.trace_depth.saturating_sub(1)]
+            };
 
             let entries = if my_return_calls.is_empty() {
                 // Simple case: just this L2→L1 call.
@@ -2497,7 +2510,7 @@ async fn simulate_l1_combined_delivery(
                     rlp_encoded_tx.to_vec(),
                     per_call_return_data[i].clone(),
                     per_call_delivery_failed[i],
-                    vec![U256::ZERO; call.trace_depth.saturating_sub(1)],
+                    call_scope.clone(),
                 );
                 call_entries.l1_deferred_entries
             } else {
@@ -2511,7 +2524,7 @@ async fn simulate_l1_combined_delivery(
                     source_address: call.source_address,
                     delivery_return_data: per_call_return_data[i].clone(),
                     delivery_failed: per_call_delivery_failed[i],
-                    scope: vec![U256::ZERO; call.trace_depth.saturating_sub(1)],
+                    scope: call_scope.clone(),
                 };
 
                 let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
@@ -2794,7 +2807,13 @@ async fn simulate_l1_combined_delivery(
 
             // Extract L1→L2 return calls from this trigger trace.
             // Parent scope = this call's scope from L2 trace depth.
-            let call_scope: Vec<U256> = vec![U256::ZERO; calls[call_idx].trace_depth.saturating_sub(1)];
+            let call_scope: Vec<U256> = if calls.len() > 1 {
+                let mut s = vec![U256::ZERO; calls[call_idx].trace_depth.saturating_sub(1)];
+                s.push(U256::from(call_idx));
+                s
+            } else {
+                vec![U256::ZERO; calls[call_idx].trace_depth.saturating_sub(1)]
+            };
             let new_returns = extract_l1_to_l2_return_calls(
                 client,
                 l1_rpc_url,
