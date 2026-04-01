@@ -4107,15 +4107,20 @@ async fn trace_and_detect_l2_internal_calls(
                 return_calls = detected_return_calls.len(),
                 "duplicate NESTED calls detected — routing via multi-call with pre-detected return calls"
             );
-            // Route directly to buildL2ToL1ExecutionTable with the return calls
-            // we already detected. Each duplicate call gets the SAME return call
-            // pattern (they call the same nested contract).
+            // Route directly to buildL2ToL1ExecutionTable with the return calls.
+            // Only calls that MATCH the first call (same dest+calldata) get return calls.
+            // Other calls (different destination/calldata) are simple — no return calls.
+            let first = &detected_calls[0];
             let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
-            for (i, _call) in detected_calls.iter().enumerate() {
-                for rc in &detected_return_calls {
-                    let mut rc_clone = rc.clone();
-                    rc_clone.parent_call_index = Some(i);
-                    all_return_calls.push(rc_clone);
+            for (i, call) in detected_calls.iter().enumerate() {
+                let is_same_pattern = call.destination == first.destination
+                    && call.calldata == first.calldata;
+                if is_same_pattern {
+                    for rc in &detected_return_calls {
+                        let mut rc_clone = rc.clone();
+                        rc_clone.parent_call_index = Some(i);
+                        all_return_calls.push(rc_clone);
+                    }
                 }
             }
             return queue_l2_to_l1_multi_call_entries(
