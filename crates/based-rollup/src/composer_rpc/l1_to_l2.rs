@@ -728,6 +728,7 @@ async fn simulate_l1_to_l2_call_on_l2(
     value: U256,
     source_address: Address,
     rollup_id: u64,
+    l2_scope: &[U256],
 ) -> (Vec<u8>, bool, Vec<super::common::DiscoveredProxyCall>) {
     // Step 1: Query SYSTEM_ADDRESS from the CCM.
     // Uses typed ABI encoding via sol! macro — NEVER hardcode selectors.
@@ -764,6 +765,7 @@ async fn simulate_l1_to_l2_call_on_l2(
     );
 
     // Step 2: Build executeIncomingCrossChainCall calldata.
+    // Scope reflects the nesting depth on L1 (symmetric with L2→L1 rule).
     let sim_action = crate::cross_chain::CrossChainAction {
         action_type: crate::cross_chain::CrossChainActionType::Call,
         rollup_id: U256::from(rollup_id),
@@ -773,7 +775,7 @@ async fn simulate_l1_to_l2_call_on_l2(
         failed: false,
         source_address,
         source_rollup: U256::ZERO, // L1 = rollup 0
-        scope: vec![],
+        scope: l2_scope.to_vec(),
     };
     let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
 
@@ -1048,6 +1050,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
+                &[],  // l2_scope: TODO propagate from L1 trace_depth
             )
             .await;
         }
@@ -1066,7 +1069,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
         failed: false,
         source_address,
         source_rollup: U256::ZERO,
-        scope: vec![],
+        scope: vec![], // TODO: propagate l2_scope to chained simulation
     };
     let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
 
@@ -1157,6 +1160,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
+                &[],  // l2_scope: TODO propagate from L1 trace_depth
             )
             .await;
         }
@@ -1179,6 +1183,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
+                &[],  // l2_scope: TODO propagate from L1 trace_depth
             )
             .await;
         }
@@ -1206,6 +1211,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
+                &[],  // l2_scope: TODO propagate from L1 trace_depth
             )
             .await;
         }
@@ -1229,6 +1235,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
             value,
             source_address,
             rollup_id,
+                &[],  // l2_scope: TODO propagate from L1 trace_depth
         )
         .await;
     }
@@ -1895,6 +1902,7 @@ async fn trace_and_detect_internal_calls(
                         call_value,
                         call_source,
                         rollup_id,
+                &[],  // l2_scope: TODO propagate from L1 trace_depth
                     )
                     .await
                 } else {
@@ -2610,6 +2618,7 @@ async fn trace_and_detect_internal_calls(
                                         call.value,
                                         call.source_address,
                                         rollup_id,
+                &[],  // l2_scope: TODO propagate from L1 trace_depth
                                     )
                                     .await
                                 } else {
