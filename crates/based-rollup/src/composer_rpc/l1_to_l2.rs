@@ -3293,12 +3293,53 @@ async fn trace_and_detect_internal_calls(
                             .await;
 
                             if let Some((trace, success)) = sim_result {
-                                // ALWAYS use BFS extraction to find the SHALLOWEST
-                                // successful call to the destination. For reentrant
-                                // patterns, the top-level executeIncomingCrossChainCall
-                                // may succeed but return scope-chain data instead of
-                                // the raw destination return. BFS finds the actual
-                                // destination call's output at the correct depth.
+                                // === FULL TRACE DUMP for debugging ===
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    idx,
+                                    sim_success = success,
+                                    "post-convergence: L2 sim FULL TRACE: {}",
+                                    serde_json::to_string(&trace).unwrap_or_default()
+                                );
+
+                                // === WALK TRACE TREE with per-node logging ===
+                                {
+                                    let dest_lower = format!("{call_destination}").to_lowercase();
+                                    fn log_trace_walk(node: &Value, depth: usize, dest: &str) {
+                                        let to = node.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+                                        let from = node.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                                        let has_error = node.get("error").is_some();
+                                        let output_len = node.get("output").and_then(|v| v.as_str())
+                                            .map(|s| s.len() / 2).unwrap_or(0);
+                                        let input_sel = node.get("input").and_then(|v| v.as_str())
+                                            .unwrap_or("0x");
+                                        let sel = &input_sel[..input_sel.len().min(10)];
+                                        let is_match = to.to_lowercase() == dest;
+                                        tracing::info!(
+                                            target: "based_rollup::l1_proxy",
+                                            "  TRACE d={} to={}..{} from={}..{} sel={} err={} out_len={} match={}",
+                                            depth,
+                                            &to[..to.len().min(10)],
+                                            &to[to.len().saturating_sub(4)..],
+                                            &from[..from.len().min(10)],
+                                            &from[from.len().saturating_sub(4)..],
+                                            sel, has_error, output_len, is_match
+                                        );
+                                        if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+                                            for c in calls {
+                                                log_trace_walk(c, depth + 1, dest);
+                                            }
+                                        }
+                                    }
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        "post-convergence: L2 sim trace walk (dest={}):",
+                                        call_destination
+                                    );
+                                    log_trace_walk(&trace, 0, &dest_lower);
+                                }
+
+                                // BFS extraction
                                 let inner = extract_inner_destination_return_data(
                                     &trace, call_destination,
                                 ).unwrap_or_default();
@@ -3306,8 +3347,7 @@ async fn trace_and_detect_internal_calls(
                                     &trace, call_destination,
                                 );
 
-                                // If BFS failed but top-level succeeded, use top-level
-                                // as fallback (ABI decode bytes memory).
+                                // Fallback to top-level if BFS empty
                                 let (ret_data, inner_success) = if inner.is_empty() && success {
                                     let raw = extract_return_data_from_trace(&trace);
                                     let decoded = if raw.len() >= 64 {
