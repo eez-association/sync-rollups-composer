@@ -2502,6 +2502,9 @@ async fn trace_and_detect_internal_calls(
                 let mut all_calls = detected_calls.clone();
                 let mut iteration = 0;
                 const MAX_ITERATIONS: usize = 10;
+                // Save the user trace from the last iteration for post-convergence
+                // extraction of L2→L1 child delivery returns.
+                let mut last_l1_user_trace: Option<Value> = None;
 
                 loop {
                     iteration += 1;
@@ -2537,6 +2540,8 @@ async fn trace_and_detect_internal_calls(
                         Some(t) => t,
                         None => break,
                     };
+                    // Save for post-convergence extraction.
+                    last_l1_user_trace = Some(user_trace_owned.clone());
                     let user_trace = &user_trace_owned;
 
                     // Log user tx trace status with decoded error
@@ -3091,6 +3096,49 @@ async fn trace_and_detect_internal_calls(
                     // update return_data and rebuild entries so the next outer level
                     // sees correct RESULT hashes for scope resolution.
                     //
+                    // PRE-ENRICH: Extract delivery returns for ALL L2→L1 children
+                    // from the LAST iterative loop's L1 trace. In that trace, inner
+                    // level entries are loaded → inner children execute on L1 → their
+                    // outputs are available. Without this, the post-convergence loop's
+                    // Step A for outer levels can't extract inner children's delivery
+                    // returns because the L1 trace built at that point lacks the
+                    // result propagation entries.
+                    if let Some(ref saved_trace) = last_l1_user_trace {
+                        let child_indices: Vec<usize> = detected_calls
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| {
+                                c.parent_call_index.is_some() && c.target_rollup_id == 0
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+
+                        for &ci in &child_indices {
+                            let child = &detected_calls[ci];
+                            // Only update if current data is stale (error selector = 4 bytes)
+                            if child.return_data.len() <= 4 || !child.call_success {
+                                let delivery = extract_delivery_return_from_l1_trace(
+                                    saved_trace,
+                                    child.destination,
+                                    rollups_address,
+                                );
+                                if !delivery.is_empty() {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        ci,
+                                        dest = %child.destination,
+                                        old_len = child.return_data.len(),
+                                        new_len = delivery.len(),
+                                        new_hex = %format!("0x{}", hex::encode(&delivery[..delivery.len().min(32)])),
+                                        "post-convergence: PRE-ENRICHED L2→L1 child from saved L1 trace"
+                                    );
+                                    detected_calls[ci].return_data = delivery;
+                                    detected_calls[ci].call_success = true;
+                                }
+                            }
+                        }
+                    }
+
                     // Collect L1→L2 root call indices in REVERSE order (innermost first).
                     let root_indices: Vec<usize> = detected_calls
                         .iter()
@@ -3171,6 +3219,25 @@ async fn trace_and_detect_internal_calls(
                                 level_child = child_idx,
                                 "post-convergence: processing reentrant level"
                             );
+
+                            // === LOG: dc state BEFORE Step A ===
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                "post-convergence: dc state BEFORE Step A (level idx={}):",
+                                idx
+                            );
+                            for (di, dc) in detected_calls.iter().enumerate() {
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    "  PRE-A dc[{}] (level {}): ret_len={} ret_hex={} success={}",
+                                    di, idx,
+                                    dc.return_data.len(),
+                                    if dc.return_data.is_empty() { "0x".to_string() } else {
+                                        format!("0x{}", hex::encode(&dc.return_data[..dc.return_data.len().min(8)]))
+                                    },
+                                    dc.call_success
+                                );
+                            }
 
                             // STEP A: Run L1 trace to extract child delivery return.
                             // The L1 entries are rebuilt from current detected_calls state.
@@ -3259,10 +3326,10 @@ async fn trace_and_detect_internal_calls(
                                 e.state_deltas.clear();
                             }
 
-                            // === LOG: detected_calls state at this point ===
+                            // === LOG: detected_calls state AFTER Step A, BEFORE Step B ===
                             tracing::info!(
                                 target: "based_rollup::l1_proxy",
-                                "post-convergence: detected_calls state before L2 sim for idx={}:",
+                                "post-convergence: dc state AFTER Step A extraction, BEFORE Step B L2 sim (level idx={}):",
                                 idx
                             );
                             for (di, dc) in detected_calls.iter().enumerate() {
