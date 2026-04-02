@@ -647,12 +647,19 @@ pub fn build_continuation_entries(
 
                 tracing::info!(
                     target: "based_rollup::table_builder",
-                    "L1 scope resolution: child_pos={} child_result_hash={} child_target_rollup={} delivery_ret_len={} delivery_ret_hex={}",
-                    child_pos, child_result_hash, child_target_rollup,
-                    child.delivery_return_data.len(),
-                    if child.delivery_return_data.is_empty() { "0x".to_string() } else {
-                        format!("0x{}", hex::encode(&child.delivery_return_data[..child.delivery_return_data.len().min(32)]))
-                    }
+                    "L1 scope resolution FULL: child_pos={} hash={} type={:?} rollupId={} dest={} value={} data_hex=0x{} data_len={} failed={} sourceAddr={} sourceRollup={} scope_len={}",
+                    child_pos,
+                    child_result_hash,
+                    child_result.action_type,
+                    child_result.rollup_id,
+                    child_result.destination,
+                    child_result.value,
+                    hex::encode(&child_result.data),
+                    child_result.data.len(),
+                    child_result.failed,
+                    child_result.source_address,
+                    child_result.source_rollup,
+                    child_result.scope.len()
                 );
 
                 // Terminal next_action: the RESULT of the OUTER scope after
