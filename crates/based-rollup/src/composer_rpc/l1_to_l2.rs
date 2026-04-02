@@ -679,28 +679,36 @@ fn destination_call_succeeded_in_trace(trace: &Value, destination: Address) -> b
 fn extract_inner_destination_return_data(trace: &Value, destination: Address) -> Option<Vec<u8>> {
     let dest_hex_lower = format!("{destination}").to_lowercase();
 
-    fn walk(node: &Value, target: &str) -> Option<Vec<u8>> {
-        // Check if this node targets our destination and succeeded
+    // BFS (breadth-first search) to find the SHALLOWEST successful call
+    // to the destination. For reentrant patterns (deepCall(4) → deepCall(2) →
+    // deepCall(0)), all calls target the same address. We want the outermost
+    // call's output (deepCall(4)=3), not the innermost (deepCall(0)=1).
+    // BFS guarantees we find the shallowest match first.
+    let mut queue = std::collections::VecDeque::new();
+    if let Some(calls) = trace.get("calls").and_then(|v| v.as_array()) {
+        for c in calls {
+            queue.push_back(c);
+        }
+    }
+
+    while let Some(node) = queue.pop_front() {
         if let Some(to) = node.get("to").and_then(|v| v.as_str()) {
-            if to.to_lowercase() == target && node.get("error").is_none() {
+            if to.to_lowercase() == dest_hex_lower && node.get("error").is_none() {
                 let output = node.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
                 let data =
                     hex::decode(output.strip_prefix("0x").unwrap_or(output)).unwrap_or_default();
                 return Some(data);
             }
         }
-        // Recurse into children
+        // Enqueue children for BFS traversal
         if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
-            for child in calls {
-                if let Some(result) = walk(child, target) {
-                    return Some(result);
-                }
+            for c in calls {
+                queue.push_back(c);
             }
         }
-        None
     }
 
-    walk(trace, &dest_hex_lower)
+    None
 }
 
 /// Simulate an L1->L2 call on L2 to capture the actual return data.
@@ -3118,34 +3126,104 @@ async fn trace_and_detect_internal_calls(
                     };
                     let ccm_hex = format!("{cross_chain_manager_address}");
 
+                    // INCREMENTAL LEVEL-BY-LEVEL ENRICHMENT
+                    //
+                    // Process one reentrant level at a time (innermost first).
+                    // At each level:
+                    //   1. Run L1 trace → extract child delivery return for THIS level
+                    //   2. Update detected_calls with child delivery return
+                    //   3. Rebuild ALL entries (entries now have correct hashes for inner levels)
+                    //   4. Run L2 sim → extract parent l2_return for THIS level
+                    //   5. Update detected_calls with parent l2_return
+                    // After all levels: detected_calls has correct return data for everything.
+                    //
+                    // Why incremental? Each level's L2 simulation needs correct RESULT
+                    // hashes from ALL inner levels. These hashes depend on both the
+                    // l2_return (from L2 sim) and delivery_return (from L1 trace) of
+                    // inner calls. Single-pass fails because the dependencies are circular
+                    // within a level but linear BETWEEN levels.
+
                     if !sys_addr_str.is_empty() {
+                        // reentrant_parents are already in bottom-up order (innermost first).
+                        // The leaf call (no children) is NOT in reentrant_parents.
+                        // root_indices has ALL root calls in reverse (innermost first).
+
+                        // Process each reentrant parent level-by-level.
                         for &idx in &root_indices {
+                            let has_children = detected_calls.iter().any(|other| {
+                                other.parent_call_index == Some(idx)
+                            });
+                            if !has_children || !detected_calls[idx].return_data.is_empty() {
+                                continue; // Leaf or already enriched.
+                            }
+
+                            // Find this parent's L2→L1 child.
+                            let child_idx = match detected_calls.iter().position(|c| {
+                                c.parent_call_index == Some(idx)
+                            }) {
+                                Some(ci) => ci,
+                                None => continue,
+                            };
+
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                level_parent = idx,
+                                level_child = child_idx,
+                                "post-convergence: processing reentrant level"
+                            );
+
+                            // STEP A: Run L1 trace to extract child delivery return.
+                            // The L1 entries are rebuilt from current detected_calls state.
+                            // Inner levels are already correct → their entries have correct
+                            // RESULT hashes → scope navigation succeeds for this child.
+                            if let Some((user_trace, _resp)) = build_and_run_l1_postbatch_trace(
+                                client,
+                                l1_rpc_url,
+                                rollups_address,
+                                rollup_id,
+                                &builder_key,
+                                &detected_calls,
+                                from,
+                                to,
+                                data,
+                                value,
+                                &format!("post-convergence-l1-level-{idx}"),
+                            )
+                            .await
+                            {
+                                let child_dest = detected_calls[child_idx].destination;
+                                let delivery_data = extract_delivery_return_from_l1_trace(
+                                    &user_trace,
+                                    child_dest,
+                                    rollups_address,
+                                );
+
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    child_idx,
+                                    dest = %child_dest,
+                                    delivery_len = delivery_data.len(),
+                                    delivery_hex = %if delivery_data.is_empty() {
+                                        "0x".to_string()
+                                    } else {
+                                        format!("0x{}", hex::encode(&delivery_data[..delivery_data.len().min(32)]))
+                                    },
+                                    "post-convergence: extracted child delivery return from L1 trace"
+                                );
+
+                                if !delivery_data.is_empty() {
+                                    detected_calls[child_idx].return_data = delivery_data;
+                                    detected_calls[child_idx].call_success = true;
+                                }
+                            }
+
+                            // STEP B: Rebuild L2 entries with updated child delivery return,
+                            // then run L2 sim for the parent.
                             let call_destination = detected_calls[idx].destination;
                             let call_calldata = detected_calls[idx].calldata.clone();
                             let call_value = detected_calls[idx].value;
                             let call_source = detected_calls[idx].source_address;
-                            let call_return_data = detected_calls[idx].return_data.clone();
 
-                            // Check if this call needs re-enrichment.
-                            let has_children = detected_calls.iter().any(|other| {
-                                other.parent_call_index == Some(idx)
-                            });
-
-                            if !has_children || !call_return_data.is_empty() {
-                                // Leaf call or already enriched — skip.
-                                continue;
-                            }
-
-                            tracing::info!(
-                                target: "based_rollup::l1_proxy",
-                                idx,
-                                dest = %call_destination,
-                                "post-convergence: re-simulating L1→L2 call via full L2 table"
-                            );
-
-                            // Build full L2 continuation entries from current detected_calls state.
-                            // Inner calls' return_data is already correct (processed earlier in
-                            // the bottom-up order), so their RESULT hashes are correct.
                             let l1_detected: Vec<crate::table_builder::L1DetectedCall> = detected_calls
                                 .iter()
                                 .map(|c| crate::table_builder::L1DetectedCall {
@@ -3176,9 +3254,6 @@ async fn trace_and_detect_internal_calls(
                                 &analyzed,
                                 alloy_primitives::U256::from(rollup_id),
                             );
-
-                            // Clear state deltas so the CCM's _findAndApplyExecution
-                            // matches on actionHash only (no currentState check).
                             let mut l2_entries = cont.l2_entries;
                             for e in &mut l2_entries {
                                 e.state_deltas.clear();
@@ -3188,17 +3263,9 @@ async fn trace_and_detect_internal_calls(
                                 target: "based_rollup::l1_proxy",
                                 idx,
                                 l2_entry_count = l2_entries.len(),
-                                "post-convergence: built L2 continuation entries for full-table simulation"
+                                "post-convergence: L2 sim with rebuilt entries"
                             );
-                            for (ei, e) in l2_entries.iter().enumerate() {
-                                tracing::info!(
-                                    target: "based_rollup::l1_proxy",
-                                    "  l2_entry[{}]: action_hash={} next_type={:?} next_data_len={}",
-                                    ei, e.action_hash, e.next_action.action_type, e.next_action.data.len()
-                                );
-                            }
 
-                            // Build executeIncomingCrossChainCall calldata for this call.
                             let sim_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Call,
                                 rollup_id: U256::from(rollup_id),
@@ -3214,7 +3281,6 @@ async fn trace_and_detect_internal_calls(
                                 &sim_action,
                             );
 
-                            // Run L2 simulation: loadExecutionTable(l2_entries) + executeIncomingCrossChainCall
                             let sim_result = run_l2_sim_bundle(
                                 client,
                                 l2_rpc_url,
@@ -3226,18 +3292,30 @@ async fn trace_and_detect_internal_calls(
                             )
                             .await;
 
-                            if let Some((trace, _success)) = sim_result {
-                                // Extract the REAL return data from the inner destination call.
-                                // The outer executeIncomingCrossChainCall may revert (if the
-                                // terminal RESULT hash doesn't match), but the inner
-                                // destination call should succeed through scope navigation.
-                                let ret_data = extract_inner_destination_return_data(
-                                    &trace, call_destination,
-                                ).unwrap_or_default();
-
-                                let inner_success = destination_call_succeeded_in_trace(
-                                    &trace, call_destination,
-                                );
+                            if let Some((trace, success)) = sim_result {
+                                // When simulation succeeded: the top-level output of
+                                // executeIncomingCrossChainCall IS the final return data,
+                                // ABI-encoded as `bytes memory` (offset+len+data).
+                                // When reverted: fall back to inner destination extraction.
+                                let (ret_data, inner_success) = if success {
+                                    let raw = extract_return_data_from_trace(&trace);
+                                    // Decode ABI `bytes memory`: offset(32) + len(32) + data
+                                    let decoded = if raw.len() >= 64 {
+                                        let dlen = U256::from_be_slice(&raw[32..64]).to::<usize>();
+                                        raw[64..64 + dlen.min(raw.len() - 64)].to_vec()
+                                    } else {
+                                        raw
+                                    };
+                                    (decoded, true)
+                                } else {
+                                    let inner = extract_inner_destination_return_data(
+                                        &trace, call_destination,
+                                    ).unwrap_or_default();
+                                    let ok = destination_call_succeeded_in_trace(
+                                        &trace, call_destination,
+                                    );
+                                    (inner, ok)
+                                };
 
                                 tracing::info!(
                                     target: "based_rollup::l1_proxy",
@@ -3245,89 +3323,18 @@ async fn trace_and_detect_internal_calls(
                                     dest = %call_destination,
                                     ret_data_len = ret_data.len(),
                                     inner_success,
+                                    sim_success = success,
                                     ret_data_hex = %if ret_data.is_empty() {
                                         "0x".to_string()
                                     } else {
                                         format!("0x{}", hex::encode(&ret_data[..ret_data.len().min(32)]))
                                     },
-                                    "post-convergence: L2 full-table simulation result"
+                                    "post-convergence: L2 sim result for parent"
                                 );
 
                                 if inner_success || !ret_data.is_empty() {
                                     detected_calls[idx].return_data = ret_data;
                                     detected_calls[idx].call_success = inner_success;
-                                }
-                            } else {
-                                tracing::warn!(
-                                    target: "based_rollup::l1_proxy",
-                                    idx,
-                                    dest = %call_destination,
-                                    "post-convergence: L2 full-table simulation failed"
-                                );
-                            }
-                        }
-                    }
-
-                    // Step 3: Re-run L1 trace with enriched entries to extract
-                    // delivery return data for L2→L1 children.
-                    //
-                    // After Step 2, L1→L2 root calls have correct l2_return_data.
-                    // Now build_continuation_entries will produce entries with
-                    // correct RESULT hashes. Running one more L1 trace lets the
-                    // children execute via executeOnBehalf, producing delivery returns.
-                    let child_indices: Vec<usize> = detected_calls
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, c)| c.parent_call_index.is_some() && c.target_rollup_id == 0)
-                        .map(|(i, _)| i)
-                        .collect();
-
-                    if !child_indices.is_empty() {
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            child_count = child_indices.len(),
-                            "post-convergence: running final L1 trace to extract delivery returns for L2→L1 children"
-                        );
-
-                        if let Some((user_trace, _resp)) = build_and_run_l1_postbatch_trace(
-                            client,
-                            l1_rpc_url,
-                            rollups_address,
-                            rollup_id,
-                            &builder_key,
-                            &detected_calls,
-                            from,
-                            to,
-                            data,
-                            value,
-                            "post-convergence-l1",
-                        )
-                        .await
-                        {
-                            // Extract delivery return data for each L2→L1 child
-                            // from the L1 trace.
-                            for &child_idx in &child_indices {
-                                let child = &detected_calls[child_idx];
-                                let delivery_data = extract_delivery_return_from_l1_trace(
-                                    &user_trace,
-                                    child.destination,
-                                    rollups_address,
-                                );
-                                if !delivery_data.is_empty() || child.return_data.is_empty() {
-                                    tracing::info!(
-                                        target: "based_rollup::l1_proxy",
-                                        child_idx,
-                                        dest = %child.destination,
-                                        old_len = child.return_data.len(),
-                                        new_len = delivery_data.len(),
-                                        new_hex = %if delivery_data.is_empty() {
-                                            "0x".to_string()
-                                        } else {
-                                            format!("0x{}", hex::encode(&delivery_data[..delivery_data.len().min(32)]))
-                                        },
-                                        "post-convergence: updated L2→L1 child delivery return data"
-                                    );
-                                    detected_calls[child_idx].return_data = delivery_data;
                                 }
                             }
                         }
