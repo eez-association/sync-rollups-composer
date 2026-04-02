@@ -309,7 +309,27 @@ pub fn build_continuation_entries(
                 child.call_action.source_address,
                 child.delivery_return_data.len()
             );
-            let child_next = if child.delivery_return_data.is_empty() && !child.l2_delivery_failed {
+            // For reentrant children: if there's a NEXT L1→L2 call after this
+            // parent (i.e., the reentrant chain continues deeper), the child's
+            // nextAction should be CALL(L2, nextLevel, scope=[0]) — not RESULT.
+            // This enables scope navigation to execute the next level on L2.
+            //
+            // For leaf children (no deeper level): nextAction = RESULT(delivery_data).
+            let child_next = if !is_last_l1_to_l2 {
+                // Reentrant: next L1→L2 call exists → CALL with scope navigation
+                let next_l1_to_l2 = l1_to_l2_calls[pos + 1].1;
+                CrossChainAction {
+                    action_type: CrossChainActionType::Call,
+                    rollup_id: our_rollup_id,  // L2 — the next call targets our rollup
+                    destination: next_l1_to_l2.call_action.destination,
+                    value: next_l1_to_l2.call_action.value,
+                    data: next_l1_to_l2.call_action.data.clone(),
+                    failed: false,
+                    source_address: next_l1_to_l2.call_action.source_address,
+                    source_rollup: mainnet_rollup_id, // source = L1
+                    scope: vec![U256::ZERO], // scope=[0] for single-level scope navigation
+                }
+            } else if child.delivery_return_data.is_empty() && !child.l2_delivery_failed {
                 l1_result_void.clone()
             } else {
                 CrossChainAction {
