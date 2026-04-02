@@ -2077,30 +2077,63 @@ fn extract_delivery_return_from_l1_trace(
     child_dest: Address,
     rollups_address: Address,
 ) -> Vec<u8> {
-    let dest_lower = format!("{child_dest}").to_lowercase();
-    let rollups_lower = format!("{rollups_address}").to_lowercase();
+    extract_delivery_return_from_l1_trace_with_calldata(
+        user_trace,
+        child_dest,
+        rollups_address,
+        None,
+    )
+}
 
-    // Walk trace recursively looking for the delivery path.
-    // The L1 execution path is:
-    //   user tx → proxy.call → Rollups.executeCrossChainCall → newScope →
-    //     sourceProxy.executeOnBehalf(dest, data) → dest.call(data)
-    //
-    // We want the output of the innermost call to dest_lower that succeeds.
-    fn find_delivery_output(node: &Value, target_dest: &str, _rollups: &str) -> Option<Vec<u8>> {
+/// Extract delivery return for a specific child, optionally matching by calldata.
+/// When `child_calldata` is Some, the call must match both destination AND input
+/// (selector + args). This distinguishes deepCall(3) from deepCall(1) when both
+/// target the same contract.
+fn extract_delivery_return_from_l1_trace_with_calldata(
+    user_trace: &Value,
+    child_dest: Address,
+    _rollups_address: Address,
+    child_calldata: Option<&[u8]>,
+) -> Vec<u8> {
+    let dest_lower = format!("{child_dest}").to_lowercase();
+    let calldata_hex = child_calldata.map(|cd| format!("0x{}", hex::encode(cd)).to_lowercase());
+
+    fn find_delivery_output(
+        node: &Value,
+        target_dest: &str,
+        calldata_hex: &Option<String>,
+    ) -> Option<Vec<u8>> {
         if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
             for child in calls {
                 let to = child.get("to").and_then(|v| v.as_str()).unwrap_or("");
                 let has_error = child.get("error").is_some();
 
-                // Check if this call targets our destination and succeeded
                 if to.to_lowercase() == target_dest && !has_error {
+                    // If calldata matching requested, verify the input matches.
+                    if let Some(expected_cd) = calldata_hex {
+                        let input = child
+                            .get("input")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0x")
+                            .to_lowercase();
+                        if !input.starts_with(expected_cd.as_str()) {
+                            // Wrong call (different selector/args) — skip, continue search
+                            if let Some(result) =
+                                find_delivery_output(child, target_dest, calldata_hex)
+                            {
+                                return Some(result);
+                            }
+                            continue;
+                        }
+                    }
+
                     let output = child.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
                     let hex = output.strip_prefix("0x").unwrap_or(output);
                     return Some(hex::decode(hex).unwrap_or_default());
                 }
 
                 // Recurse into children
-                if let Some(result) = find_delivery_output(child, target_dest, _rollups) {
+                if let Some(result) = find_delivery_output(child, target_dest, calldata_hex) {
                     return Some(result);
                 }
             }
@@ -2108,7 +2141,7 @@ fn extract_delivery_return_from_l1_trace(
         None
     }
 
-    find_delivery_output(user_trace, &dest_lower, &rollups_lower).unwrap_or_default()
+    find_delivery_output(user_trace, &dest_lower, &calldata_hex).unwrap_or_default()
 }
 
 /// Trace a transaction using `debug_traceCall` with `callTracer` and detect
@@ -3117,10 +3150,11 @@ async fn trace_and_detect_internal_calls(
                             let child = &detected_calls[ci];
                             // Only update if current data is stale (error selector = 4 bytes)
                             if child.return_data.len() <= 4 || !child.call_success {
-                                let delivery = extract_delivery_return_from_l1_trace(
+                                let delivery = extract_delivery_return_from_l1_trace_with_calldata(
                                     saved_trace,
                                     child.destination,
                                     rollups_address,
+                                    Some(&child.calldata),
                                 );
                                 if !delivery.is_empty() {
                                     tracing::info!(
@@ -3259,10 +3293,12 @@ async fn trace_and_detect_internal_calls(
                             .await
                             {
                                 let child_dest = detected_calls[child_idx].destination;
-                                let delivery_data = extract_delivery_return_from_l1_trace(
+                                let child_cd = detected_calls[child_idx].calldata.clone();
+                                let delivery_data = extract_delivery_return_from_l1_trace_with_calldata(
                                     &user_trace,
                                     child_dest,
                                     rollups_address,
+                                    Some(&child_cd),
                                 );
 
                                 tracing::info!(
