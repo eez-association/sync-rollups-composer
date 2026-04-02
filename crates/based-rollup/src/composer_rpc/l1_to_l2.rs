@@ -3128,9 +3128,20 @@ async fn trace_and_detect_internal_calls(
                 };
 
                 if needs_enrichment {
+                    // Determine if pattern is reentrant (varying L1 trace depth)
+                    // or continuation (all L1→L2 calls at same depth).
+                    // Same logic as build_continuation_entries in table_builder.rs.
+                    let root_calls: Vec<&DetectedInternalCall> = detected_calls.iter()
+                        .filter(|c| c.parent_call_index.is_none())
+                        .collect();
+                    let first_depth = root_calls.first().map(|c| c.trace_depth).unwrap_or(0);
+                    let is_reentrant_pattern = root_calls.len() > 1
+                        && root_calls.iter().any(|c| c.trace_depth != first_depth);
+
                     tracing::info!(
                         target: "based_rollup::l1_proxy",
                         total_calls = detected_calls.len(),
+                        is_reentrant_pattern,
                         "post-convergence: re-enriching intermediate L1→L2 calls bottom-up"
                     );
 
@@ -3548,9 +3559,24 @@ async fn trace_and_detect_internal_calls(
                                     "post-convergence: L2 sim result for parent"
                                 );
 
-                                if inner_success || !ret_data.is_empty() {
-                                    detected_calls[idx].return_data = ret_data;
-                                    detected_calls[idx].call_success = inner_success;
+                                // For reentrant patterns: update return data (deepCall returns
+                                // incrementing values needed for result propagation entries).
+                                // For continuation patterns with children: DON'T update.
+                                // The L2 sim returns scope-chain-resolved data (e.g., CounterL1's
+                                // return propagated back) but the parent (CAP2) returns void.
+                                // Overwriting with sim data corrupts the resolution_terminal entry.
+                                let has_children = detected_calls.iter().any(|c| c.parent_call_index == Some(idx));
+                                if is_reentrant_pattern || !has_children {
+                                    if inner_success || !ret_data.is_empty() {
+                                        detected_calls[idx].return_data = ret_data;
+                                        detected_calls[idx].call_success = inner_success;
+                                    }
+                                } else {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        idx,
+                                        "post-convergence: skipping L2 return update for continuation parent with children (returns void)"
+                                    );
                                 }
                             }
                         }
