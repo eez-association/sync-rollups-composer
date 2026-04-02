@@ -1740,6 +1740,369 @@ async fn walk_l1_trace_generic(
         .collect()
 }
 
+/// Build L1 execution entries from detected calls and run a `debug_traceCallMany`
+/// bundle on L1: `[postBatch(entries), userTx]`. Returns the user tx trace (bundle[0][1])
+/// and the full JSON-RPC response, or `None` on failure.
+///
+/// This encapsulates the entry-building, proof-signing, and traceCallMany execution
+/// that is shared between the iterative discovery loop and the post-convergence
+/// enrichment pass. Callers provide `label` for log attribution.
+#[allow(clippy::too_many_arguments)]
+async fn build_and_run_l1_postbatch_trace(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    rollups_address: Address,
+    rollup_id: u64,
+    builder_key: &alloy_signer_local::PrivateKeySigner,
+    detected_calls: &[DetectedInternalCall],
+    user_from: &str,
+    user_to: &str,
+    user_data: &str,
+    user_value: &str,
+    label: &str,
+) -> Option<(Value, Value)> {
+    // Build L1DetectedCall entries from known calls
+    let l1_detected: Vec<crate::table_builder::L1DetectedCall> = detected_calls
+        .iter()
+        .map(|c| crate::table_builder::L1DetectedCall {
+            destination: c.destination,
+            data: c.calldata.clone(),
+            value: c.value,
+            source_address: c.source_address,
+            l2_return_data: c.return_data.clone(),
+            call_success: c.call_success,
+            parent_call_index: c.parent_call_index,
+            target_rollup_id: if c.parent_call_index.is_some()
+                && c.target_rollup_id == 0
+            {
+                Some(0)
+            } else {
+                None
+            },
+            scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
+        })
+        .collect();
+
+    let analyzed =
+        crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
+
+    // Log the call tree
+    tracing::info!(
+        target: "based_rollup::l1_proxy",
+        "({label}) call tree: {} calls, {} analyzed", detected_calls.len(), analyzed.len()
+    );
+    for (i, c) in detected_calls.iter().enumerate() {
+        let sel = if c.calldata.len() >= 4 {
+            format!("0x{}", hex::encode(&c.calldata[..4]))
+        } else {
+            "0x".to_string()
+        };
+        tracing::info!(
+            target: "based_rollup::l1_proxy",
+            "  ({label}) CALL[{}]: dest={} src={} sel={} ret_len={} parent={:?}",
+            i, c.destination, c.source_address, sel, c.return_data.len(), c.parent_call_index
+        );
+    }
+
+    for (i, a) in analyzed.iter().enumerate() {
+        tracing::info!(
+            target: "based_rollup::l1_proxy",
+            label, i,
+            direction = ?a.direction,
+            is_continuation = a.is_continuation,
+            parent = ?a.parent_call_index,
+            depth = a.depth,
+            dest = %a.call_action.destination,
+            scope_len = a.scope.len(),
+            delivery_data_len = a.delivery_return_data.len(),
+            l2_return_data_len = a.l2_return_data.len(),
+            "analyzed call"
+        );
+    }
+
+    let entries = if analyzed.is_empty() {
+        // Fallback: build simple CALL+RESULT pairs, then convert to L1 format.
+        let l2_pairs: Vec<_> = l1_detected
+            .iter()
+            .flat_map(|c| {
+                let (call_entry, result_entry) =
+                    crate::cross_chain::build_cross_chain_call_entries(
+                        alloy_primitives::U256::from(rollup_id),
+                        c.destination,
+                        c.data.clone(),
+                        c.value,
+                        c.source_address,
+                        alloy_primitives::U256::ZERO,
+                        c.call_success,
+                        c.l2_return_data.clone(),
+                    );
+                vec![call_entry, result_entry]
+            })
+            .collect();
+        crate::cross_chain::convert_pairs_to_l1_entries(&l2_pairs)
+    } else {
+        let cont = crate::table_builder::build_continuation_entries(
+            &analyzed,
+            alloy_primitives::U256::from(rollup_id),
+        );
+        tracing::info!(
+            target: "based_rollup::l1_proxy",
+            l2_entries = cont.l2_entries.len(),
+            l1_entries = cont.l1_entries.len(),
+            "({label}) built continuation entries"
+        );
+        cont.l1_entries
+    };
+
+    // Log entries
+    for (idx, e) in entries.iter().enumerate() {
+        tracing::info!(
+            target: "based_rollup::l1_proxy",
+            label, idx,
+            action_hash = %e.action_hash,
+            next_type = ?e.next_action.action_type,
+            next_dest = %e.next_action.destination,
+            next_scope_len = e.next_action.scope.len(),
+            next_data_len = e.next_action.data.len(),
+            "L1 entry for postBatch simulation"
+        );
+    }
+
+    // Clear state deltas for simulation-only entries.
+    // build_continuation_entries produces entries with placeholder
+    // currentState=0x0 / newState=0x0. Clear deltas so
+    // _findAndApplyExecution's allMatch stays true.
+    let mut entries = entries;
+    for e in &mut entries {
+        e.state_deltas.clear();
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    // Get L1 block context for proof signing.
+    let block_ctx = get_l1_block_context(client, l1_rpc_url).await;
+    let (block_number, block_hash, _parent_hash) = match block_ctx {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            tracing::warn!(target: "based_rollup::l1_proxy", %e, "({label}) failed to get L1 block context");
+            return None;
+        }
+    };
+
+    // Get verification key from Rollups contract
+    let vk = match get_verification_key(
+        client,
+        l1_rpc_url,
+        rollups_address,
+        rollup_id,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(target: "based_rollup::l1_proxy", %e, "({label}) failed to get verification key");
+            return None;
+        }
+    };
+
+    // Sign ECDSA proof for postBatch in traceCallMany context.
+    let trace_parent_hash = block_hash;
+    let trace_block_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let call_data_bytes = alloy_primitives::Bytes::new();
+    let entry_hashes = crate::cross_chain::compute_entry_hashes(&entries, vk);
+    let public_inputs_hash = crate::cross_chain::compute_public_inputs_hash(
+        &entry_hashes,
+        &call_data_bytes,
+        trace_parent_hash,
+        trace_block_timestamp,
+    );
+
+    use alloy_signer::SignerSync;
+    let sig = match builder_key.sign_hash_sync(&public_inputs_hash) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(target: "based_rollup::l1_proxy", %e, "({label}) failed to sign proof");
+            return None;
+        }
+    };
+    let sig_bytes = sig.as_bytes();
+    let mut proof_bytes = sig_bytes.to_vec();
+    if proof_bytes.len() == 65 && proof_bytes[64] < 27 {
+        proof_bytes[64] += 27;
+    }
+    let proof = alloy_primitives::Bytes::from(proof_bytes);
+
+    // Encode postBatch calldata
+    let post_batch_calldata = crate::cross_chain::encode_post_batch_calldata(
+        &entries,
+        call_data_bytes,
+        proof,
+    );
+
+    // Build traceCallMany request: [postBatch, userTx] in a single bundle
+    let builder_addr = format!("{}", builder_key.address());
+    let rollups_hex = format!("{rollups_address}");
+    let post_batch_data =
+        format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
+
+    let next_block = format!("{:#x}", block_number + 1);
+    let trace_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "debug_traceCallMany",
+        "params": [
+            [
+                {
+                    "transactions": [
+                        {
+                            "from": builder_addr,
+                            "to": rollups_hex,
+                            "data": post_batch_data,
+                            "gas": "0x1c9c380"
+                        },
+                        {
+                            "from": user_from,
+                            "to": user_to,
+                            "data": user_data,
+                            "value": user_value,
+                            "gas": "0x2faf080"
+                        }
+                    ],
+                    "blockOverride": {
+                        "number": next_block,
+                        "time": format!("{:#x}", trace_block_timestamp)
+                    }
+                }
+            ],
+            null,
+            { "tracer": "callTracer" }
+        ],
+        "id": 3
+    });
+
+    let resp = match client.post(l1_rpc_url).json(&trace_req).send().await {
+        Ok(r) => match r.json::<Value>().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(target: "based_rollup::l1_proxy", %e, "({label}) traceCallMany response parse failed");
+                return None;
+            }
+        },
+        Err(e) => {
+            tracing::warn!(target: "based_rollup::l1_proxy", %e, "({label}) traceCallMany request failed");
+            return None;
+        }
+    };
+
+    // Extract traces from result.
+    let bundle_traces = match resp
+        .get("result")
+        .and_then(|r| r.get(0))
+        .and_then(|b| b.as_array())
+    {
+        Some(arr) if arr.len() >= 2 => arr,
+        _ => {
+            if let Some(error) = resp.get("error") {
+                tracing::warn!(
+                    target: "based_rollup::l1_proxy",
+                    ?error,
+                    "({label}) traceCallMany returned error"
+                );
+            } else {
+                tracing::warn!(
+                    target: "based_rollup::l1_proxy",
+                    "({label}) traceCallMany returned unexpected structure"
+                );
+            }
+            return None;
+        }
+    };
+
+    // Check if postBatch succeeded
+    let tx1_trace = &bundle_traces[0];
+    if tx1_trace.get("error").is_some() || tx1_trace.get("revertReason").is_some() {
+        let error_msg = tx1_trace
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let revert_reason = tx1_trace
+            .get("revertReason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        let output = tx1_trace
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        tracing::warn!(
+            target: "based_rollup::l1_proxy",
+            error = error_msg,
+            revert_reason,
+            output,
+            "({label}) postBatch reverted in traceCallMany — entries may be invalid"
+        );
+        // Still return the user tx trace — caller may need partial results
+    }
+
+    let user_trace = bundle_traces[1].clone();
+    Some((user_trace, resp))
+}
+
+/// Extract delivery return data from an L1 trace for a specific L2→L1 child call.
+///
+/// In the 5-hop reentrant pattern, L2→L1 children execute on L1 via:
+///   Rollups.executeCrossChainCall → proxy.executeOnBehalf → destination.call
+///
+/// The L1 trace shows these as nested calls. This function walks the trace
+/// looking for a call to the child's destination address that succeeds, and
+/// extracts its return data. If the call is mediated by a proxy's
+/// `executeOnBehalf`, the proxy's output IS the inner call's return data
+/// (assembly return in executeOnBehalf).
+///
+/// Returns the delivery return data (empty vec if not found).
+fn extract_delivery_return_from_l1_trace(
+    user_trace: &Value,
+    child_dest: Address,
+    rollups_address: Address,
+) -> Vec<u8> {
+    let dest_lower = format!("{child_dest}").to_lowercase();
+    let rollups_lower = format!("{rollups_address}").to_lowercase();
+
+    // Walk trace recursively looking for the delivery path.
+    // The L1 execution path is:
+    //   user tx → proxy.call → Rollups.executeCrossChainCall → newScope →
+    //     sourceProxy.executeOnBehalf(dest, data) → dest.call(data)
+    //
+    // We want the output of the innermost call to dest_lower that succeeds.
+    fn find_delivery_output(node: &Value, target_dest: &str, _rollups: &str) -> Option<Vec<u8>> {
+        if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+            for child in calls {
+                let to = child.get("to").and_then(|v| v.as_str()).unwrap_or("");
+                let has_error = child.get("error").is_some();
+
+                // Check if this call targets our destination and succeeded
+                if to.to_lowercase() == target_dest && !has_error {
+                    let output = child.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+                    let hex = output.strip_prefix("0x").unwrap_or(output);
+                    return Some(hex::decode(hex).unwrap_or_default());
+                }
+
+                // Recurse into children
+                if let Some(result) = find_delivery_output(child, target_dest, _rollups) {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
+    find_delivery_output(user_trace, &dest_lower, &rollups_lower).unwrap_or_default()
+}
+
 /// Trace a transaction using `debug_traceCall` with `callTracer` and detect
 /// all cross-chain proxy calls via the generic `trace::walk_trace_tree`.
 ///
@@ -2145,371 +2508,28 @@ async fn trace_and_detect_internal_calls(
                         "iterative discovery: traceCallMany with postBatch pre-loading"
                     );
 
-                    // Build L1DetectedCall entries from known calls
-                    let l1_detected: Vec<crate::table_builder::L1DetectedCall> = all_calls
-                        .iter()
-                        .map(|c| crate::table_builder::L1DetectedCall {
-                            destination: c.destination,
-                            data: c.calldata.clone(),
-                            value: c.value,
-                            source_address: c.source_address,
-                            l2_return_data: c.return_data.clone(),
-                            call_success: c.call_success,
-                            parent_call_index: c.parent_call_index,
-                            target_rollup_id: if c.parent_call_index.is_some()
-                                && c.target_rollup_id == 0
-                            {
-                                Some(0)
-                            } else {
-                                None
-                            },
-                            scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
-                        })
-                        .collect();
-
-                    let analyzed =
-                        crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
-
-                    // Log the call tree for debugging
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        "╔══ Iterative Discovery — Call Tree (iteration {}) ══",
-                        iteration
-                    );
-                    for (i, c) in all_calls.iter().enumerate() {
-                        let sel = if c.calldata.len() >= 4 {
-                            format!("0x{}", hex::encode(&c.calldata[..4]))
-                        } else {
-                            "0x".to_string()
-                        };
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            "║ CALL[{}]: dest={} src={} sel={} data_len={} value={}",
-                            i, c.destination, c.source_address, sel, c.calldata.len(), c.value
-                        );
-                    }
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        "╚══════════════════════════════════════════════════"
-                    );
-
-                    for (i, a) in analyzed.iter().enumerate() {
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            iteration, i,
-                            direction = ?a.direction,
-                            is_continuation = a.is_continuation,
-                            parent = ?a.parent_call_index,
-                            depth = a.depth,
-                            dest = %a.call_action.destination,
-                            scope_len = a.scope.len(),
-                            delivery_data_len = a.delivery_return_data.len(),
-                            l2_return_data_len = a.l2_return_data.len(),
-                            "iterative discovery: analyzed call"
-                        );
-                    }
-
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        iteration,
-                        analyzed_count = analyzed.len(),
-                        l1_detected_count = l1_detected.len(),
-                        "iterative discovery: building entries for postBatch simulation"
-                    );
-
-                    let entries = if analyzed.is_empty() {
-                        // Fallback: build simple CALL+RESULT pairs, then convert to L1 format.
-                        // L2 format: [CALL trigger, RESULT table entry] per call
-                        // L1 format: single entry with actionHash=hash(CALL), nextAction=RESULT
-                        // Without convert_pairs_to_l1_entries, Rollups.sol would see
-                        // nextAction=CALL and enter newScope(), causing InvalidRevertData.
-                        let l2_pairs: Vec<_> = l1_detected
-                            .iter()
-                            .flat_map(|c| {
-                                let (call_entry, result_entry) =
-                                    crate::cross_chain::build_cross_chain_call_entries(
-                                        alloy_primitives::U256::from(rollup_id),
-                                        c.destination,
-                                        c.data.clone(),
-                                        c.value,
-                                        c.source_address,
-                                        alloy_primitives::U256::ZERO, // source_rollup = L1 = 0
-                                        c.call_success,
-                                        c.l2_return_data.clone(),
-                                    );
-                                vec![call_entry, result_entry]
-                            })
-                            .collect();
-                        let l1_entries = crate::cross_chain::convert_pairs_to_l1_entries(&l2_pairs);
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            l2_pairs = l2_pairs.len(),
-                            l1_entries = l1_entries.len(),
-                            "built L1 entries from simple CALL+RESULT pairs"
-                        );
-                        l1_entries
-                    } else {
-                        let cont = crate::table_builder::build_continuation_entries(
-                            &analyzed,
-                            alloy_primitives::U256::from(rollup_id),
-                        );
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            l2_entries = cont.l2_entries.len(),
-                            l1_entries = cont.l1_entries.len(),
-                            "built continuation entries"
-                        );
-                        // For traceCallMany we need L1 entries (posted via postBatch)
-                        cont.l1_entries
-                    };
-
-                    // Log each entry for traceability
-                    for (idx, e) in entries.iter().enumerate() {
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            iteration, idx,
-                            action_hash = %e.action_hash,
-                            next_type = ?e.next_action.action_type,
-                            next_dest = %e.next_action.destination,
-                            next_scope_len = e.next_action.scope.len(),
-                            next_data_len = e.next_action.data.len(),
-                            "iterative discovery: L1 entry for postBatch simulation"
-                        );
-                    }
-
-                    // Clear state deltas for simulation-only entries.
-                    // build_continuation_entries produces entries with placeholder
-                    // currentState=0x0 / newState=0x0 (to be filled by the driver
-                    // with real intermediate roots before the actual postBatch).
-                    // In the traceCallMany discovery loop, these entries are used
-                    // directly — Rollups.sol._findAndApplyExecution checks
-                    // `rollups[delta.rollupId].stateRoot != delta.currentState`
-                    // and rejects entries whose currentState doesn't match the
-                    // on-chain state. With placeholder 0x0, the check ALWAYS fails
-                    // and ExecutionNotFound is returned, preventing the user tx
-                    // from succeeding and hiding subsequent cross-chain calls.
-                    //
-                    // Fix: clear state_deltas so _findAndApplyExecution's
-                    // allMatch stays true (no deltas to check → unconditional match).
-                    // This is safe because the simulation only cares about
-                    // entry consumption (actionHash matching), not state transitions.
-                    let mut entries = entries;
-                    for e in &mut entries {
-                        e.state_deltas.clear();
-                    }
-
-                    // Log entry details
-                    for (i, e) in entries.iter().enumerate() {
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            "  entry[{}]: action_hash={} next_action_type={:?} deltas={}",
-                            i, e.action_hash, e.next_action.action_type, e.state_deltas.len()
-                        );
-                    }
-
-                    if entries.is_empty() {
-                        break;
-                    }
-
-                    // Get L1 block context for proof signing.
-                    // traceCallMany runs at "latest" block context, so inside the EVM:
-                    //   block.number = latest_number
-                    //   blockhash(block.number - 1) = parent_hash of latest
-                    let block_ctx = get_l1_block_context(client, l1_rpc_url).await;
-                    let (block_number, _block_hash, _parent_hash) = match block_ctx {
-                        Ok(ctx) => ctx,
-                        Err(e) => {
-                            tracing::warn!(target: "based_rollup::l1_proxy", %e, "failed to get L1 block context");
-                            break;
-                        }
-                    };
-
-                    // Get verification key from Rollups contract
-                    let vk = match get_verification_key(
+                    // Build entries, sign proof, and run debug_traceCallMany
+                    // via the extracted helper function.
+                    let label = format!("iter-{iteration}");
+                    let trace_result = build_and_run_l1_postbatch_trace(
                         client,
                         l1_rpc_url,
                         rollups_address,
                         rollup_id,
+                        &builder_key,
+                        &all_calls,
+                        from,
+                        to,
+                        data,
+                        value,
+                        &label,
                     )
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(target: "based_rollup::l1_proxy", %e, "failed to get verification key");
-                            break;
-                        }
+                    .await;
+                    let (user_trace_owned, resp) = match trace_result {
+                        Some(t) => t,
+                        None => break,
                     };
-
-                    // Sign ECDSA proof for postBatch in traceCallMany context.
-                    // We use blockOverride { number: block_number + 1 } to avoid
-                    // StateAlreadyUpdatedThisBlock. Inside the EVM:
-                    //   block.number = block_number + 1
-                    //   blockhash(block.number - 1) = hash of latest block = _block_hash
-                    //   block.timestamp = predicted current time
-                    let trace_block_number = block_number + 1;
-                    let trace_parent_hash = _block_hash; // hash of latest = parent of simulated block
-                    // For traceCallMany simulation, we control the block timestamp via blockOverride.
-                    // Use current time — the override ensures consistency between signed proof and simulation.
-                    let trace_block_timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        trace_block_number,
-                        %trace_parent_hash,
-                        entry_count = entries.len(),
-                        "signing proof for traceCallMany postBatch"
-                    );
-
-                    let call_data_bytes = alloy_primitives::Bytes::new();
-                    let entry_hashes = crate::cross_chain::compute_entry_hashes(&entries, vk);
-                    let public_inputs_hash = crate::cross_chain::compute_public_inputs_hash(
-                        &entry_hashes,
-                        &call_data_bytes,
-                        trace_parent_hash,
-                        trace_block_timestamp,
-                    );
-
-                    use alloy_signer::SignerSync;
-                    let sig = match builder_key.sign_hash_sync(&public_inputs_hash) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(target: "based_rollup::l1_proxy", %e, "failed to sign proof");
-                            break;
-                        }
-                    };
-                    let sig_bytes = sig.as_bytes();
-                    let mut proof_bytes = sig_bytes.to_vec();
-                    if proof_bytes.len() == 65 && proof_bytes[64] < 27 {
-                        proof_bytes[64] += 27;
-                    }
-                    let proof = alloy_primitives::Bytes::from(proof_bytes);
-
-                    // Encode postBatch calldata
-                    let post_batch_calldata = crate::cross_chain::encode_post_batch_calldata(
-                        &entries,
-                        call_data_bytes,
-                        proof,
-                    );
-
-                    // Build traceCallMany request: [postBatch, userTx] in a single bundle
-                    let builder_addr = format!("{}", builder_key.address());
-                    let rollups_hex = format!("{rollups_address}");
-                    let post_batch_data =
-                        format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
-
-                    // reth's debug_traceCallMany format:
-                    // params: [bundles, stateContext?, tracingOptions?]
-                    // bundle: { transactions: [tx1, tx2, ...], blockOverride?: {...} }
-                    // Both txs in ONE bundle so state from tx1 (postBatch) is visible to tx2.
-                    //
-                    // blockOverride with number = block_number + 1 is critical:
-                    // Rollups.postBatch reverts with StateAlreadyUpdatedThisBlock if
-                    // lastStateUpdateBlock == block.number. Since the builder may have
-                    // already submitted in the current block, we simulate at block+1.
-                    let next_block = format!("{:#x}", block_number + 1);
-                    let trace_req = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "method": "debug_traceCallMany",
-                        "params": [
-                            [
-                                {
-                                    "transactions": [
-                                        {
-                                            "from": builder_addr,
-                                            "to": rollups_hex,
-                                            "data": post_batch_data,
-                                            "gas": "0x1c9c380"
-                                        },
-                                        {
-                                            "from": from,
-                                            "to": to,
-                                            "data": data,
-                                            "value": value,
-                                            "gas": "0x2faf080"
-                                        }
-                                    ],
-                                    "blockOverride": {
-                                        "number": next_block,
-                                        "time": format!("{:#x}", trace_block_timestamp)
-                                    }
-                                }
-                            ],
-                            null,
-                            { "tracer": "callTracer" }
-                        ],
-                        "id": 3
-                    });
-
-                    let resp = match client.post(l1_rpc_url).json(&trace_req).send().await {
-                        Ok(r) => match r.json::<Value>().await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!(target: "based_rollup::l1_proxy", %e, "traceCallMany response parse failed");
-                                break;
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(target: "based_rollup::l1_proxy", %e, "traceCallMany request failed");
-                            break;
-                        }
-                    };
-
-                    // Extract traces from result.
-                    // debug_traceCallMany returns Vec<Vec<GethTrace>>:
-                    //   result[bundle_idx][tx_idx]
-                    // We have 1 bundle with 2 txs: result[0][0]=postBatch, result[0][1]=userTx
-                    let bundle_traces = match resp
-                        .get("result")
-                        .and_then(|r| r.get(0))
-                        .and_then(|b| b.as_array())
-                    {
-                        Some(arr) if arr.len() >= 2 => arr,
-                        _ => {
-                            if let Some(error) = resp.get("error") {
-                                tracing::warn!(
-                                    target: "based_rollup::l1_proxy",
-                                    ?error,
-                                    "traceCallMany returned error"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    target: "based_rollup::l1_proxy",
-                                    "traceCallMany returned unexpected structure"
-                                );
-                            }
-                            break;
-                        }
-                    };
-
-                    // Check if postBatch succeeded (tx1 trace)
-                    let tx1_trace = &bundle_traces[0];
-                    if tx1_trace.get("error").is_some() || tx1_trace.get("revertReason").is_some() {
-                        let error_msg = tx1_trace
-                            .get("error")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        let revert_reason = tx1_trace
-                            .get("revertReason")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("none");
-                        let output = tx1_trace
-                            .get("output")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("none");
-                        tracing::warn!(
-                            target: "based_rollup::l1_proxy",
-                            error = error_msg,
-                            revert_reason,
-                            output,
-                            "postBatch reverted in traceCallMany — entries may be invalid"
-                        );
-                        // Still try to walk the user tx trace
-                    }
-
-                    let user_trace = &bundle_traces[1];
+                    let user_trace = &user_trace_owned;
 
                     // Log user tx trace status with decoded error
                     let user_error = user_trace
@@ -2537,10 +2557,18 @@ async fn trace_and_detect_internal_calls(
                     } else {
                         ""
                     };
+                    // Determine postBatch success from resp
+                    let postbatch_ok = resp
+                        .get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                        .and_then(|arr| arr.first())
+                        .map(|tx1| tx1.get("error").is_none())
+                        .unwrap_or(false);
                     tracing::info!(
                         target: "based_rollup::l1_proxy",
                         iteration,
-                        postbatch_ok = tx1_trace.get("error").is_none(),
+                        postbatch_ok,
                         user_ok = user_error == "none",
                         %decoded_error,
                         %inner_error,
@@ -2576,13 +2604,7 @@ async fn trace_and_detect_internal_calls(
                         );
                     }
 
-                    // Log full request/response for reproducibility.
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        iteration,
-                        request = %serde_json::to_string(&trace_req).unwrap_or_default(),
-                        "iterative discovery: L1 debug_traceCallMany REQUEST"
-                    );
+                    // Log response for reproducibility.
                     tracing::info!(
                         target: "based_rollup::l1_proxy",
                         iteration,
@@ -2990,6 +3012,339 @@ async fn trace_and_detect_internal_calls(
                         "iterative traceCallMany discovery found additional calls"
                     );
                     detected_calls = all_calls;
+                }
+
+                // ══════════════════════════════════════════════════════════
+                // Post-convergence bottom-up enrichment for reentrant patterns
+                // ══════════════════════════════════════════════════════════
+                //
+                // After the iterative discovery loop converges, intermediate
+                // L1→L2 calls in reentrant patterns (e.g., 5-hop
+                // L1→L2→L1→L2→L1→L2) may have empty/wrong return_data.
+                // This happens because:
+                //   (a) Line 2759-2768 overrides return_data to (vec![], true)
+                //       when a parent has children (the revert was from the
+                //       child's missing entry, not the function itself).
+                //   (b) Enrichment only processes NEW calls per iteration —
+                //       intermediates discovered early never get re-enriched
+                //       once their children are discovered.
+                //
+                // Fix: re-simulate L1→L2 root calls BOTTOM-UP (innermost
+                // first) so each level sees correct RESULT entries from
+                // inner levels. Then run one more L1 trace to extract
+                // delivery return data for L2→L1 children.
+                //
+                // This is a NO-OP when:
+                //   - There are no reentrant patterns (no call has children)
+                //   - All return_data is already correct
+
+                // Step 1: Check if re-enrichment is needed.
+                // A call needs re-enrichment if it is an L1→L2 root call
+                // (parent=None, target_rollup_id != 0) AND it has children
+                // (some other call has parent_call_index pointing to it) AND
+                // its return_data is empty.
+                let needs_enrichment = {
+                    let mut needed = false;
+                    for (i, c) in detected_calls.iter().enumerate() {
+                        if c.parent_call_index.is_none() && c.return_data.is_empty() {
+                            // Check if this call has children
+                            let has_children = detected_calls.iter().any(|other| {
+                                other.parent_call_index == Some(i)
+                            });
+                            if has_children {
+                                needed = true;
+                                break;
+                            }
+                        }
+                    }
+                    needed
+                };
+
+                if needs_enrichment {
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        total_calls = detected_calls.len(),
+                        "post-convergence: re-enriching intermediate L1→L2 calls bottom-up"
+                    );
+
+                    // Step 2: Bottom-up L2 enrichment via iterative full-table simulation.
+                    //
+                    // For reentrant patterns (e.g., 5-hop L1→L2→L1→L2→L1→L2), the
+                    // destination function on L2 makes cross-chain sub-calls that need
+                    // continuation entries in the L2 execution table. Simple RESULT-only
+                    // loading (as in simulate_l1_to_l2_call_chained_on_l2) won't work
+                    // because the sub-call's CALL entry and scope navigation entries
+                    // are missing — the sub-call reverts with ExecutionNotFound.
+                    //
+                    // Fix: build the FULL L2 continuation entries (via
+                    // build_continuation_entries) and load all of them into the L2
+                    // execution table. Process bottom-up: the innermost call's RESULT
+                    // hash is already correct (leaf, no sub-calls). After each level,
+                    // update return_data and rebuild entries so the next outer level
+                    // sees correct RESULT hashes for scope resolution.
+                    //
+                    // Collect L1→L2 root call indices in REVERSE order (innermost first).
+                    let root_indices: Vec<usize> = detected_calls
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.parent_call_index.is_none())
+                        .map(|(i, _)| i)
+                        .rev()
+                        .collect();
+
+                    // Get system address for L2 simulation.
+                    let sys_addr = {
+                        let sys_calldata = super::common::encode_system_address_calldata();
+                        let sys_result = super::common::eth_call_view(
+                            client,
+                            l2_rpc_url,
+                            cross_chain_manager_address,
+                            &sys_calldata,
+                        )
+                        .await;
+                        sys_result
+                            .and_then(|s| super::common::parse_address_from_abi_return(&s))
+                    };
+
+                    let sys_addr_str = match sys_addr {
+                        Some(a) => format!("{a}"),
+                        None => {
+                            tracing::warn!(
+                                target: "based_rollup::l1_proxy",
+                                "post-convergence: SYSTEM_ADDRESS query failed — skipping L2 enrichment"
+                            );
+                            String::new()
+                        }
+                    };
+                    let ccm_hex = format!("{cross_chain_manager_address}");
+
+                    if !sys_addr_str.is_empty() {
+                        for &idx in &root_indices {
+                            let call_destination = detected_calls[idx].destination;
+                            let call_calldata = detected_calls[idx].calldata.clone();
+                            let call_value = detected_calls[idx].value;
+                            let call_source = detected_calls[idx].source_address;
+                            let call_return_data = detected_calls[idx].return_data.clone();
+
+                            // Check if this call needs re-enrichment.
+                            let has_children = detected_calls.iter().any(|other| {
+                                other.parent_call_index == Some(idx)
+                            });
+
+                            if !has_children || !call_return_data.is_empty() {
+                                // Leaf call or already enriched — skip.
+                                continue;
+                            }
+
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                idx,
+                                dest = %call_destination,
+                                "post-convergence: re-simulating L1→L2 call via full L2 table"
+                            );
+
+                            // Build full L2 continuation entries from current detected_calls state.
+                            // Inner calls' return_data is already correct (processed earlier in
+                            // the bottom-up order), so their RESULT hashes are correct.
+                            let l1_detected: Vec<crate::table_builder::L1DetectedCall> = detected_calls
+                                .iter()
+                                .map(|c| crate::table_builder::L1DetectedCall {
+                                    destination: c.destination,
+                                    data: c.calldata.clone(),
+                                    value: c.value,
+                                    source_address: c.source_address,
+                                    l2_return_data: c.return_data.clone(),
+                                    call_success: c.call_success,
+                                    parent_call_index: c.parent_call_index,
+                                    target_rollup_id: if c.parent_call_index.is_some()
+                                        && c.target_rollup_id == 0
+                                    {
+                                        Some(0)
+                                    } else {
+                                        None
+                                    },
+                                    scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
+                                })
+                                .collect();
+                            let analyzed = crate::table_builder::analyze_continuation_calls(
+                                &l1_detected, rollup_id,
+                            );
+                            if analyzed.is_empty() {
+                                continue;
+                            }
+                            let cont = crate::table_builder::build_continuation_entries(
+                                &analyzed,
+                                alloy_primitives::U256::from(rollup_id),
+                            );
+
+                            // Clear state deltas so the CCM's _findAndApplyExecution
+                            // matches on actionHash only (no currentState check).
+                            let mut l2_entries = cont.l2_entries;
+                            for e in &mut l2_entries {
+                                e.state_deltas.clear();
+                            }
+
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                idx,
+                                l2_entry_count = l2_entries.len(),
+                                "post-convergence: built L2 continuation entries for full-table simulation"
+                            );
+                            for (ei, e) in l2_entries.iter().enumerate() {
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    "  l2_entry[{}]: action_hash={} next_type={:?} next_data_len={}",
+                                    ei, e.action_hash, e.next_action.action_type, e.next_action.data.len()
+                                );
+                            }
+
+                            // Build executeIncomingCrossChainCall calldata for this call.
+                            let sim_action = crate::cross_chain::CrossChainAction {
+                                action_type: crate::cross_chain::CrossChainActionType::Call,
+                                rollup_id: U256::from(rollup_id),
+                                destination: call_destination,
+                                value: call_value,
+                                data: call_calldata,
+                                failed: false,
+                                source_address: call_source,
+                                source_rollup: U256::ZERO,
+                                scope: vec![],
+                            };
+                            let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(
+                                &sim_action,
+                            );
+
+                            // Run L2 simulation: loadExecutionTable(l2_entries) + executeIncomingCrossChainCall
+                            let sim_result = run_l2_sim_bundle(
+                                client,
+                                l2_rpc_url,
+                                &sys_addr_str,
+                                &ccm_hex,
+                                &l2_entries,
+                                exec_calldata.as_ref(),
+                                call_value,
+                            )
+                            .await;
+
+                            if let Some((trace, _success)) = sim_result {
+                                // Extract the REAL return data from the inner destination call.
+                                // The outer executeIncomingCrossChainCall may revert (if the
+                                // terminal RESULT hash doesn't match), but the inner
+                                // destination call should succeed through scope navigation.
+                                let ret_data = extract_inner_destination_return_data(
+                                    &trace, call_destination,
+                                ).unwrap_or_default();
+
+                                let inner_success = destination_call_succeeded_in_trace(
+                                    &trace, call_destination,
+                                );
+
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    idx,
+                                    dest = %call_destination,
+                                    ret_data_len = ret_data.len(),
+                                    inner_success,
+                                    ret_data_hex = %if ret_data.is_empty() {
+                                        "0x".to_string()
+                                    } else {
+                                        format!("0x{}", hex::encode(&ret_data[..ret_data.len().min(32)]))
+                                    },
+                                    "post-convergence: L2 full-table simulation result"
+                                );
+
+                                if inner_success || !ret_data.is_empty() {
+                                    detected_calls[idx].return_data = ret_data;
+                                    detected_calls[idx].call_success = inner_success;
+                                }
+                            } else {
+                                tracing::warn!(
+                                    target: "based_rollup::l1_proxy",
+                                    idx,
+                                    dest = %call_destination,
+                                    "post-convergence: L2 full-table simulation failed"
+                                );
+                            }
+                        }
+                    }
+
+                    // Step 3: Re-run L1 trace with enriched entries to extract
+                    // delivery return data for L2→L1 children.
+                    //
+                    // After Step 2, L1→L2 root calls have correct l2_return_data.
+                    // Now build_continuation_entries will produce entries with
+                    // correct RESULT hashes. Running one more L1 trace lets the
+                    // children execute via executeOnBehalf, producing delivery returns.
+                    let child_indices: Vec<usize> = detected_calls
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.parent_call_index.is_some() && c.target_rollup_id == 0)
+                        .map(|(i, _)| i)
+                        .collect();
+
+                    if !child_indices.is_empty() {
+                        tracing::info!(
+                            target: "based_rollup::l1_proxy",
+                            child_count = child_indices.len(),
+                            "post-convergence: running final L1 trace to extract delivery returns for L2→L1 children"
+                        );
+
+                        if let Some((user_trace, _resp)) = build_and_run_l1_postbatch_trace(
+                            client,
+                            l1_rpc_url,
+                            rollups_address,
+                            rollup_id,
+                            &builder_key,
+                            &detected_calls,
+                            from,
+                            to,
+                            data,
+                            value,
+                            "post-convergence-l1",
+                        )
+                        .await
+                        {
+                            // Extract delivery return data for each L2→L1 child
+                            // from the L1 trace.
+                            for &child_idx in &child_indices {
+                                let child = &detected_calls[child_idx];
+                                let delivery_data = extract_delivery_return_from_l1_trace(
+                                    &user_trace,
+                                    child.destination,
+                                    rollups_address,
+                                );
+                                if !delivery_data.is_empty() || child.return_data.is_empty() {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        child_idx,
+                                        dest = %child.destination,
+                                        old_len = child.return_data.len(),
+                                        new_len = delivery_data.len(),
+                                        new_hex = %if delivery_data.is_empty() {
+                                            "0x".to_string()
+                                        } else {
+                                            format!("0x{}", hex::encode(&delivery_data[..delivery_data.len().min(32)]))
+                                        },
+                                        "post-convergence: updated L2→L1 child delivery return data"
+                                    );
+                                    detected_calls[child_idx].return_data = delivery_data;
+                                }
+                            }
+                        }
+                    }
+
+                    // Log final enriched state for traceability.
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        "post-convergence enrichment complete — final call state:"
+                    );
+                    for (i, c) in detected_calls.iter().enumerate() {
+                        tracing::info!(
+                            target: "based_rollup::l1_proxy",
+                            "  CALL[{}]: dest={} ret_len={} success={} parent={:?}",
+                            i, c.destination, c.return_data.len(), c.call_success, c.parent_call_index
+                        );
+                    }
                 }
             }
         }
