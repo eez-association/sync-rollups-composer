@@ -748,10 +748,19 @@ fn test_l2_to_l1_depth2_entry_generation() {
         "must have 3 RESULT(L1,void)-triggered entries"
     );
     // At least one must chain to CALL (the sibling chain), rest are RESULT
-    let call_count = entries_result.iter().filter(|e| e.next_action.action_type == CrossChainActionType::Call).count();
-    let result_count = entries_result.iter().filter(|e| e.next_action.action_type == CrossChainActionType::Result).count();
+    let call_count = entries_result
+        .iter()
+        .filter(|e| e.next_action.action_type == CrossChainActionType::Call)
+        .count();
+    let result_count = entries_result
+        .iter()
+        .filter(|e| e.next_action.action_type == CrossChainActionType::Result)
+        .count();
     assert_eq!(call_count, 1, "one RESULT entry chains to CALL(B)");
-    assert_eq!(result_count, 2, "two RESULT entries are terminal/scope resolution");
+    assert_eq!(
+        result_count, 2,
+        "two RESULT entries are terminal/scope resolution"
+    );
 
     // All entries must have empty state deltas (driver fills later).
     for (i, e) in result.l2_entries.iter().enumerate() {
@@ -1025,27 +1034,63 @@ fn test_l2_to_l1_depth1_regression() {
     // L1[0]: L2TX → CALL(A, scope=[])  — nested pattern, no sibling scope
     let l1_e0 = &result.l1_entries[0];
     assert_eq!(l1_e0.action_hash, l2tx_trigger_hash, "L1[0] trigger = L2TX");
-    assert_eq!(l1_e0.next_action.action_type, CrossChainActionType::Call, "L1[0] next = CALL");
-    assert_eq!(l1_e0.next_action.scope, vec![] as Vec<U256>, "L1[0] scope=[]");
+    assert_eq!(
+        l1_e0.next_action.action_type,
+        CrossChainActionType::Call,
+        "L1[0] next = CALL"
+    );
+    assert_eq!(
+        l1_e0.next_action.scope,
+        vec![] as Vec<U256>,
+        "L1[0] scope=[]"
+    );
     assert_eq!(l1_e0.next_action.destination, dest_a, "L1[0] dest = A");
 
     // L1[1]: RESULT(A,void) → CALL(B, scope=[])  (chained, nested pattern → no scope)
     let l1_e1 = &result.l1_entries[1];
-    assert_eq!(l1_e1.action_hash, l1_result_hash, "L1[1] trigger = RESULT(void)");
-    assert_eq!(l1_e1.next_action.action_type, CrossChainActionType::Call, "L1[1] next = CALL (chained)");
-    assert_eq!(l1_e1.next_action.scope, vec![] as Vec<U256>, "L1[1] scope=[]");
+    assert_eq!(
+        l1_e1.action_hash, l1_result_hash,
+        "L1[1] trigger = RESULT(void)"
+    );
+    assert_eq!(
+        l1_e1.next_action.action_type,
+        CrossChainActionType::Call,
+        "L1[1] next = CALL (chained)"
+    );
+    assert_eq!(
+        l1_e1.next_action.scope,
+        vec![] as Vec<U256>,
+        "L1[1] scope=[]"
+    );
     assert_eq!(l1_e1.next_action.destination, dest_b, "L1[1] dest = B");
 
     // L1[2]: reentrant leaf child CALL_C
     let l1_e2 = &result.l1_entries[2];
-    assert_eq!(l1_e2.action_hash, child_trigger_c_hash, "L1[2] trigger = child_C");
-    assert_eq!(l1_e2.next_action.action_type, CrossChainActionType::Result, "L1[2] next = RESULT (leaf)");
+    assert_eq!(
+        l1_e2.action_hash, child_trigger_c_hash,
+        "L1[2] trigger = child_C"
+    );
+    assert_eq!(
+        l1_e2.next_action.action_type,
+        CrossChainActionType::Result,
+        "L1[2] next = RESULT (leaf)"
+    );
 
     // L1[3]: RESULT(B,void) → RESULT(terminal)  (last call)
     let l1_e3 = &result.l1_entries[3];
-    assert_eq!(l1_e3.action_hash, l1_result_hash, "L1[3] trigger = RESULT(void)");
-    assert_eq!(l1_e3.next_action.action_type, CrossChainActionType::Result, "L1[3] next = terminal");
-    assert_eq!(l1_e3.next_action.rollup_id, l2_id, "L1[3] terminal rollupId = L2");
+    assert_eq!(
+        l1_e3.action_hash, l1_result_hash,
+        "L1[3] trigger = RESULT(void)"
+    );
+    assert_eq!(
+        l1_e3.next_action.action_type,
+        CrossChainActionType::Result,
+        "L1[3] next = terminal"
+    );
+    assert_eq!(
+        l1_e3.next_action.rollup_id, l2_id,
+        "L1[3] terminal rollupId = L2"
+    );
 }
 
 /// Test that L2 entries have empty state deltas (driver fills them later).

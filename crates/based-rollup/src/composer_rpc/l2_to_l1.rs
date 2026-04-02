@@ -671,7 +671,13 @@ async fn queue_independent_calls_l2_to_l1(
         let raw_l2_tx = if i == 0 { raw_tx_hex } else { "" };
 
         // Build the RPC request WITH pre-computed delivery return data.
-        let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 { 0 } else { call.trace_depth }).map(|_| "0x0".to_string()).collect();
+        let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 {
+            0
+        } else {
+            call.trace_depth
+        })
+            .map(|_| "0x0".to_string())
+            .collect();
         let initiate_req = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "syncrollups_initiateL2CrossChainCall",
@@ -1682,7 +1688,7 @@ async fn simulate_l1_delivery(
                 rlp_encoded_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger
                 vec![],                  // placeholder delivery_return_data
                 false,                   // placeholder delivery_failed
-                root_scope.to_vec(), // l1_delivery_scope from trace depth
+                root_scope.to_vec(),     // l1_delivery_scope from trace depth
             );
             call_entries.l1_deferred_entries
         } else {
@@ -2492,10 +2498,18 @@ async fn simulate_l1_combined_delivery(
             // Scope: for single calls, use trace_depth-1 (direct caller excluded).
             // For multi-call (siblings), append sibling_index for routing.
             let call_scope = if is_multi_call {
-                let mut s = if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] };
+                let mut s = if call.trace_depth <= 1 {
+                    vec![]
+                } else {
+                    vec![U256::ZERO; call.trace_depth]
+                };
                 s.push(U256::from(i));
                 s
-            } else if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] };
+            } else if call.trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; call.trace_depth]
+            };
 
             let entries = if my_return_calls.is_empty() {
                 // Simple case: just this L2→L1 call.
@@ -2806,10 +2820,18 @@ async fn simulate_l1_combined_delivery(
             // Extract L1→L2 return calls from this trigger trace.
             // Parent scope = this call's scope from L2 trace depth.
             let call_scope: Vec<U256> = if calls.len() > 1 {
-                let mut s = if calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; calls[call_idx].trace_depth] };
+                let mut s = if calls[call_idx].trace_depth <= 1 {
+                    vec![]
+                } else {
+                    vec![U256::ZERO; calls[call_idx].trace_depth]
+                };
                 s.push(U256::from(call_idx));
                 s
-            } else if calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; calls[call_idx].trace_depth] };
+            } else if calls[call_idx].trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; calls[call_idx].trace_depth]
+            };
             let new_returns = extract_l1_to_l2_return_calls(
                 client,
                 l1_rpc_url,
@@ -3577,8 +3599,14 @@ async fn trace_and_detect_l2_internal_calls(
 
     if detected_calls.is_empty() {
         // Log the trace tree summary so we can diagnose WHY no calls were detected.
-        let top_error = trace_result.get("error").and_then(|v| v.as_str()).unwrap_or("none");
-        let child_count = trace_result.get("calls").and_then(|v| v.as_array()).map_or(0, |a| a.len());
+        let top_error = trace_result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        let child_count = trace_result
+            .get("calls")
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len());
         tracing::info!(
             target: "based_rollup::proxy",
             %to_addr, %sender, user_tx = %user_tx_hash,
@@ -3674,7 +3702,8 @@ async fn trace_and_detect_l2_internal_calls(
                 if let Ok(resp) = client.post(l1_rpc_url).json(&sim_req).send().await {
                     if let Ok(body) = resp.json::<Value>().await {
                         // result[0][0] = trace of the single tx
-                        if let Some(trace) = body.get("result")
+                        if let Some(trace) = body
+                            .get("result")
                             .and_then(|r| r.get(0))
                             .and_then(|b| b.as_array())
                             .and_then(|arr| arr.first())
@@ -3687,12 +3716,14 @@ async fn trace_and_detect_l2_internal_calls(
                                     // vs a real delivery failure. Protocol errors should NOT be used
                                     // as delivery_return_data — they mean the simulation context is
                                     // incomplete, not that the delivery itself fails.
-                                    let is_protocol_error = has_error && bytes.len() == 4 && (
-                                        // ExecutionNotInCurrentBlock() = 0xf9d330ad
-                                        bytes == [0xf9, 0xd3, 0x30, 0xad] ||
+                                    let is_protocol_error = has_error
+                                        && bytes.len() == 4
+                                        && (
+                                            // ExecutionNotInCurrentBlock() = 0xf9d330ad
+                                            bytes == [0xf9, 0xd3, 0x30, 0xad] ||
                                         // ExecutionNotFound() = 0xed6bc750
                                         bytes == [0xed, 0x6b, 0xc7, 0x50]
-                                    );
+                                        );
                                     if is_protocol_error {
                                         tracing::info!(
                                             target: "based_rollup::proxy",
@@ -3706,22 +3737,25 @@ async fn trace_and_detect_l2_internal_calls(
                                         // REAL return data. This is heavier but correct for nested
                                         // L2→L1→L2 patterns where the L1 delivery triggers further
                                         // cross-chain calls via executeCrossChainCall.
-                                        if let Some((ret_data, failed, _return_calls)) = simulate_l1_delivery(
-                                            client,
-                                            l1_rpc_url,
-                                            upstream_url,
-                                            cross_chain_manager_address,
-                                            rollups_address,
-                                            builder_address,
-                                            builder_private_key,
-                                            rollup_id,
-                                            call.source_address,
-                                            call.destination,
-                                            &call.calldata,
-                                            call.value,
-                                            &tx_bytes,
-                                            &vec![U256::ZERO; call.trace_depth.max(1)],
-                                        ).await {
+                                        if let Some((ret_data, failed, _return_calls)) =
+                                            simulate_l1_delivery(
+                                                client,
+                                                l1_rpc_url,
+                                                upstream_url,
+                                                cross_chain_manager_address,
+                                                rollups_address,
+                                                builder_address,
+                                                builder_private_key,
+                                                rollup_id,
+                                                call.source_address,
+                                                call.destination,
+                                                &call.calldata,
+                                                call.value,
+                                                &tx_bytes,
+                                                &vec![U256::ZERO; call.trace_depth.max(1)],
+                                            )
+                                            .await
+                                        {
                                             call.delivery_return_data = ret_data.clone();
                                             call.delivery_failed = failed;
                                             tracing::info!(
@@ -3940,9 +3974,19 @@ async fn trace_and_detect_l2_internal_calls(
                             let error = c.get("error").and_then(|v| v.as_str()).unwrap_or("");
                             let sel = c.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
                             let sel_short = &sel[..sel.len().min(10)];
-                            let child_count = c.get("calls").and_then(|v| v.as_array()).map_or(0, |a| a.len());
+                            let child_count = c
+                                .get("calls")
+                                .and_then(|v| v.as_array())
+                                .map_or(0, |a| a.len());
                             let err = if error.is_empty() { "ok" } else { error };
-                            summary.push(format!("d={}:{}:{}:ch={}:{}", depth + 1, &to[to.len().saturating_sub(8)..], sel_short, child_count, err));
+                            summary.push(format!(
+                                "d={}:{}:{}:ch={}:{}",
+                                depth + 1,
+                                &to[to.len().saturating_sub(8)..],
+                                sel_short,
+                                child_count,
+                                err
+                            ));
                             count_calls(c, depth + 1, summary);
                         }
                     }
@@ -4072,7 +4116,11 @@ async fn trace_and_detect_l2_internal_calls(
             // Run simulate_l1_delivery for ONE call to check for return calls.
             // If it finds return calls, ALL duplicate calls need the continuation path.
             let first = &detected_calls[0];
-            let root_scope: Vec<U256> = if first.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; first.trace_depth] };
+            let root_scope: Vec<U256> = if first.trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; first.trace_depth]
+            };
             if let Some((_ret, _failed, returns)) = simulate_l1_delivery(
                 client,
                 l1_rpc_url,
@@ -4088,7 +4136,9 @@ async fn trace_and_detect_l2_internal_calls(
                 first.value,
                 &tx_bytes,
                 &root_scope,
-            ).await {
+            )
+            .await
+            {
                 returns
             } else {
                 vec![]
@@ -4102,7 +4152,8 @@ async fn trace_and_detect_l2_internal_calls(
             // Simulate ALL return calls in a single chained debug_traceCallMany bundle
             // so each sees cumulative state from prior calls.
             let first = &detected_calls[0];
-            let matching_count = detected_calls.iter()
+            let matching_count = detected_calls
+                .iter()
                 .filter(|c| c.destination == first.destination && c.calldata == first.calldata)
                 .count();
 
@@ -4139,15 +4190,15 @@ async fn trace_and_detect_l2_internal_calls(
             let mut chained_rc_data: Vec<(Vec<u8>, bool)> = Vec::new();
             if let Ok(resp) = client.post(upstream_url).json(&sim_req).send().await {
                 if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(traces) = body.get("result")
+                    if let Some(traces) = body
+                        .get("result")
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
                     {
                         for trace in traces {
                             let has_error = trace.get("error").is_some();
-                            let output = trace.get("output")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("0x");
+                            let output =
+                                trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
                             let hex = output.strip_prefix("0x").unwrap_or(output);
                             let bytes = hex::decode(hex).unwrap_or_default();
                             chained_rc_data.push((bytes, has_error));
@@ -4178,8 +4229,8 @@ async fn trace_and_detect_l2_internal_calls(
             let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
             let mut rc_data_idx = 0;
             for (i, call) in detected_calls.iter().enumerate() {
-                let is_same_pattern = call.destination == first.destination
-                    && call.calldata == first.calldata;
+                let is_same_pattern =
+                    call.destination == first.destination && call.calldata == first.calldata;
                 if is_same_pattern {
                     for rc in &detected_return_calls {
                         let mut rc_clone = rc.clone();
@@ -4363,7 +4414,11 @@ async fn trace_and_detect_l2_internal_calls(
 
     // Single call path: simulate on L1 to get delivery data + return calls.
     let call = &detected_calls[0];
-    let root_scope: Vec<U256> = if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] };
+    let root_scope: Vec<U256> = if call.trace_depth <= 1 {
+        vec![]
+    } else {
+        vec![U256::ZERO; call.trace_depth]
+    };
     let (delivery_return_data, delivery_failed, return_calls) = simulate_l1_delivery(
         client,
         l1_rpc_url,
@@ -4737,7 +4792,11 @@ async fn trace_and_detect_l2_internal_calls(
 
     // Simple single-call path (no depth > 1): use initiateL2CrossChainCall
     // Scope = vec![0; trace_depth] — determines newScope nesting in executeL2TX on L1.
-    let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 { 0 } else { call.trace_depth })
+    let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 {
+        0
+    } else {
+        call.trace_depth
+    })
         .map(|_| "0x0".to_string())
         .collect();
     let initiate_req = serde_json::json!({

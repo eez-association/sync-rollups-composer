@@ -312,8 +312,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx)
-                        && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -370,23 +369,22 @@ pub fn build_continuation_entries(
             let is_first = pos == 0;
 
             // Build the RESULT(L2) trigger from this call's l2_return_data.
-            let l2_result = if !current_call.l2_return_data.is_empty()
-                || current_call.l2_delivery_failed
-            {
-                CrossChainAction {
-                    action_type: CrossChainActionType::Result,
-                    rollup_id: our_rollup_id,
-                    destination: Address::ZERO,
-                    value: U256::ZERO,
-                    data: current_call.l2_return_data.clone(),
-                    failed: current_call.l2_delivery_failed,
-                    source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
-                    scope: vec![],
-                }
-            } else {
-                l2_result_void.clone()
-            };
+            let l2_result =
+                if !current_call.l2_return_data.is_empty() || current_call.l2_delivery_failed {
+                    CrossChainAction {
+                        action_type: CrossChainActionType::Result,
+                        rollup_id: our_rollup_id,
+                        destination: Address::ZERO,
+                        value: U256::ZERO,
+                        data: current_call.l2_return_data.clone(),
+                        failed: current_call.l2_delivery_failed,
+                        source_address: Address::ZERO,
+                        source_rollup: U256::ZERO,
+                        scope: vec![],
+                    }
+                } else {
+                    l2_result_void.clone()
+                };
             let result_hash = compute_action_hash(&l2_result);
 
             let next_action = if is_first {
@@ -460,8 +458,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx)
-                        && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 

@@ -1074,7 +1074,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope, // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1184,7 +1184,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope, // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1207,7 +1207,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope, // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1235,7 +1235,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope, // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1259,7 +1259,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
             value,
             source_address,
             rollup_id,
-                l2_scope,  // l2_scope from L1 trace_depth
+            l2_scope, // l2_scope from L1 trace_depth
         )
         .await;
     }
@@ -1792,21 +1792,22 @@ async fn build_and_run_l1_postbatch_trace(
             l2_return_data: c.return_data.clone(),
             call_success: c.call_success,
             parent_call_index: c.parent_call_index,
-            target_rollup_id: if c.parent_call_index.is_some()
-                && c.target_rollup_id == 0
-            {
+            target_rollup_id: if c.parent_call_index.is_some() && c.target_rollup_id == 0 {
                 Some(0)
             } else {
                 None
             },
-            scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
+            scope: if c.trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; c.trace_depth]
+            },
             discovery_iteration: c.discovery_iteration,
             l1_trace_depth: c.trace_depth,
         })
         .collect();
 
-    let analyzed =
-        crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
+    let analyzed = crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
 
     // Log the call tree
     tracing::info!(
@@ -1847,17 +1848,16 @@ async fn build_and_run_l1_postbatch_trace(
         let l2_pairs: Vec<_> = l1_detected
             .iter()
             .flat_map(|c| {
-                let (call_entry, result_entry) =
-                    crate::cross_chain::build_cross_chain_call_entries(
-                        alloy_primitives::U256::from(rollup_id),
-                        c.destination,
-                        c.data.clone(),
-                        c.value,
-                        c.source_address,
-                        alloy_primitives::U256::ZERO,
-                        c.call_success,
-                        c.l2_return_data.clone(),
-                    );
+                let (call_entry, result_entry) = crate::cross_chain::build_cross_chain_call_entries(
+                    alloy_primitives::U256::from(rollup_id),
+                    c.destination,
+                    c.data.clone(),
+                    c.value,
+                    c.source_address,
+                    alloy_primitives::U256::ZERO,
+                    c.call_success,
+                    c.l2_return_data.clone(),
+                );
                 vec![call_entry, result_entry]
             })
             .collect();
@@ -1914,14 +1914,7 @@ async fn build_and_run_l1_postbatch_trace(
     };
 
     // Get verification key from Rollups contract
-    let vk = match get_verification_key(
-        client,
-        l1_rpc_url,
-        rollups_address,
-        rollup_id,
-    )
-    .await
-    {
+    let vk = match get_verification_key(client, l1_rpc_url, rollups_address, rollup_id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(target: "based_rollup::l1_proxy", %e, "({label}) failed to get verification key");
@@ -1961,17 +1954,13 @@ async fn build_and_run_l1_postbatch_trace(
     let proof = alloy_primitives::Bytes::from(proof_bytes);
 
     // Encode postBatch calldata
-    let post_batch_calldata = crate::cross_chain::encode_post_batch_calldata(
-        &entries,
-        call_data_bytes,
-        proof,
-    );
+    let post_batch_calldata =
+        crate::cross_chain::encode_post_batch_calldata(&entries, call_data_bytes, proof);
 
     // Build traceCallMany request: [postBatch, userTx] in a single bundle
     let builder_addr = format!("{}", builder_key.address());
     let rollups_hex = format!("{rollups_address}");
-    let post_batch_data =
-        format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
+    let post_batch_data = format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
 
     let next_block = format!("{:#x}", block_number + 1);
     let trace_req = serde_json::json!({
@@ -2295,7 +2284,11 @@ async fn trace_and_detect_internal_calls(
             let call_calldata = detected_calls[call_idx].calldata.clone();
             let call_value = detected_calls[call_idx].value;
             let call_source = detected_calls[call_idx].source_address;
-            let scope_for_call: Vec<U256> = if detected_calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; detected_calls[call_idx].trace_depth] };
+            let scope_for_call: Vec<U256> = if detected_calls[call_idx].trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; detected_calls[call_idx].trace_depth]
+            };
 
             let (ret_data, success, child_calls) =
                 if call_idx == 0 || prior_result_entries.is_empty() {
@@ -2309,7 +2302,7 @@ async fn trace_and_detect_internal_calls(
                         call_value,
                         call_source,
                         rollup_id,
-                &scope_for_call,  // l2_scope from L1 trace_depth
+                        &scope_for_call, // l2_scope from L1 trace_depth
                     )
                     .await
                 } else {
@@ -2431,7 +2424,7 @@ async fn trace_and_detect_internal_calls(
                         call_success: true, // defaults to true; will be enriched later if needed
                         return_data: vec![], // will be enriched via L1 simulation
                         parent_call_index: Some(call_idx), // linked to parent L1→L2 call
-                        trace_depth: 0, // L2→L1 child: depth in L2 simulation
+                        trace_depth: 0,     // L2→L1 child: depth in L2 simulation
                         discovery_iteration: 0, // will be updated in iterative loop
                     },
                 ));
@@ -2475,7 +2468,8 @@ async fn trace_and_detect_internal_calls(
         });
         if let Ok(resp) = client.post(l1_rpc_url).json(&sim_req).send().await {
             if let Ok(body) = resp.json::<Value>().await {
-                if let Some(traces) = body.get("result")
+                if let Some(traces) = body
+                    .get("result")
                     .and_then(|r| r.get(0))
                     .and_then(|b| b.as_array())
                 {
@@ -2625,12 +2619,24 @@ async fn trace_and_detect_internal_calls(
                             if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
                                 for c in calls {
                                     let to = c.get("to").and_then(|v| v.as_str()).unwrap_or("?");
-                                    let error = c.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                                    let sel = c.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
+                                    let error =
+                                        c.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                                    let sel =
+                                        c.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
                                     let sel_short = &sel[..sel.len().min(10)];
-                                    let child_count = c.get("calls").and_then(|v| v.as_array()).map_or(0, |a| a.len());
+                                    let child_count = c
+                                        .get("calls")
+                                        .and_then(|v| v.as_array())
+                                        .map_or(0, |a| a.len());
                                     let err = if error.is_empty() { "ok" } else { error };
-                                    summary.push(format!("d={}:{}:{}:ch={}:{}", depth + 1, &to[to.len().saturating_sub(8)..], sel_short, child_count, err));
+                                    summary.push(format!(
+                                        "d={}:{}:{}:ch={}:{}",
+                                        depth + 1,
+                                        &to[to.len().saturating_sub(8)..],
+                                        sel_short,
+                                        child_count,
+                                        err
+                                    ));
                                     summarize_trace(c, depth + 1, summary);
                                 }
                             }
@@ -2796,7 +2802,11 @@ async fn trace_and_detect_internal_calls(
                                         call.value,
                                         call.source_address,
                                         rollup_id,
-                                        &if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] },
+                                        &if call.trace_depth <= 1 {
+                                            vec![]
+                                        } else {
+                                            vec![U256::ZERO; call.trace_depth]
+                                        },
                                     )
                                     .await
                                 } else {
@@ -2816,7 +2826,11 @@ async fn trace_and_detect_internal_calls(
                                         &prior_result_entries,
                                         &prior_exec_calldatas,
                                         sys_addr,
-                                        &if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] },
+                                        &if call.trace_depth <= 1 {
+                                            vec![]
+                                        } else {
+                                            vec![U256::ZERO; call.trace_depth]
+                                        },
                                     )
                                     .await
                                 };
@@ -2890,7 +2904,9 @@ async fn trace_and_detect_internal_calls(
                                 let mut prior_child_txs: Vec<Value> = Vec::new();
                                 // Prior children from all_calls
                                 for prior in all_calls.iter() {
-                                    if prior.parent_call_index.is_some() && prior.target_rollup_id == 0 {
+                                    if prior.parent_call_index.is_some()
+                                        && prior.target_rollup_id == 0
+                                    {
                                         prior_child_txs.push(serde_json::json!({
                                             "from": format!("{}", prior.source_address),
                                             "to": format!("{}", prior.destination),
@@ -2911,15 +2927,18 @@ async fn trace_and_detect_internal_calls(
                                     }));
                                 }
                                 // New children to simulate
-                                let new_child_txs: Vec<Value> = child_calls.iter().map(|c| {
-                                    serde_json::json!({
-                                        "from": format!("{}", c.source_address),
-                                        "to": format!("{}", c.original_address),
-                                        "data": format!("0x{}", hex::encode(&c.data)),
-                                        "value": format!("0x{:x}", c.value),
-                                        "gas": "0x2faf080"
+                                let new_child_txs: Vec<Value> = child_calls
+                                    .iter()
+                                    .map(|c| {
+                                        serde_json::json!({
+                                            "from": format!("{}", c.source_address),
+                                            "to": format!("{}", c.original_address),
+                                            "data": format!("0x{}", hex::encode(&c.data)),
+                                            "value": format!("0x{:x}", c.value),
+                                            "gas": "0x2faf080"
+                                        })
                                     })
-                                }).collect();
+                                    .collect();
                                 let mut all_txs = prior_child_txs;
                                 let new_start_idx = all_txs.len();
                                 all_txs.extend(new_child_txs);
@@ -2934,14 +2953,20 @@ async fn trace_and_detect_internal_calls(
                                     ],
                                     "id": 99977
                                 });
-                                let sim_results = if let Ok(resp) = client.post(l1_rpc_url).json(&sim_req).send().await {
+                                let sim_results = if let Ok(resp) =
+                                    client.post(l1_rpc_url).json(&sim_req).send().await
+                                {
                                     if let Ok(body) = resp.json::<Value>().await {
                                         body.get("result")
                                             .and_then(|r| r.get(0))
                                             .and_then(|b| b.as_array())
                                             .cloned()
-                                    } else { None }
-                                } else { None };
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
 
                                 for (ci, child) in child_calls.iter().enumerate() {
                                     let trace_idx = new_start_idx + ci;
@@ -2950,8 +2975,11 @@ async fn trace_and_detect_internal_calls(
                                     if let Some(ref traces) = sim_results {
                                         if let Some(trace) = traces.get(trace_idx) {
                                             let has_error = trace.get("error").is_some();
-                                            if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
-                                                let hex = output.strip_prefix("0x").unwrap_or(output);
+                                            if let Some(output) =
+                                                trace.get("output").and_then(|v| v.as_str())
+                                            {
+                                                let hex =
+                                                    output.strip_prefix("0x").unwrap_or(output);
                                                 if let Ok(bytes) = hex::decode(hex) {
                                                     child_delivery_data = bytes;
                                                     child_delivery_failed = has_error;
@@ -3096,9 +3124,9 @@ async fn trace_and_detect_internal_calls(
                     for (i, c) in detected_calls.iter().enumerate() {
                         if c.parent_call_index.is_none() && c.return_data.is_empty() {
                             // Check if this call has children
-                            let has_children = detected_calls.iter().any(|other| {
-                                other.parent_call_index == Some(i)
-                            });
+                            let has_children = detected_calls
+                                .iter()
+                                .any(|other| other.parent_call_index == Some(i));
                             if has_children {
                                 needed = true;
                                 break;
@@ -3112,12 +3140,14 @@ async fn trace_and_detect_internal_calls(
                     // Determine if pattern is reentrant (varying L1 trace depth)
                     // or continuation (all L1→L2 calls at same depth).
                     // Same logic as build_continuation_entries in table_builder.rs.
-                    let root_calls: Vec<&DetectedInternalCall> = detected_calls.iter()
+                    let root_calls: Vec<&DetectedInternalCall> = detected_calls
+                        .iter()
                         .filter(|c| c.parent_call_index.is_none())
                         .collect();
                     // Reentrant: each successive call is STRICTLY DEEPER (nested inside
                     // scope navigation). Continuation: same or non-increasing depths.
-                    let root_depths: Vec<usize> = root_calls.iter().map(|c| c.trace_depth).collect();
+                    let root_depths: Vec<usize> =
+                        root_calls.iter().map(|c| c.trace_depth).collect();
                     let is_strictly_increasing = root_depths.windows(2).all(|w| w[1] > w[0]);
                     let is_reentrant_pattern = root_calls.len() > 1 && is_strictly_increasing;
 
@@ -3231,8 +3261,7 @@ async fn trace_and_detect_internal_calls(
                             &sys_calldata,
                         )
                         .await;
-                        sys_result
-                            .and_then(|s| super::common::parse_address_from_abi_return(&s))
+                        sys_result.and_then(|s| super::common::parse_address_from_abi_return(&s))
                     };
 
                     let sys_addr_str = match sys_addr {
@@ -3271,17 +3300,18 @@ async fn trace_and_detect_internal_calls(
 
                         // Process each reentrant parent level-by-level.
                         for &idx in &root_indices {
-                            let has_children = detected_calls.iter().any(|other| {
-                                other.parent_call_index == Some(idx)
-                            });
+                            let has_children = detected_calls
+                                .iter()
+                                .any(|other| other.parent_call_index == Some(idx));
                             if !has_children || !detected_calls[idx].return_data.is_empty() {
                                 continue; // Leaf or already enriched.
                             }
 
                             // Find this parent's L2→L1 child.
-                            let child_idx = match detected_calls.iter().position(|c| {
-                                c.parent_call_index == Some(idx)
-                            }) {
+                            let child_idx = match detected_calls
+                                .iter()
+                                .position(|c| c.parent_call_index == Some(idx))
+                            {
                                 Some(ci) => ci,
                                 None => continue,
                             };
@@ -3333,12 +3363,13 @@ async fn trace_and_detect_internal_calls(
                             {
                                 let child_dest = detected_calls[child_idx].destination;
                                 let child_cd = detected_calls[child_idx].calldata.clone();
-                                let delivery_data = extract_delivery_return_from_l1_trace_with_calldata(
-                                    &user_trace,
-                                    child_dest,
-                                    rollups_address,
-                                    Some(&child_cd),
-                                );
+                                let delivery_data =
+                                    extract_delivery_return_from_l1_trace_with_calldata(
+                                        &user_trace,
+                                        child_dest,
+                                        rollups_address,
+                                        Some(&child_cd),
+                                    );
 
                                 tracing::info!(
                                     target: "based_rollup::l1_proxy",
@@ -3373,30 +3404,36 @@ async fn trace_and_detect_internal_calls(
                             let call_value = detected_calls[idx].value;
                             let call_source = detected_calls[idx].source_address;
 
-                            let l1_detected: Vec<crate::table_builder::L1DetectedCall> = detected_calls
-                                .iter()
-                                .map(|c| crate::table_builder::L1DetectedCall {
-                                    destination: c.destination,
-                                    data: c.calldata.clone(),
-                                    value: c.value,
-                                    source_address: c.source_address,
-                                    l2_return_data: c.return_data.clone(),
-                                    call_success: c.call_success,
-                                    parent_call_index: c.parent_call_index,
-                                    target_rollup_id: if c.parent_call_index.is_some()
-                                        && c.target_rollup_id == 0
-                                    {
-                                        Some(0)
-                                    } else {
-                                        None
-                                    },
-                                    scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
-                                    discovery_iteration: c.discovery_iteration,
-                                    l1_trace_depth: c.trace_depth,
-                                })
-                                .collect();
+                            let l1_detected: Vec<crate::table_builder::L1DetectedCall> =
+                                detected_calls
+                                    .iter()
+                                    .map(|c| crate::table_builder::L1DetectedCall {
+                                        destination: c.destination,
+                                        data: c.calldata.clone(),
+                                        value: c.value,
+                                        source_address: c.source_address,
+                                        l2_return_data: c.return_data.clone(),
+                                        call_success: c.call_success,
+                                        parent_call_index: c.parent_call_index,
+                                        target_rollup_id: if c.parent_call_index.is_some()
+                                            && c.target_rollup_id == 0
+                                        {
+                                            Some(0)
+                                        } else {
+                                            None
+                                        },
+                                        scope: if c.trace_depth <= 1 {
+                                            vec![]
+                                        } else {
+                                            vec![U256::ZERO; c.trace_depth]
+                                        },
+                                        discovery_iteration: c.discovery_iteration,
+                                        l1_trace_depth: c.trace_depth,
+                                    })
+                                    .collect();
                             let analyzed = crate::table_builder::analyze_continuation_calls(
-                                &l1_detected, rollup_id,
+                                &l1_detected,
+                                rollup_id,
                             );
                             if analyzed.is_empty() {
                                 continue;
@@ -3467,9 +3504,10 @@ async fn trace_and_detect_internal_calls(
                                 source_rollup: U256::ZERO,
                                 scope: vec![],
                             };
-                            let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(
-                                &sim_action,
-                            );
+                            let exec_calldata =
+                                crate::cross_chain::encode_execute_incoming_call_calldata(
+                                    &sim_action,
+                                );
 
                             let sim_result = run_l2_sim_bundle(
                                 client,
@@ -3496,12 +3534,21 @@ async fn trace_and_detect_internal_calls(
                                 {
                                     let dest_lower = format!("{call_destination}").to_lowercase();
                                     fn log_trace_walk(node: &Value, depth: usize, dest: &str) {
-                                        let to = node.get("to").and_then(|v| v.as_str()).unwrap_or("?");
-                                        let from = node.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                                        let to =
+                                            node.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+                                        let from = node
+                                            .get("from")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?");
                                         let has_error = node.get("error").is_some();
-                                        let output_len = node.get("output").and_then(|v| v.as_str())
-                                            .map(|s| s.len() / 2).unwrap_or(0);
-                                        let input_sel = node.get("input").and_then(|v| v.as_str())
+                                        let output_len = node
+                                            .get("output")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.len() / 2)
+                                            .unwrap_or(0);
+                                        let input_sel = node
+                                            .get("input")
+                                            .and_then(|v| v.as_str())
                                             .unwrap_or("0x");
                                         let sel = &input_sel[..input_sel.len().min(10)];
                                         let is_match = to.to_lowercase() == dest;
@@ -3515,7 +3562,9 @@ async fn trace_and_detect_internal_calls(
                                             &from[from.len().saturating_sub(4)..],
                                             sel, has_error, output_len, is_match
                                         );
-                                        if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+                                        if let Some(calls) =
+                                            node.get("calls").and_then(|v| v.as_array())
+                                        {
                                             for c in calls {
                                                 log_trace_walk(c, depth + 1, dest);
                                             }
@@ -3530,12 +3579,14 @@ async fn trace_and_detect_internal_calls(
                                 }
 
                                 // BFS extraction
-                                let inner = extract_inner_destination_return_data(
-                                    &trace, call_destination,
-                                ).unwrap_or_default();
-                                let inner_success = !inner.is_empty() || destination_call_succeeded_in_trace(
-                                    &trace, call_destination,
-                                );
+                                let inner =
+                                    extract_inner_destination_return_data(&trace, call_destination)
+                                        .unwrap_or_default();
+                                let inner_success = !inner.is_empty()
+                                    || destination_call_succeeded_in_trace(
+                                        &trace,
+                                        call_destination,
+                                    );
 
                                 // Fallback to top-level if BFS empty
                                 let (ret_data, inner_success) = if inner.is_empty() && success {
@@ -3572,7 +3623,9 @@ async fn trace_and_detect_internal_calls(
                                 // The L2 sim returns scope-chain-resolved data (e.g., CounterL1's
                                 // return propagated back) but the parent (CAP2) returns void.
                                 // Overwriting with sim data corrupts the resolution_terminal entry.
-                                let has_children = detected_calls.iter().any(|c| c.parent_call_index == Some(idx));
+                                let has_children = detected_calls
+                                    .iter()
+                                    .any(|c| c.parent_call_index == Some(idx));
                                 if is_reentrant_pattern || !has_children {
                                     if inner_success || !ret_data.is_empty() {
                                         detected_calls[idx].return_data = ret_data;
