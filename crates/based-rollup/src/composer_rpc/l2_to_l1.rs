@@ -3032,6 +3032,27 @@ fn extract_delivery_output_from_trigger_trace(
     // The output is critical: it becomes the RESULT entry's data field,
     // and a mismatch (void vs actual return data) causes ExecutionNotFound.
     if let Some((output, failed)) = find_delivery_call(trigger_trace, destination) {
+        if failed {
+            // The delivery call itself reverted. This happens when the destination
+            // function triggers further cross-chain calls (non-leaf delivery) and
+            // the entries for those calls aren't loaded yet — the inner CCM
+            // `executeCrossChainCall` reverts with ExecutionNotFound, propagating
+            // up through the proxy to the delivery call.
+            //
+            // The `output` here is the error selector (e.g., 0xed6bc750 =
+            // ExecutionNotFound), NOT the function's actual return data. Using it
+            // as RESULT entry data produces a wrong hash, forcing 2 extra
+            // convergence iterations (error→void→confirm).
+            //
+            // Return void instead: all non-leaf deliveries in practice return void
+            // (incrementProxy, deepCall, callBoth, etc.). If a future contract has
+            // a non-leaf delivery returning non-void, the RESULT hash mismatch
+            // triggers ExecutionNotFound on L1 → rewind (existing safety net).
+            //
+            // Evidence: 16/16 non-leaf delivery successes across 14 E2E tests
+            // return void (0 bytes). 0/16 return non-void.
+            return (vec![], false);
+        }
         return (output, failed);
     }
 
