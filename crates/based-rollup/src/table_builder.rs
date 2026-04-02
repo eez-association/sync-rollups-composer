@@ -297,6 +297,18 @@ pub fn build_continuation_entries(
         // The child executes on L1, so delivery_return_data carries its L1 return.
         for (_child_idx, child) in &children {
             let child_action_hash = compute_action_hash(&child.call_action);
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                "L2 child entry: child_idx={} hash={} dest={} data_hex=0x{} data_len={} rollup={} source={} delivery_ret_len={}",
+                _child_idx,
+                child_action_hash,
+                child.call_action.destination,
+                hex::encode(&child.call_action.data[..child.call_action.data.len().min(36)]),
+                child.call_action.data.len(),
+                child.call_action.rollup_id,
+                child.call_action.source_address,
+                child.delivery_return_data.len()
+            );
             let child_next = if child.delivery_return_data.is_empty() && !child.l2_delivery_failed {
                 l1_result_void.clone()
             } else {
