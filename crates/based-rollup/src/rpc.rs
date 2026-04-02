@@ -817,6 +817,7 @@ where
                 parent_call_index: c.parent_call_index,
                 target_rollup_id: c.target_rollup_id,
                 scope: c.scope.clone(),
+                discovery_iteration: 0,
             })
             .collect();
 

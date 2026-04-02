@@ -436,6 +436,10 @@ async fn queue_execution_table(
                 // can distinguish them from L1→L2 calls.
                 call_json["targetRollupId"] = serde_json::json!(0u64);
             }
+            // Propagate discovery iteration for reentrant detection.
+            if c.discovery_iteration > 0 {
+                call_json["discoveryIteration"] = serde_json::json!(c.discovery_iteration);
+            }
             call_json
         })
         .collect();
@@ -524,6 +528,11 @@ struct DetectedInternalCall {
     /// Depth in the source chain trace. For L1→L2 root calls: depth on L1 trace.
     /// Used to compute symmetric scope on L2: scope = [0; trace_depth].
     trace_depth: usize,
+    /// Iterative discovery iteration in which this call was first detected.
+    /// Used to distinguish reentrant patterns (calls discovered across multiple
+    /// iterations — each level triggers the next) from continuation patterns
+    /// (all calls discovered in the same iteration — user tx calls them directly).
+    discovery_iteration: usize,
 }
 
 /// Execute a `debug_traceCallMany` bundle on L2:
@@ -1744,6 +1753,7 @@ async fn walk_l1_trace_generic(
             return_data: vec![],
             parent_call_index: None, // root-level L1→L2 call
             trace_depth: c.trace_depth,
+            discovery_iteration: 0, // initial detection from first trace
         })
         .collect()
 }
@@ -1788,6 +1798,7 @@ async fn build_and_run_l1_postbatch_trace(
                 None
             },
             scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
+            discovery_iteration: c.discovery_iteration,
         })
         .collect();
 
@@ -2436,6 +2447,7 @@ async fn trace_and_detect_internal_calls(
                         return_data: vec![], // will be enriched via L1 simulation
                         parent_call_index: Some(call_idx), // linked to parent L1→L2 call
                         trace_depth: 0, // L2→L1 child: depth in L2 simulation
+                        discovery_iteration: 0, // will be updated in iterative loop
                     },
                 ));
             }
@@ -2717,6 +2729,10 @@ async fn trace_and_detect_internal_calls(
                     // Also collect any child L2→L1 calls discovered in the L2
                     // simulation (nested L1→L2→L1 pattern).
                     let mut enriched_new_calls = new_calls;
+                    // Tag new calls with current iteration number.
+                    for call in &mut enriched_new_calls {
+                        call.discovery_iteration = iteration;
+                    }
                     let mut iter_child_calls: Vec<(usize, DetectedInternalCall)> = Vec::new();
                     if !cross_chain_manager_address.is_zero() {
                         // Build RESULT entries and exec calldatas from ALL existing
@@ -2983,6 +2999,7 @@ async fn trace_and_detect_internal_calls(
                                             return_data: child_delivery_data,
                                             parent_call_index: None,
                                             trace_depth: 0,
+                                            discovery_iteration: iteration,
                                         },
                                     ));
                                 }
@@ -3345,6 +3362,7 @@ async fn trace_and_detect_internal_calls(
                                         None
                                     },
                                     scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
+                                    discovery_iteration: c.discovery_iteration,
                                 })
                                 .collect();
                             let analyzed = crate::table_builder::analyze_continuation_calls(

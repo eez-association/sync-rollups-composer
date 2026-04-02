@@ -71,6 +71,11 @@ pub struct DetectedCall {
     /// Used by table_builder instead of hardcoded vec![U256::ZERO].
     #[serde(default)]
     pub scope: Vec<U256>,
+    /// Iterative discovery iteration when this call was first detected.
+    /// 0 = initial trace / same iteration as parent. >0 = discovered in a
+    /// later iteration (reentrant: child's L1 execution triggered this call).
+    #[serde(default)]
+    pub discovery_iteration: usize,
 }
 
 /// Output of `build_continuation_entries`: L2 table entries and L1 deferred entries.
@@ -281,14 +286,23 @@ pub fn build_continuation_entries(
     //   Phase 1: ALL child entries (consumed during scope navigation, FIFO)
     //   Phase 2: ALL result propagation entries (consumed as scopes unwind, bottom-up)
     // In continuation patterns (flash-loan), children are leaves — no reentrant.
-    let is_reentrant = l1_to_l2_calls.len() > 1
-        && l1_to_l2_calls.iter().enumerate().any(|(pos, &(call_idx, _))| {
-            pos < l1_to_l2_calls.len() - 1
-                && calls.iter().any(|c| {
-                    c.parent_call_index == Some(call_idx)
-                        && c.direction == CallDirection::L2ToL1
-                })
-        });
+    // Detect reentrant: L1→L2 calls were discovered across MULTIPLE iterative
+    // discovery iterations. In reentrant patterns (deepCall), each level triggers
+    // the next via scope navigation — the next L1→L2 call only appears in a later
+    // iteration when the child's L1 execution is traced.
+    // In continuation patterns (multi-call-nested), ALL L1→L2 calls are visible in
+    // the user's direct call tree from the SAME iteration.
+    let max_l1_to_l2_iter = l1_to_l2_calls
+        .iter()
+        .map(|&(_, c)| c.discovery_iteration)
+        .max()
+        .unwrap_or(0);
+    let min_l1_to_l2_iter = l1_to_l2_calls
+        .iter()
+        .map(|&(_, c)| c.discovery_iteration)
+        .min()
+        .unwrap_or(0);
+    let is_reentrant = l1_to_l2_calls.len() > 1 && max_l1_to_l2_iter > min_l1_to_l2_iter;
 
     if is_reentrant {
         // ── REENTRANT MODEL ──
@@ -713,6 +727,12 @@ pub struct L1DetectedCall {
     /// Accumulated scope for this call's delivery action.
     #[serde(default)]
     pub scope: Vec<U256>,
+    /// Iterative discovery iteration when this call was first detected.
+    /// 0 = initial trace, 1+ = discovered during iterative expansion.
+    /// Used to distinguish reentrant (calls across multiple iterations)
+    /// from continuation (all calls in same iteration) patterns.
+    #[serde(default)]
+    pub discovery_iteration: usize,
 }
 
 /// Serde default for `call_success` — defaults to `true` (success).
@@ -776,6 +796,7 @@ pub fn analyze_continuation_calls(
                     l2_return_data: vec![],
                     l2_delivery_failed: !call.call_success,
                     scope: call.scope.clone(),
+                    discovery_iteration: call.discovery_iteration,
                 }
             } else {
                 // L1→L2 call (root-level or continuation)
@@ -805,6 +826,7 @@ pub fn analyze_continuation_calls(
                     l2_return_data: call.l2_return_data.clone(),
                     l2_delivery_failed: !call.call_success,
                     scope: vec![], // L1→L2 root calls start with empty scope
+                    discovery_iteration: call.discovery_iteration,
                 }
             }
         })
@@ -936,6 +958,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
             l2_return_data: vec![],
             l2_delivery_failed: call.delivery_failed,
             scope: call.scope.clone(),
+            discovery_iteration: 0,
         });
     }
 
@@ -984,6 +1007,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
                 l2_return_data: rc.l2_return_data.clone(),
                 l2_delivery_failed: rc.l2_delivery_failed,
                 scope: rc.scope.clone(),
+                discovery_iteration: 0,
             });
         }
     } else if l2_calls.len() >= 2 {
