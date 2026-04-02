@@ -274,6 +274,9 @@ pub struct BuildExecutionTableCall {
     /// Accumulated scope for this call.
     #[serde(default)]
     pub scope: Vec<U256>,
+    /// Iterative discovery iteration when this call was first detected.
+    #[serde(default)]
+    pub discovery_iteration: usize,
 }
 
 /// Result of building a multi-call execution table.
@@ -817,7 +820,7 @@ where
                 parent_call_index: c.parent_call_index,
                 target_rollup_id: c.target_rollup_id,
                 scope: c.scope.clone(),
-                discovery_iteration: 0,
+                discovery_iteration: c.discovery_iteration,
             })
             .collect();
 
