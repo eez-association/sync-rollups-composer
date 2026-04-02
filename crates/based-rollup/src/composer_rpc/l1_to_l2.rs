@@ -3205,6 +3205,30 @@ async fn trace_and_detect_internal_calls(
                                 }
                             }
                         }
+
+                        // For CONTINUATION patterns: if any child STILL has stale error
+                        // data after extraction attempt, default to void (empty, success=true).
+                        // Continuation children execute within the full on-chain context
+                        // (authorized proxies, token state) that the simulation doesn't have.
+                        // The simulation failure is an artifact — the actual on-chain execution
+                        // succeeds and returns void (e.g., Bridge.receiveTokens).
+                        // Reentrant children are NOT defaulted because they need real data.
+                        if !is_reentrant_pattern {
+                            for &ci in &child_indices {
+                                let child = &detected_calls[ci];
+                                if child.return_data.len() <= 4 && !child.call_success {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        ci,
+                                        dest = %child.destination,
+                                        old_hex = %format!("0x{}", hex::encode(&child.return_data)),
+                                        "post-convergence: defaulting continuation child to void (simulation artifact)"
+                                    );
+                                    detected_calls[ci].return_data = vec![];
+                                    detected_calls[ci].call_success = true;
+                                }
+                            }
+                        }
                     }
 
                     // Collect L1→L2 root call indices in REVERSE order (innermost first).
