@@ -286,21 +286,20 @@ pub fn build_continuation_entries(
     //   Phase 1: ALL child entries (consumed during scope navigation, FIFO)
     //   Phase 2: ALL result propagation entries (consumed as scopes unwind, bottom-up)
     // In continuation patterns (flash-loan), children are leaves — no reentrant.
-    // Detect reentrant vs continuation using L1 trace depth.
+    // Detect reentrant vs continuation using L1 trace depth ordering.
     //
-    // Reentrant (deepCall): each L1→L2 call is nested inside scope navigation
-    // on L1 → DIFFERENT trace depths (1, 7, 13). The depth field on DetectedCall
-    // carries the L1 trace depth for L1→L2 calls (set from L1DetectedCall.l1_trace_depth
-    // via analyze_continuation_calls).
+    // Reentrant (deepCall): each L1→L2 call is nested DEEPER inside scope
+    // navigation → STRICTLY INCREASING trace depths (1, 7, 13).
     //
-    // Continuation (multi-call-nested): all L1→L2 calls are siblings in the
-    // user's direct call tree → SAME trace depth (all 0 or all same value).
+    // Continuation (multi-call-nested, flash-loan): L1→L2 calls are siblings
+    // in the user's call tree → same or non-increasing depths (3,3,3 or 4,3).
+    // Flash-loan has different depths (4,3) because calls go through different
+    // intermediary contracts, but the second call is NOT deeper (3 < 4).
     //
-    // Signal: L1→L2 calls with varying depth → reentrant.
-    //         L1→L2 calls with uniform depth → continuation.
-    let first_depth = l1_to_l2_calls.first().map(|&(_, c)| c.depth).unwrap_or(0);
-    let has_varying_depth = l1_to_l2_calls.iter().any(|&(_, c)| c.depth != first_depth);
-    let is_reentrant = l1_to_l2_calls.len() > 1 && has_varying_depth;
+    // Rule: is_reentrant = each successive L1→L2 call is STRICTLY DEEPER.
+    let depths: Vec<usize> = l1_to_l2_calls.iter().map(|&(_, c)| c.depth).collect();
+    let is_strictly_increasing = depths.windows(2).all(|w| w[1] > w[0]);
+    let is_reentrant = l1_to_l2_calls.len() > 1 && is_strictly_increasing;
 
     if is_reentrant {
         // ── REENTRANT MODEL ──

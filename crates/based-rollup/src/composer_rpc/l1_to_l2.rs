@@ -3134,9 +3134,11 @@ async fn trace_and_detect_internal_calls(
                     let root_calls: Vec<&DetectedInternalCall> = detected_calls.iter()
                         .filter(|c| c.parent_call_index.is_none())
                         .collect();
-                    let first_depth = root_calls.first().map(|c| c.trace_depth).unwrap_or(0);
-                    let is_reentrant_pattern = root_calls.len() > 1
-                        && root_calls.iter().any(|c| c.trace_depth != first_depth);
+                    // Reentrant: each successive call is STRICTLY DEEPER (nested inside
+                    // scope navigation). Continuation: same or non-increasing depths.
+                    let root_depths: Vec<usize> = root_calls.iter().map(|c| c.trace_depth).collect();
+                    let is_strictly_increasing = root_depths.windows(2).all(|w| w[1] > w[0]);
+                    let is_reentrant_pattern = root_calls.len() > 1 && is_strictly_increasing;
 
                     tracing::info!(
                         target: "based_rollup::l1_proxy",
