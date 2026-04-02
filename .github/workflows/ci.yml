@@ -386,12 +386,65 @@ jobs:
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
 
-      - name: "Protocol E2E: flash-loan (L1\u2192L2\u2192L1 with tokens)"
+      - name: "Protocol E2E: helloWorld (L1→L2 simple)"
         timeout-minutes: 5
-        continue-on-error: true
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/helloWorld/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: deepScope (L2→L1 deep nested scope)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/deepScope/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: siblingScopes (L2→L1 two sibling calls)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/siblingScopes/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: multi-call-nested (L1→L2 nested multi-call)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/multi-call-nested/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: multi-call-nestedL2 (L2→L1 nested multi-call)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/multi-call-nestedL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: flash-loan (L1→L2→L1 with tokens)"
+        timeout-minutes: 5
         run: |
           cd contracts/sync-rollups-protocol
           bash script/e2e/shared/run-network.sh script/e2e/flash-loan/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: reentrantCrossChainCalls (5-hop reentrant)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/reentrantCrossChainCalls/E2E.s.sol \
             --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
