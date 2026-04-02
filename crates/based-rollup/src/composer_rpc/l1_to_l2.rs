@@ -3293,13 +3293,23 @@ async fn trace_and_detect_internal_calls(
                             .await;
 
                             if let Some((trace, success)) = sim_result {
-                                // When simulation succeeded: the top-level output of
-                                // executeIncomingCrossChainCall IS the final return data,
-                                // ABI-encoded as `bytes memory` (offset+len+data).
-                                // When reverted: fall back to inner destination extraction.
-                                let (ret_data, inner_success) = if success {
+                                // ALWAYS use BFS extraction to find the SHALLOWEST
+                                // successful call to the destination. For reentrant
+                                // patterns, the top-level executeIncomingCrossChainCall
+                                // may succeed but return scope-chain data instead of
+                                // the raw destination return. BFS finds the actual
+                                // destination call's output at the correct depth.
+                                let inner = extract_inner_destination_return_data(
+                                    &trace, call_destination,
+                                ).unwrap_or_default();
+                                let inner_success = !inner.is_empty() || destination_call_succeeded_in_trace(
+                                    &trace, call_destination,
+                                );
+
+                                // If BFS failed but top-level succeeded, use top-level
+                                // as fallback (ABI decode bytes memory).
+                                let (ret_data, inner_success) = if inner.is_empty() && success {
                                     let raw = extract_return_data_from_trace(&trace);
-                                    // Decode ABI `bytes memory`: offset(32) + len(32) + data
                                     let decoded = if raw.len() >= 64 {
                                         let dlen = U256::from_be_slice(&raw[32..64]).to::<usize>();
                                         raw[64..64 + dlen.min(raw.len() - 64)].to_vec()
@@ -3308,13 +3318,7 @@ async fn trace_and_detect_internal_calls(
                                     };
                                     (decoded, true)
                                 } else {
-                                    let inner = extract_inner_destination_return_data(
-                                        &trace, call_destination,
-                                    ).unwrap_or_default();
-                                    let ok = destination_call_succeeded_in_trace(
-                                        &trace, call_destination,
-                                    );
-                                    (inner, ok)
+                                    (inner, inner_success)
                                 };
 
                                 tracing::info!(
