@@ -277,6 +277,9 @@ pub struct BuildExecutionTableCall {
     /// Iterative discovery iteration when this call was first detected.
     #[serde(default)]
     pub discovery_iteration: usize,
+    /// Original L1 trace depth from walk_trace_tree.
+    #[serde(default)]
+    pub l1_trace_depth: usize,
 }
 
 /// Result of building a multi-call execution table.
@@ -821,6 +824,7 @@ where
                 target_rollup_id: c.target_rollup_id,
                 scope: c.scope.clone(),
                 discovery_iteration: c.discovery_iteration,
+                l1_trace_depth: c.l1_trace_depth,
             })
             .collect();
 

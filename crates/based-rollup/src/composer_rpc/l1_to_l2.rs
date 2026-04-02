@@ -436,9 +436,12 @@ async fn queue_execution_table(
                 // can distinguish them from L1→L2 calls.
                 call_json["targetRollupId"] = serde_json::json!(0u64);
             }
-            // Propagate discovery iteration for reentrant detection.
+            // Propagate discovery iteration and L1 trace depth for reentrant detection.
             if c.discovery_iteration > 0 {
                 call_json["discoveryIteration"] = serde_json::json!(c.discovery_iteration);
+            }
+            if c.trace_depth > 0 {
+                call_json["l1TraceDepth"] = serde_json::json!(c.trace_depth);
             }
             call_json
         })
@@ -1799,6 +1802,7 @@ async fn build_and_run_l1_postbatch_trace(
             },
             scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
             discovery_iteration: c.discovery_iteration,
+            l1_trace_depth: c.trace_depth,
         })
         .collect();
 
@@ -3363,6 +3367,7 @@ async fn trace_and_detect_internal_calls(
                                     },
                                     scope: if c.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; c.trace_depth] },
                                     discovery_iteration: c.discovery_iteration,
+                                    l1_trace_depth: c.trace_depth,
                                 })
                                 .collect();
                             let analyzed = crate::table_builder::analyze_continuation_calls(
@@ -3552,8 +3557,12 @@ async fn trace_and_detect_internal_calls(
                     for (i, c) in detected_calls.iter().enumerate() {
                         tracing::info!(
                             target: "based_rollup::l1_proxy",
-                            "  CALL[{}]: dest={} ret_len={} success={} parent={:?}",
-                            i, c.destination, c.return_data.len(), c.call_success, c.parent_call_index
+                            "  CALL[{}]: dest={} ret_len={} ret_hex={} success={} parent={:?} disc_iter={}",
+                            i, c.destination, c.return_data.len(),
+                            if c.return_data.is_empty() { "0x".to_string() } else {
+                                format!("0x{}", hex::encode(&c.return_data[..c.return_data.len().min(32)]))
+                            },
+                            c.call_success, c.parent_call_index, c.discovery_iteration
                         );
                     }
                 }

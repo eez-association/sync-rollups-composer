@@ -286,23 +286,21 @@ pub fn build_continuation_entries(
     //   Phase 1: ALL child entries (consumed during scope navigation, FIFO)
     //   Phase 2: ALL result propagation entries (consumed as scopes unwind, bottom-up)
     // In continuation patterns (flash-loan), children are leaves — no reentrant.
-    // Detect reentrant: L1→L2 calls were discovered across MULTIPLE iterative
-    // discovery iterations. In reentrant patterns (deepCall), each level triggers
-    // the next via scope navigation — the next L1→L2 call only appears in a later
-    // iteration when the child's L1 execution is traced.
-    // In continuation patterns (multi-call-nested), ALL L1→L2 calls are visible in
-    // the user's direct call tree from the SAME iteration.
-    let max_l1_to_l2_iter = l1_to_l2_calls
-        .iter()
-        .map(|&(_, c)| c.discovery_iteration)
-        .max()
-        .unwrap_or(0);
-    let min_l1_to_l2_iter = l1_to_l2_calls
-        .iter()
-        .map(|&(_, c)| c.discovery_iteration)
-        .min()
-        .unwrap_or(0);
-    let is_reentrant = l1_to_l2_calls.len() > 1 && max_l1_to_l2_iter > min_l1_to_l2_iter;
+    // Detect reentrant vs continuation using L1 trace depth.
+    //
+    // Reentrant (deepCall): each L1→L2 call is nested inside scope navigation
+    // on L1 → DIFFERENT trace depths (1, 7, 13). The depth field on DetectedCall
+    // carries the L1 trace depth for L1→L2 calls (set from L1DetectedCall.l1_trace_depth
+    // via analyze_continuation_calls).
+    //
+    // Continuation (multi-call-nested): all L1→L2 calls are siblings in the
+    // user's direct call tree → SAME trace depth (all 0 or all same value).
+    //
+    // Signal: L1→L2 calls with varying depth → reentrant.
+    //         L1→L2 calls with uniform depth → continuation.
+    let first_depth = l1_to_l2_calls.first().map(|&(_, c)| c.depth).unwrap_or(0);
+    let has_varying_depth = l1_to_l2_calls.iter().any(|&(_, c)| c.depth != first_depth);
+    let is_reentrant = l1_to_l2_calls.len() > 1 && has_varying_depth;
 
     if is_reentrant {
         // ── REENTRANT MODEL ──
@@ -733,6 +731,11 @@ pub struct L1DetectedCall {
     /// from continuation (all calls in same iteration) patterns.
     #[serde(default)]
     pub discovery_iteration: usize,
+    /// Original L1 trace depth from walk_trace_tree. L1→L2 sibling calls have
+    /// the same depth; reentrant calls (inside scope navigation) have increasing
+    /// depths. Used to distinguish reentrant from continuation patterns.
+    #[serde(default)]
+    pub l1_trace_depth: usize,
 }
 
 /// Serde default for `call_success` — defaults to `true` (success).
@@ -821,7 +824,7 @@ pub fn analyze_continuation_calls(
                     call_action,
                     parent_call_index: None,
                     is_continuation,
-                    depth: 0,
+                    depth: call.l1_trace_depth, // L1 trace depth for reentrant detection
                     delivery_return_data: vec![],
                     l2_return_data: call.l2_return_data.clone(),
                     l2_delivery_failed: !call.call_success,
