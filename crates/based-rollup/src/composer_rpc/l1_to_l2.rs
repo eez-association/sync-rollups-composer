@@ -1047,7 +1047,6 @@ async fn simulate_l1_to_l2_call_on_l2(
 /// Used for multi-call patterns like CallTwice where identical calls need to see
 /// each other's state effects (e.g., Counter.increment() twice → returns 1, then 2).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn simulate_l1_to_l2_call_chained_on_l2(
     client: &reqwest::Client,
     l2_rpc_url: &str,
@@ -2082,24 +2081,6 @@ async fn build_and_run_l1_postbatch_trace(
 ///
 /// The L1 trace shows these as nested calls. This function walks the trace
 /// looking for a call to the child's destination address that succeeds, and
-/// extracts its return data. If the call is mediated by a proxy's
-/// `executeOnBehalf`, the proxy's output IS the inner call's return data
-/// (assembly return in executeOnBehalf).
-///
-/// Returns the delivery return data (empty vec if not found).
-fn extract_delivery_return_from_l1_trace(
-    user_trace: &Value,
-    child_dest: Address,
-    rollups_address: Address,
-) -> Vec<u8> {
-    extract_delivery_return_from_l1_trace_with_calldata(
-        user_trace,
-        child_dest,
-        rollups_address,
-        None,
-    )
-}
-
 /// Extract delivery return for a specific child, optionally matching by calldata.
 /// When `child_calldata` is Some, the call must match both destination AND input
 /// (selector + args). This distinguishes deepCall(3) from deepCall(1) when both
