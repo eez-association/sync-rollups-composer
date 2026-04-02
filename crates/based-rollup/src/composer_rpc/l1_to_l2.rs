@@ -1074,7 +1074,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1184,7 +1184,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1207,7 +1207,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1235,7 +1235,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
                 value,
                 source_address,
                 rollup_id,
-                &l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope,  // l2_scope from L1 trace_depth
             )
             .await;
         }
@@ -1259,7 +1259,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
             value,
             source_address,
             rollup_id,
-                &l2_scope,  // l2_scope from L1 trace_depth
+                l2_scope,  // l2_scope from L1 trace_depth
         )
         .await;
     }

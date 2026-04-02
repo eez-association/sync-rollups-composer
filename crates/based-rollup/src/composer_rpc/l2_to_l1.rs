@@ -2495,9 +2495,7 @@ async fn simulate_l1_combined_delivery(
                 let mut s = if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] };
                 s.push(U256::from(i));
                 s
-            } else {
-                if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] }
-            };
+            } else if call.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; call.trace_depth] };
 
             let entries = if my_return_calls.is_empty() {
                 // Simple case: just this L2→L1 call.
@@ -2811,9 +2809,7 @@ async fn simulate_l1_combined_delivery(
                 let mut s = if calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; calls[call_idx].trace_depth] };
                 s.push(U256::from(call_idx));
                 s
-            } else {
-                if calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; calls[call_idx].trace_depth] }
-            };
+            } else if calls[call_idx].trace_depth <= 1 { vec![] } else { vec![U256::ZERO; calls[call_idx].trace_depth] };
             let new_returns = extract_l1_to_l2_return_calls(
                 client,
                 l1_rpc_url,
@@ -4077,7 +4073,7 @@ async fn trace_and_detect_l2_internal_calls(
             // If it finds return calls, ALL duplicate calls need the continuation path.
             let first = &detected_calls[0];
             let root_scope: Vec<U256> = if first.trace_depth <= 1 { vec![] } else { vec![U256::ZERO; first.trace_depth] };
-            let returns = if let Some((_ret, _failed, returns)) = simulate_l1_delivery(
+            if let Some((_ret, _failed, returns)) = simulate_l1_delivery(
                 client,
                 l1_rpc_url,
                 upstream_url,
@@ -4096,8 +4092,7 @@ async fn trace_and_detect_l2_internal_calls(
                 returns
             } else {
                 vec![]
-            };
-            returns
+            }
         };
 
         if !detected_return_calls.is_empty() {
