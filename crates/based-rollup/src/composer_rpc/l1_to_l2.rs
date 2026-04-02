@@ -3335,7 +3335,14 @@ async fn trace_and_detect_internal_calls(
                                     "post-convergence: extracted child delivery return from L1 trace"
                                 );
 
-                                if !delivery_data.is_empty() {
+                                // Only update if current data is stale (error selector ≤4 bytes
+                                // or call failed). Don't overwrite valid data from iterative
+                                // discovery (e.g., chained L1 sim that returned uint256(2)
+                                // for the second CounterL1 call).
+                                let current = &detected_calls[child_idx];
+                                if !delivery_data.is_empty()
+                                    && (current.return_data.len() <= 4 || !current.call_success)
+                                {
                                     detected_calls[child_idx].return_data = delivery_data;
                                     detected_calls[child_idx].call_success = true;
                                 }
