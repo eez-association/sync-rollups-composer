@@ -645,6 +645,16 @@ pub fn build_continuation_entries(
                     };
                 let child_result_hash = compute_action_hash(&child_result);
 
+                tracing::info!(
+                    target: "based_rollup::table_builder",
+                    "L1 scope resolution: child_pos={} child_result_hash={} child_target_rollup={} delivery_ret_len={} delivery_ret_hex={}",
+                    child_pos, child_result_hash, child_target_rollup,
+                    child.delivery_return_data.len(),
+                    if child.delivery_return_data.is_empty() { "0x".to_string() } else {
+                        format!("0x{}", hex::encode(&child.delivery_return_data[..child.delivery_return_data.len().min(32)]))
+                    }
+                );
+
                 // Terminal next_action: the RESULT of the OUTER scope after
                 // the child's scope resolves. This is NOT the child's delivery
                 // return — it's the parent L1→L2 call's L2 delivery result.
