@@ -4941,133 +4941,106 @@ async fn simulate_l2_return_call_delivery(
             data_len = rc.data.len(),
             selector = %data_prefix,
             value = %rc.value,
-            "simulating return call on L2 (simple trace: from=CCM, to=destination, data=calldata)"
+            scope_len = rc.scope.len(),
+            "simulating return call on L2 via executeIncomingCrossChainCall (protocol path)"
         );
 
-        // Phase 1: Simple trace WITHOUT loadExecutionTable to discover calls even in reverts.
-        // We trace the return call's execution directly (from=CCM, to=destination, data=calldata).
-        // _processCallAtScope uses try/catch, so the destination contract doesn't revert
-        // even when the nested proxy call fails — callTracer shows the subcalls.
+        // Simulate the return call using the real protocol path:
+        // tx[0]: loadExecutionTable(placeholder entries) — makes scope navigation work
+        // tx[1]: executeIncomingCrossChainCall(dest, value, data, source, rollupId, scope)
         //
-        // Phase 2: If phase 1 finds nothing, try with loadExecutionTable pre-loading.
-        // Build dummy entries for the return call so the execution doesn't revert,
-        // then trace again.
+        // Previous approach called debug_traceCall(from=CCM, to=dest) directly, which:
+        // - Used wrong msg.sender (CCM instead of proxy)
+        // - Skipped scope navigation entirely
+        // - Didn't match real execution context
+        //
+        // The protocol path goes through CCM → proxy → destination, matching
+        // real L2 block execution where the driver calls executeIncomingCrossChainCall.
 
-        // Try simple trace first (fast path — works because _processCallAtScope try/catch).
-        let simple_trace_req = serde_json::json!({
+        // Build the executeIncomingCrossChainCall calldata using the return call's info.
+        let incoming_action = crate::cross_chain::CrossChainAction {
+            action_type: crate::cross_chain::CrossChainActionType::Call,
+            rollup_id: U256::from(rollup_id),
+            destination: rc.destination,
+            value: rc.value,
+            data: rc.data.clone(),
+            failed: false,
+            source_address: rc.source_address,
+            source_rollup: U256::ZERO, // L1 (MAINNET_ROLLUP_ID)
+            scope: rc.scope.clone(),
+        };
+        let exec_calldata =
+            crate::cross_chain::encode_execute_incoming_call_calldata(&incoming_action);
+        let exec_data = format!("0x{}", hex::encode(exec_calldata.as_ref()));
+
+        // Build placeholder L2 entries for loadExecutionTable so scope navigation
+        // can find entries if the destination triggers further cross-chain calls.
+        let placeholder_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+            rc.destination,
+            rc.data.clone(),
+            rc.value,
+            rc.source_address,
+            rollup_id,
+            vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
+            vec![],     // delivery_return_data placeholder
+            false,      // delivery_failed placeholder
+            vec![],     // l1_delivery_scope placeholder
+        );
+
+        let mut detected_for_call: Vec<DetectedL2InternalCall> = Vec::new();
+
+        // Build traceCallMany: [loadExecutionTable, executeIncomingCrossChainCall]
+        let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
+            &placeholder_entries.l2_table_entries,
+        );
+        let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
+
+        let trace_req = serde_json::json!({
             "jsonrpc": "2.0",
-            "method": "debug_traceCall",
+            "method": "debug_traceCallMany",
             "params": [
-                {
-                    "from": format!("{ccm_address}"),
-                    "to": format!("{}", rc.destination),
-                    "data": format!("0x{}", hex::encode(&rc.data)),
-                    "value": format!("0x{:x}", rc.value),
-                    "gas": "0x1c9c380"
-                },
-                "latest",
+                [
+                    {
+                        "transactions": [
+                            {
+                                "from": system_addr,
+                                "to": ccm_hex,
+                                "data": load_data,
+                                "gas": "0x1c9c380"
+                            },
+                            {
+                                "from": system_addr,
+                                "to": ccm_hex,
+                                "data": exec_data,
+                                "value": format!("0x{:x}", rc.value),
+                                "gas": "0x2faf080"
+                            }
+                        ]
+                    }
+                ],
+                null,
                 { "tracer": "callTracer" }
             ],
             "id": 99970
         });
 
-        let mut detected_for_call: Vec<DetectedL2InternalCall> = Vec::new();
-
-        if let Ok(resp) = client.post(l2_rpc_url).json(&simple_trace_req).send().await {
+        if let Ok(resp) = client.post(l2_rpc_url).json(&trace_req).send().await {
             if let Ok(body) = resp.json::<Value>().await {
-                if let Some(trace) = body.get("result") {
-                    detected_for_call = walk_l2_trace_generic(
-                        client,
-                        l2_rpc_url,
-                        ccm_address,
-                        trace,
-                        &mut proxy_cache,
-                    )
-                    .await;
-                }
-            }
-        }
-
-        // If simple trace found nothing and the call likely reverted, try with
-        // loadExecutionTable pre-loading via traceCallMany.
-        if detected_for_call.is_empty() {
-            tracing::debug!(
-                target: "based_rollup::proxy",
-                idx = i,
-                destination = %rc.destination,
-                "simple trace found no nested calls — trying traceCallMany with loadExecutionTable"
-            );
-
-            // Build placeholder L2 entries. We don't know the exact nested call yet,
-            // but we can build a generic CALL+RESULT entry for the return call itself.
-            // This makes the top-level execution succeed (the return call's scope
-            // navigation consumes the entry), revealing nested proxy calls.
-            let placeholder_entries = crate::cross_chain::build_l2_to_l1_call_entries(
-                rc.destination,
-                rc.data.clone(),
-                rc.value,
-                rc.source_address,
-                rollup_id,
-                vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
-                vec![],     // delivery_return_data placeholder
-                false,      // delivery_failed placeholder
-                vec![],     // l1_delivery_scope placeholder
-            );
-
-            if !placeholder_entries.l2_table_entries.is_empty() {
-                let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
-                    &placeholder_entries.l2_table_entries,
-                );
-                let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
-
-                let bundle_trace_req = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "debug_traceCallMany",
-                    "params": [
-                        [
-                            {
-                                "transactions": [
-                                    {
-                                        "from": system_addr,
-                                        "to": ccm_hex,
-                                        "data": load_data,
-                                        "gas": "0x1c9c380"
-                                    },
-                                    {
-                                        "from": format!("{ccm_address}"),
-                                        "to": format!("{}", rc.destination),
-                                        "data": format!("0x{}", hex::encode(&rc.data)),
-                                        "value": format!("0x{:x}", rc.value),
-                                        "gas": "0x2faf080"
-                                    }
-                                ]
-                            }
-                        ],
-                        null,
-                        { "tracer": "callTracer" }
-                    ],
-                    "id": 99971
-                });
-
-                if let Ok(resp) = client.post(l2_rpc_url).json(&bundle_trace_req).send().await {
-                    if let Ok(body) = resp.json::<Value>().await {
-                        // Extract tx1 trace (the return call execution with entries loaded)
-                        if let Some(traces) = body
-                            .get("result")
-                            .and_then(|r| r.get(0))
-                            .and_then(|b| b.as_array())
-                        {
-                            if traces.len() >= 2 {
-                                detected_for_call = walk_l2_trace_generic(
-                                    client,
-                                    l2_rpc_url,
-                                    ccm_address,
-                                    &traces[1],
-                                    &mut proxy_cache,
-                                )
-                                .await;
-                            }
-                        }
+                // Extract tx[1] trace (executeIncomingCrossChainCall with entries loaded)
+                if let Some(traces) = body
+                    .get("result")
+                    .and_then(|r| r.get(0))
+                    .and_then(|b| b.as_array())
+                {
+                    if traces.len() >= 2 {
+                        detected_for_call = walk_l2_trace_generic(
+                            client,
+                            l2_rpc_url,
+                            ccm_address,
+                            &traces[1],
+                            &mut proxy_cache,
+                        )
+                        .await;
                     }
                 }
             }
