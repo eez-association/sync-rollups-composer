@@ -3259,12 +3259,51 @@ async fn trace_and_detect_internal_calls(
                                 e.state_deltas.clear();
                             }
 
+                            // === LOG: detected_calls state at this point ===
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                "post-convergence: detected_calls state before L2 sim for idx={}:",
+                                idx
+                            );
+                            for (di, dc) in detected_calls.iter().enumerate() {
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    "  dc[{}]: dest={}..{} target_rollup={} parent={:?} ret_len={} ret_hex={} success={} calldata_hex={}",
+                                    di,
+                                    &format!("{}", dc.destination)[..10],
+                                    &format!("{}", dc.destination)[38..],
+                                    dc.target_rollup_id,
+                                    dc.parent_call_index,
+                                    dc.return_data.len(),
+                                    if dc.return_data.is_empty() { "0x".to_string() } else {
+                                        format!("0x{}", hex::encode(&dc.return_data[..dc.return_data.len().min(32)]))
+                                    },
+                                    dc.call_success,
+                                    format!("0x{}", hex::encode(&dc.calldata[..dc.calldata.len().min(36)]))
+                                );
+                            }
+
+                            // === LOG: L2 entries loaded ===
                             tracing::info!(
                                 target: "based_rollup::l1_proxy",
                                 idx,
                                 l2_entry_count = l2_entries.len(),
-                                "post-convergence: L2 sim with rebuilt entries"
+                                "post-convergence: L2 entries for simulation:"
                             );
+                            for (ei, e) in l2_entries.iter().enumerate() {
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    "  l2e[{}]: actionHash={} nextType={:?} nextRollup={} nextDest={}..{} nextDataLen={} nextScope={:?}",
+                                    ei,
+                                    e.action_hash,
+                                    e.next_action.action_type,
+                                    e.next_action.rollup_id,
+                                    &format!("{}", e.next_action.destination)[..10.min(format!("{}", e.next_action.destination).len())],
+                                    &format!("{}", e.next_action.destination)[format!("{}", e.next_action.destination).len().saturating_sub(4)..],
+                                    e.next_action.data.len(),
+                                    e.next_action.scope
+                                );
+                            }
 
                             let sim_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Call,
