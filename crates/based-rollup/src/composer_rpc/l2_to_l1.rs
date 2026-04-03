@@ -4145,6 +4145,145 @@ async fn trace_and_detect_l2_internal_calls(
         }
     }
 
+    // Post-discovery verification: if early return calls were found, retrace the user
+    // tx on L2 with continuation entries (scope navigation) to discover calls that are
+    // only reachable through return call delivery. This handles future patterns where
+    // a contract's behavior depends on side effects of the return call (e.g., token
+    // transfers that gate subsequent cross-chain calls).
+    //
+    // This is ADDITIVE: the iterative loop already discovered all calls reachable
+    // without scope navigation. This step can only ADD new calls, never remove them.
+    if !early_return_calls.is_empty() && !detected_calls.is_empty() {
+        // Convert our types to table_builder types for continuation entry building.
+        let tb_l2_calls: Vec<crate::table_builder::L2DetectedCall> = detected_calls
+            .iter()
+            .map(|c| crate::table_builder::L2DetectedCall {
+                destination: c.destination,
+                data: c.calldata.clone(),
+                value: c.value,
+                source_address: c.source_address,
+                delivery_return_data: c.delivery_return_data.clone(),
+                delivery_failed: c.delivery_failed,
+                scope: vec![U256::ZERO; c.trace_depth.max(1)],
+            })
+            .collect();
+        let tb_return_calls: Vec<crate::table_builder::L2ReturnCall> = early_return_calls
+            .iter()
+            .map(|rc| crate::table_builder::L2ReturnCall {
+                destination: rc.destination,
+                data: rc.data.clone(),
+                value: rc.value,
+                source_address: rc.source_address,
+                parent_call_index: rc.parent_call_index,
+                l2_return_data: rc.l2_return_data.clone(),
+                l2_delivery_failed: rc.l2_delivery_failed,
+                scope: rc.scope.clone(),
+            })
+            .collect();
+
+        let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+            &tb_l2_calls,
+            &tb_return_calls,
+            rollup_id,
+        );
+
+        if !analyzed.is_empty() {
+            let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
+                &analyzed,
+                U256::from(rollup_id),
+                &tx_bytes,
+            );
+
+            if !continuation.l2_entries.is_empty() {
+                let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
+                    &continuation.l2_entries,
+                );
+                let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
+                let ccm_hex = format!("{cross_chain_manager_address}");
+                let builder_hex = format!("{builder_address}");
+
+                let retrace_req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "debug_traceCallMany",
+                    "params": [
+                        [{
+                            "transactions": [
+                                {
+                                    "from": builder_hex,
+                                    "to": ccm_hex,
+                                    "data": load_data,
+                                    "gas": "0x1c9c380"
+                                },
+                                {
+                                    "from": format!("{sender}"),
+                                    "to": format!("{to_addr}"),
+                                    "data": format!("0x{}", hex::encode(input)),
+                                    "value": format!("0x{:x}", value),
+                                    "gas": "0x2faf080"
+                                }
+                            ]
+                        }],
+                        null,
+                        { "tracer": "callTracer" }
+                    ],
+                    "id": 99990
+                });
+
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    l2_entry_count = continuation.l2_entries.len(),
+                    "post-discovery retrace: retracing user tx with continuation entries"
+                );
+
+                let mut proxy_cache =
+                    std::collections::HashMap::<Address, Option<super::trace::ProxyInfo>>::new();
+                if let Ok(resp) = client.post(upstream_url).json(&retrace_req).send().await {
+                    if let Ok(body) = resp.json::<Value>().await {
+                        if let Some(traces) = body
+                            .get("result")
+                            .and_then(|r| r.get(0))
+                            .and_then(|b| b.as_array())
+                        {
+                            if traces.len() >= 2 {
+                                let new_detected = walk_l2_trace_generic(
+                                    client,
+                                    upstream_url,
+                                    cross_chain_manager_address,
+                                    &traces[1],
+                                    &mut proxy_cache,
+                                )
+                                .await;
+
+                                let truly_new =
+                                    filter_new_by_count(new_detected, &detected_calls, |a, b| {
+                                        a.destination == b.destination
+                                            && a.calldata == b.calldata
+                                            && a.value == b.value
+                                            && a.source_address == b.source_address
+                                    });
+
+                                if !truly_new.is_empty() {
+                                    tracing::info!(
+                                        target: "based_rollup::proxy",
+                                        new_count = truly_new.len(),
+                                        "post-discovery retrace found NEW L2→L1 calls \
+                                         (only reachable via scope navigation)"
+                                    );
+                                    detected_calls.extend(truly_new);
+                                } else {
+                                    tracing::info!(
+                                        target: "based_rollup::proxy",
+                                        "post-discovery retrace: no new calls (existing discovery sufficient)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Route through the appropriate queuing path based on call count.
     // Check for duplicate calls (same action identity). Identical calls must
     // route independently — the continuation path produces chained RESULT→CALL
