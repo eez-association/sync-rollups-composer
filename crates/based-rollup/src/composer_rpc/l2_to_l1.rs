@@ -3658,6 +3658,11 @@ async fn trace_and_detect_l2_internal_calls(
         );
     }
 
+    // Return calls discovered during L2 iterative discovery's simulate_l1_delivery
+    // fallback. Previously discarded — now saved so Phase A/B can skip redundant
+    // rediscovery on its first iteration.
+    let mut early_return_calls: Vec<DetectedReturnCall> = Vec::new();
+
     // Check if the top-level call reverted (multi-call continuation pattern: L2→L1 calls
     // that need entries pre-loaded before the user tx can succeed).
     let top_level_error =
@@ -3758,7 +3763,7 @@ async fn trace_and_detect_l2_internal_calls(
                                         // REAL return data. This is heavier but correct for nested
                                         // L2→L1→L2 patterns where the L1 delivery triggers further
                                         // cross-chain calls via executeCrossChainCall.
-                                        if let Some((ret_data, failed, _return_calls)) =
+                                        if let Some((ret_data, failed, return_calls)) =
                                             simulate_l1_delivery(
                                                 client,
                                                 l1_rpc_url,
@@ -3779,6 +3784,15 @@ async fn trace_and_detect_l2_internal_calls(
                                         {
                                             call.delivery_return_data = ret_data.clone();
                                             call.delivery_failed = failed;
+                                            // Capture return calls discovered during L1 simulation.
+                                            // Previously discarded — now saved for early availability
+                                            // in the discovery pipeline. The Phase A/B loop
+                                            // (simulate_l1_combined_delivery) rediscovers these, but
+                                            // having them here enables future unified discovery.
+                                            if !return_calls.is_empty() {
+                                                early_return_calls
+                                                    .extend(return_calls.iter().cloned());
+                                            }
                                             tracing::info!(
                                                 target: "based_rollup::proxy",
                                                 iteration,
@@ -3786,6 +3800,7 @@ async fn trace_and_detect_l2_internal_calls(
                                                 return_data_len = ret_data.len(),
                                                 return_data_hex = %format!("0x{}", hex::encode(&ret_data[..ret_data.len().min(32)])),
                                                 delivery_failed = failed,
+                                                early_return_calls = return_calls.len(),
                                                 "iterative discovery: L1 delivery return data via full simulate_l1_delivery"
                                             );
                                         }
@@ -4090,9 +4105,29 @@ async fn trace_and_detect_l2_internal_calls(
         // Update detected_calls with the full set from iterative discovery.
         detected_calls = all_calls;
 
+        if !early_return_calls.is_empty() {
+            tracing::info!(
+                target: "based_rollup::proxy",
+                early_return_call_count = early_return_calls.len(),
+                "iterative L2 discovery captured return calls from simulate_l1_delivery"
+            );
+            for (ri, rc) in early_return_calls.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    ri,
+                    dest = %rc.destination,
+                    source = %rc.source_address,
+                    data_len = rc.data.len(),
+                    scope_len = rc.scope.len(),
+                    "early return call from L2 iterative discovery"
+                );
+            }
+        }
+
         tracing::info!(
             target: "based_rollup::proxy",
             count = detected_calls.len(),
+            early_return_calls = early_return_calls.len(),
             "iterative L2 discovery complete"
         );
 
@@ -4310,7 +4345,16 @@ async fn trace_and_detect_l2_internal_calls(
         const MAX_RECURSIVE_DEPTH: usize = 5;
 
         let mut all_detected_l2_calls = detected_calls.clone();
-        let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
+        // Seed with return calls already discovered during L2 iterative discovery.
+        // This avoids redundant rediscovery in Phase A's first iteration.
+        let mut all_return_calls: Vec<DetectedReturnCall> = early_return_calls.clone();
+        if !all_return_calls.is_empty() {
+            tracing::info!(
+                target: "based_rollup::proxy",
+                count = all_return_calls.len(),
+                "Phase A/B seeded with early return calls from L2 iterative discovery"
+            );
+        }
         let mut current_l2_calls = detected_calls.clone();
 
         for depth in 0..MAX_RECURSIVE_DEPTH {
