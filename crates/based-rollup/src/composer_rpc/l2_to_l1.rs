@@ -2469,11 +2469,17 @@ async fn simulate_l1_combined_delivery(
 
     // Iterative discovery loop.
     let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
-    // Per-call results: indexed by position in `calls` slice.
-    let mut per_call_return_data: Vec<Vec<u8>> = vec![vec![]; calls.len()];
-    let mut per_call_delivery_failed: Vec<bool> = vec![false; calls.len()];
+    // Per-call results: seed from known delivery data instead of empty placeholders.
+    // The L2 iterative discovery already captured real delivery return data via its
+    // own L1 simulation. Using it here gives correct RESULT hashes on iteration 1,
+    // eliminating the placeholder→real→confirm convergence cycle for leaf deliveries.
+    let mut per_call_return_data: Vec<Vec<u8>> = calls
+        .iter()
+        .map(|c| c.delivery_return_data.clone())
+        .collect();
+    let mut per_call_delivery_failed: Vec<bool> = calls.iter().map(|c| c.delivery_failed).collect();
     // Track previous return data for convergence (#254 item 7).
-    let mut prev_per_call_return_data: Vec<Vec<u8>> = vec![vec![]; calls.len()];
+    let mut prev_per_call_return_data: Vec<Vec<u8>> = per_call_return_data.clone();
 
     for iteration in 1..=MAX_SIMULATION_ITERATIONS {
         tracing::info!(
