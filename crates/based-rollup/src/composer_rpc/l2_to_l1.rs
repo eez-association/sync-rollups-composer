@@ -1619,6 +1619,7 @@ async fn simulate_l1_delivery(
     value: U256,
     rlp_encoded_tx: &[u8],
     root_scope: &[U256],
+    known_delivery_return_data: &[u8],
 ) -> Option<(Vec<u8>, bool, Vec<DetectedReturnCall>)> {
     // First check if destination has code on L1.
     // If it's an EOA, return data is empty and we skip simulation.
@@ -1662,9 +1663,12 @@ async fn simulate_l1_delivery(
     };
 
     // Iterative discovery loop: simulate, extract return calls, rebuild entries, repeat.
+    // Seed with known delivery data from the L2 iterative discovery's own L1 simulation.
+    // This gives correct RESULT hashes on iteration 1, avoiding the convergence cycle
+    // (empty → real → confirm) for calls where delivery_return_data is already known.
     let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
-    let mut final_return_data: Vec<u8> = Vec::new();
-    let mut prev_return_data: Vec<u8> = Vec::new();
+    let mut final_return_data: Vec<u8> = known_delivery_return_data.to_vec();
+    let mut prev_return_data: Vec<u8> = known_delivery_return_data.to_vec();
     let mut final_delivery_failed = false;
 
     for iteration in 1..=MAX_SIMULATION_ITERATIONS {
@@ -3785,6 +3789,7 @@ async fn trace_and_detect_l2_internal_calls(
                                                 call.value,
                                                 &tx_bytes,
                                                 &vec![U256::ZERO; call.trace_depth.max(1)],
+                                                &call.delivery_return_data,
                                             )
                                             .await
                                         {
@@ -4337,6 +4342,7 @@ async fn trace_and_detect_l2_internal_calls(
                 first.value,
                 &tx_bytes,
                 &root_scope,
+                &first.delivery_return_data,
             )
             .await
             {
@@ -4644,6 +4650,7 @@ async fn trace_and_detect_l2_internal_calls(
         call.value,
         &tx_bytes,
         &root_scope,
+        &call.delivery_return_data,
     )
     .await
     .unwrap_or((vec![], false, vec![]));
