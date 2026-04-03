@@ -451,28 +451,6 @@ jobs:
 
       # ── Bash E2E tests (longer, integration-level) ──────────────────
 
-      - name: Stop background tx senders before bash E2E tests
-        run: |
-          echo "Stopping tx-sender and complex-tx-sender to avoid contention..."
-          docker compose -f deployments/testnet-eez/docker-compose.yml \
-            stop tx-sender complex-tx-sender crosschain-tx-sender 2>/dev/null || true
-          echo "Waiting for builder to settle..."
-          for i in $(seq 1 30); do
-            health=$(curl -s --max-time 2 http://localhost:9560/health 2>/dev/null || echo "")
-            pending=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pending_submissions',0))" 2>/dev/null || echo "?")
-            rewinds=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('consecutive_rewind_cycles',0))" 2>/dev/null || echo "?")
-            echo "  [$i/30] pending=$pending rewinds=$rewinds"
-            if [ "$pending" = "0" ] && [ "$rewinds" = "0" ]; then
-              echo "Builder settled."
-              break
-            fi
-            sleep 2
-          done
-        env:
-          COMPOSE_PROJECT_NAME: ci-e2e
-          ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
-          DEPLOY_IMAGE: ${{ needs.docker-build.outputs.deploy-image }}
-
       - name: Run bridge E2E test
         run: bash scripts/e2e/bridge-health-check.sh
         env:
