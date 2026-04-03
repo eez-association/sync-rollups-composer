@@ -170,40 +170,6 @@ services:
       builder:
         condition: service_healthy
 
-  # Deploy L2-to-L1 reverse flash loan contracts — runs after deploy-l2 completes.
-  # Uses dev key #5 (same as deploy-l2), so must not overlap with it.
-  # If FLASH_TOKEN_ADDRESS is zero (flash loan infra not deployed), exits cleanly.
-  deploy-reverse-flash-loan:
-    image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
-    user: root
-    restart: "no"
-    entrypoint: ["bash", "-c"]
-    command:
-      - |
-        cd /app
-        source /shared/rollup.env
-        bash scripts/deploy-reverse-flash-loan.sh \
-          --l1-rpc http://l1:8545 \
-          --l2-rpc http://builder:8545 \
-          --pk "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba" \
-          --rollups "$$ROLLUPS_ADDRESS" \
-          --manager-l2 "$$CROSS_CHAIN_MANAGER_ADDRESS" \
-          --bridge-l1 "$$BRIDGE_L1_ADDRESS" \
-          --bridge-l2 "$$BRIDGE_L2_ADDRESS" \
-          --token "$$FLASH_TOKEN_ADDRESS" \
-          --wrapped-token "$$WRAPPED_TOKEN_L2" \
-          --l2-rollup-id 1 \
-          --contracts-dir /app/contracts/sync-rollups-protocol
-    volumes:
-      - ../../contracts:/app/contracts
-      - ../shared/scripts:/app/scripts
-      - shared:/shared
-    depends_on:
-      deploy-l2:
-        condition: service_completed_successfully
-      builder:
-        condition: service_healthy
-
   # Complex transaction sender — ERC20, contract deployments, edge cases
   complex-tx-sender:
     image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
@@ -217,7 +183,7 @@ services:
     volumes:
       - ../shared/scripts:/app/scripts
     depends_on:
-      deploy-reverse-flash-loan:
+      deploy-l2:
         condition: service_completed_successfully
       builder:
         condition: service_healthy

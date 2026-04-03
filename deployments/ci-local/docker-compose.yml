@@ -48,7 +48,7 @@ services:
       - l1-data:/data
       - ./genesis-l1.json:/genesis/l1-genesis.json:ro
     ports:
-      - "11555:8545"   # L1 JSON-RPC (host 11555 -> container 8545)
+      - "12555:8545"   # L1 JSON-RPC (host 12555 -> container 8545)
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8545'"]
       interval: 2s
@@ -123,11 +123,11 @@ services:
       - shared:/shared
       - builder-data:/data
     ports:
-      - "11545:8545"   # L2 JSON-RPC
-      - "11548:8547"   # L2 RPC Proxy (intercepts sendRawTransaction)
-      - "11556:9556"   # L1 RPC Proxy (MetaMask points here for cross-chain)
-      - "11560:9100"   # Health endpoint (dashboard monitoring)
-      - "127.0.0.1:11550:8546"   # L2 WebSocket (localhost only)
+      - "12545:8545"   # L2 JSON-RPC
+      - "12548:8547"   # L2 RPC Proxy (intercepts sendRawTransaction)
+      - "12556:9556"   # L1 RPC Proxy (MetaMask points here for cross-chain)
+      - "12560:9100"   # Health endpoint (dashboard monitoring)
+      - "127.0.0.1:12550:8546"   # L2 WebSocket (localhost only)
     environment:
       BUILDER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
     depends_on:
@@ -144,7 +144,7 @@ services:
       - shared:/shared
       - fullnode1-data:/data
     ports:
-      - "11546:8545"   # L2 JSON-RPC
+      - "12546:8545"   # L2 JSON-RPC
     depends_on:
       deploy:
         condition: service_completed_successfully
@@ -161,7 +161,7 @@ services:
       - shared:/shared
       - fullnode2-data:/data
     ports:
-      - "11547:8545"   # L2 JSON-RPC
+      - "12547:8545"   # L2 JSON-RPC
     depends_on:
       deploy:
         condition: service_completed_successfully

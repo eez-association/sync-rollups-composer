@@ -879,7 +879,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
 
 /// Regression test: depth-1 L2→L1 continuation produces exactly the same structure as before.
 ///
-/// This is the standard 2-call reverse flash loan pattern:
+/// This is the standard 2-call L2→L1 multi-call continuation pattern:
 ///   [0] CALL_A (root, no children)
 ///   [1] CALL_B (root, one child CALL_C)
 ///   [2] CALL_C (child of B, leaf)

@@ -230,7 +230,7 @@ jobs:
         run: |
           docker compose -f deployments/testnet-eez/docker-compose.yml \
             up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender \
-            deploy-reverse-flash-loan complex-tx-sender
+            complex-tx-sender
         env:
           COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}

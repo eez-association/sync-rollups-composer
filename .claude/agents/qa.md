@@ -202,9 +202,9 @@ bash scripts/e2e/test-multi-call-cross-chain.sh && \
 bash scripts/e2e/test-conditional-cross-chain.sh && \
 bash scripts/e2e/double-deposit-withdrawal-trace.sh
 ```
-Note: `flashloan-health-check.sh`, `flashloan-test.sh`, and `test-l2-to-l1-flash-loan.sh` require
-flash loan contracts deployed by Docker services (deploy-l2 + deploy-reverse-flash-loan). Only run
-them when those services have completed successfully.
+Note: `flashloan-health-check.sh` and `flashloan-test.sh` require
+flash loan contracts deployed by Docker services (deploy-l2). Only run
+them when that service has completed successfully.
 
 ### What each test covers
 
@@ -221,7 +221,6 @@ them when those services have completed successfully.
 | `test-conditional-cross-chain` | #18 | Conditional cross-chain (ConditionalCallTwice, issue #256) |
 | `flashloan-health-check` | #12 | L1→L2 flash loan (deploy + execute full flow) |
 | `flashloan-test` | #14 | Flash loan trigger on pre-deployed contracts |
-| `test-l2-to-l1-flash-loan` | #0 | L2→L1 reverse flash loan |
 | `double-deposit-withdrawal-trace` | #13,#6 | Concurrent 2-user deposit+withdrawal with state delta validation |
 
 ### When to run
