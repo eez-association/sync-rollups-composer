@@ -67,6 +67,8 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     };
 
     let result = build_continuation_entries(std::slice::from_ref(&call_a), l2_id);
@@ -133,6 +135,8 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     };
 
     // CALL_B: executor → executorL2.claimAndBridgeBack (continuation of A)
@@ -147,6 +151,8 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     };
 
     // CALL_C: Bridge_L2 → Bridge_L1.receiveTokens (child of B)
@@ -160,6 +166,8 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     };
 
     let calls = vec![call_a, call_b, call_c];
@@ -357,6 +365,8 @@ fn test_two_continuations_no_children() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     };
     let call_b = DetectedCall {
         direction: CallDirection::L1ToL2,
@@ -367,6 +377,8 @@ fn test_two_continuations_no_children() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     };
 
     let result = build_continuation_entries(&[call_a, call_b], l2_id);
@@ -425,6 +437,8 @@ fn make_l2_to_l1_detected(
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     }
 }
 
@@ -618,14 +632,13 @@ fn test_l2_to_l1_depth2_entry_generation() {
         "L2[4] scope resolution must target L1"
     );
 
-    // ── L1 entries: 7 total ──
-    // NOTE: After reorder_for_swap_and_pop, entries may be physically reordered
-    // to ensure correct FIFO consumption with the CCM's swap-and-pop mechanism.
-    // We verify entry CONTENTS by action_hash lookup, not by index position.
+    // ── L1 entries: 6 total (chained model) ──
+    // Chained: L2TX→A, RESULT(A)→B, child_C→D, leaf_D, scope_D, RESULT(B)→terminal
+    // NOTE: After reorder_for_swap_and_pop, entries may be physically reordered.
     assert_eq!(
         result.l1_entries.len(),
-        7,
-        "expected 7 L1 entries for depth-2 tree"
+        6,
+        "expected 6 L1 entries for depth-2 tree (chained model)"
     );
 
     // Build trigger actions to compute expected hashes.
@@ -676,15 +689,14 @@ fn test_l2_to_l1_depth2_entry_generation() {
             .collect()
     };
 
-    // L2TX trigger entries: both root calls A and B share the same L2TX trigger hash.
-    // There should be exactly 2 entries with this hash (one per root call).
+    // L2TX trigger: only 1 entry (chained model: only first call has L2TX trigger).
     let entries_l2tx = find_l1(l2tx_trigger_hash);
     assert_eq!(
         entries_l2tx.len(),
-        2,
-        "must have exactly 2 L2TX trigger entries (one per root call)"
+        1,
+        "chained model: only 1 L2TX trigger entry (first call only)"
     );
-    // First L2TX entry → delivery_A{scope=[]}
+    // L2TX entry → CALL(A, scope=[])  — nested pattern (B has children), no sibling scope
     assert_eq!(
         entries_l2tx[0].next_action.action_type,
         CrossChainActionType::Call
@@ -692,16 +704,12 @@ fn test_l2_to_l1_depth2_entry_generation() {
     assert_eq!(
         entries_l2tx[0].next_action.scope,
         vec![] as Vec<U256>,
-        "delivery must have scope=[] (per spec)"
+        "nested pattern: delivery scope must be [] (no sibling routing)"
     );
     assert_eq!(entries_l2tx[0].next_action.destination, dest_a);
-    // Second L2TX entry → execution_B{scope=[0]}
-    assert_eq!(
-        entries_l2tx[1].next_action.action_type,
-        CrossChainActionType::Call
-    );
-    assert_eq!(entries_l2tx[1].next_action.scope, vec![U256::ZERO]);
-    assert_eq!(entries_l2tx[1].next_action.destination, dest_b);
+
+    // In the chained model, RESULT(A) → CALL(B, scope=[1]) is a RESULT-triggered entry.
+    // It uses the same RESULT hash as other void results, verified via find_l1 below.
 
     // child_trigger_C → execution_C{scope=[0]}
     let entries_c = find_l1(child_trigger_c_hash);
@@ -729,18 +737,30 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
     assert_eq!(entries_d[0].next_action.rollup_id, U256::ZERO);
 
-    // 3 RESULT(L1,void) entries: delivery resolution + C scope + B scope
+    // 3 RESULT(L1,void)-triggered entries:
+    //   1. RESULT(A) → CALL(B, scope=[1])  (chained sibling)
+    //   2. scope_D resolution → RESULT
+    //   3. RESULT(B) → RESULT(terminal)
     let entries_result = find_l1(l1_result_hash);
     assert_eq!(
         entries_result.len(),
         3,
-        "must have 3 RESULT(L1,void) entries"
+        "must have 3 RESULT(L1,void)-triggered entries"
     );
-    for e in &entries_result {
-        assert_eq!(e.next_action.action_type, CrossChainActionType::Result);
-        // §C.6: L2TX terminal RESULT rollupId is either L1 (0) for inner scope
-        // or L2 (1) for the outermost terminal. Allow both.
-    }
+    // At least one must chain to CALL (the sibling chain), rest are RESULT
+    let call_count = entries_result
+        .iter()
+        .filter(|e| e.next_action.action_type == CrossChainActionType::Call)
+        .count();
+    let result_count = entries_result
+        .iter()
+        .filter(|e| e.next_action.action_type == CrossChainActionType::Result)
+        .count();
+    assert_eq!(call_count, 1, "one RESULT entry chains to CALL(B)");
+    assert_eq!(
+        result_count, 2,
+        "two RESULT entries are terminal/scope resolution"
+    );
 
     // All entries must have empty state deltas (driver fills later).
     for (i, e) in result.l2_entries.iter().enumerate() {
@@ -859,7 +879,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
 
 /// Regression test: depth-1 L2→L1 continuation produces exactly the same structure as before.
 ///
-/// This is the standard 2-call reverse flash loan pattern:
+/// This is the standard 2-call L2→L1 multi-call continuation pattern:
 ///   [0] CALL_A (root, no children)
 ///   [1] CALL_B (root, one child CALL_C)
 ///   [2] CALL_C (child of B, leaf)
@@ -977,20 +997,21 @@ fn test_l2_to_l1_depth1_regression() {
         "L2[2] RESULT must target L1"
     );
 
-    // ── L1 entries: exactly 5 ──
+    // ── L1 entries: chained pattern ──
+    // Nested pattern (B has child C): has_any_nested=true, so ALL L1 scopes are [].
+    // Chained model: L2TX→CALL(A,scope=[]), RESULT(A)→CALL(B,scope=[]), child_C, RESULT(B)→terminal
     assert_eq!(
         result.l1_entries.len(),
-        5,
-        "depth-1 must produce exactly 5 L1 entries"
+        4,
+        "chained multi-call must produce exactly 4 L1 entries (L2TX→A, RESULT→B, child_C, RESULT→terminal)"
     );
 
-    // L2TX trigger: all root calls share the same L2TX hash (same rlp_encoded_tx).
     let l2tx_trigger = CrossChainAction {
         action_type: CrossChainActionType::L2Tx,
         rollup_id: l2_id,
         destination: Address::ZERO,
         value: U256::ZERO,
-        data: vec![0xc0], // placeholder rlp_encoded_tx
+        data: vec![0xc0],
         failed: false,
         source_address: Address::ZERO,
         source_rollup: U256::ZERO,
@@ -1010,87 +1031,65 @@ fn test_l2_to_l1_depth1_regression() {
     let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
     let child_trigger_c_hash = compute_action_hash(&child_trigger_c);
 
-    // L1 Entry 0: L2TX trigger → delivery_A{scope=[]}
+    // L1[0]: L2TX → CALL(A, scope=[])  — nested pattern, no sibling scope
     let l1_e0 = &result.l1_entries[0];
-    assert_eq!(
-        l1_e0.action_hash, l2tx_trigger_hash,
-        "L1[0] must be hash(L2TX trigger)"
-    );
+    assert_eq!(l1_e0.action_hash, l2tx_trigger_hash, "L1[0] trigger = L2TX");
     assert_eq!(
         l1_e0.next_action.action_type,
         CrossChainActionType::Call,
-        "L1[0] must be delivery CALL"
+        "L1[0] next = CALL"
     );
     assert_eq!(
         l1_e0.next_action.scope,
         vec![] as Vec<U256>,
-        "L1[0] delivery must have scope=[] (per spec)"
+        "L1[0] scope=[]"
     );
-    assert_eq!(
-        l1_e0.next_action.destination, dest_a,
-        "L1[0] delivery.destination must be CALL_A.destination"
-    );
+    assert_eq!(l1_e0.next_action.destination, dest_a, "L1[0] dest = A");
 
-    // L1 Entry 1: delivery result resolution
+    // L1[1]: RESULT(A,void) → CALL(B, scope=[])  (chained, nested pattern → no scope)
     let l1_e1 = &result.l1_entries[1];
     assert_eq!(
         l1_e1.action_hash, l1_result_hash,
-        "L1[1] must be hash(RESULT(L1,void))"
+        "L1[1] trigger = RESULT(void)"
     );
     assert_eq!(
         l1_e1.next_action.action_type,
-        CrossChainActionType::Result,
-        "L1[1] must be terminal RESULT"
+        CrossChainActionType::Call,
+        "L1[1] next = CALL (chained)"
     );
+    assert_eq!(
+        l1_e1.next_action.scope,
+        vec![] as Vec<U256>,
+        "L1[1] scope=[]"
+    );
+    assert_eq!(l1_e1.next_action.destination, dest_b, "L1[1] dest = B");
 
-    // L1 Entry 2: L2TX trigger → execution_B{scope=[0]}
+    // L1[2]: reentrant leaf child CALL_C
     let l1_e2 = &result.l1_entries[2];
     assert_eq!(
-        l1_e2.action_hash, l2tx_trigger_hash,
-        "L1[2] must be hash(L2TX trigger) — same hash as L1[0]"
+        l1_e2.action_hash, child_trigger_c_hash,
+        "L1[2] trigger = child_C"
     );
     assert_eq!(
         l1_e2.next_action.action_type,
-        CrossChainActionType::Call,
-        "L1[2] must be execution CALL"
-    );
-    assert_eq!(
-        l1_e2.next_action.scope,
-        vec![U256::ZERO],
-        "L1[2] execution must have scope=[0]"
-    );
-    assert_eq!(
-        l1_e2.next_action.destination, dest_b,
-        "L1[2] execution.destination must be CALL_B.destination"
+        CrossChainActionType::Result,
+        "L1[2] next = RESULT (leaf)"
     );
 
-    // L1 Entry 3: reentrant leaf child CALL_C
+    // L1[3]: RESULT(B,void) → RESULT(terminal)  (last call)
     let l1_e3 = &result.l1_entries[3];
     assert_eq!(
-        l1_e3.action_hash, child_trigger_c_hash,
-        "L1[3] must be hash(child_trigger_C)"
+        l1_e3.action_hash, l1_result_hash,
+        "L1[3] trigger = RESULT(void)"
     );
     assert_eq!(
         l1_e3.next_action.action_type,
         CrossChainActionType::Result,
-        "L1[3] reentrant leaf must be terminal RESULT"
+        "L1[3] next = terminal"
     );
     assert_eq!(
-        l1_e3.next_action.rollup_id,
-        U256::ZERO,
-        "L1[3] RESULT rollupId must be L1 (0)"
-    );
-
-    // L1 Entry 4: CALL_B's scope resolution
-    let l1_e4 = &result.l1_entries[4];
-    assert_eq!(
-        l1_e4.action_hash, l1_result_hash,
-        "L1[4] must be hash(RESULT(L1,void)) — B scope resolution"
-    );
-    assert_eq!(
-        l1_e4.next_action.action_type,
-        CrossChainActionType::Result,
-        "L1[4] must be RESULT"
+        l1_e3.next_action.rollup_id, l2_id,
+        "L1[3] terminal rollupId = L2"
     );
 }
 
@@ -1110,6 +1109,8 @@ fn test_all_entries_have_empty_state_deltas() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
+        scope: vec![],
+        discovery_iteration: 0,
     };
 
     let result = build_continuation_entries(&[call], l2_id);
@@ -1172,6 +1173,8 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
             delivery_return_data: counter_return.clone(), // L1 delivery also returns the counter value
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
         DetectedCall {
             direction: CallDirection::L2ToL1,
@@ -1192,6 +1195,8 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
             delivery_return_data: vec![],
             l2_return_data: counter_return.clone(),
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
     ];
 
@@ -1276,6 +1281,8 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: root_delivery_return.clone(),
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
         // Child A: void return (return call targeting our rollup)
         DetectedCall {
@@ -1297,6 +1304,8 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: vec![],
             l2_return_data: vec![], // void
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
         // Child B: non-void return
         DetectedCall {
@@ -1318,6 +1327,8 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: vec![],
             l2_return_data: child_b_return.clone(),
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
     ];
 
@@ -1397,6 +1408,8 @@ fn test_l1_reentrant_child_delivery_return_data() {
             delivery_return_data: delivery_data.clone(), // L1 delivery returns data
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
         DetectedCall {
             direction: CallDirection::L2ToL1,
@@ -1417,6 +1430,8 @@ fn test_l1_reentrant_child_delivery_return_data() {
             delivery_return_data: vec![0xCA, 0xFE], // child also has delivery data
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
     ];
 
@@ -1482,6 +1497,8 @@ fn test_void_children_still_use_result_void() {
             delivery_return_data: vec![], // void
             l2_return_data: vec![],
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
         DetectedCall {
             direction: CallDirection::L2ToL1,
@@ -1502,6 +1519,8 @@ fn test_void_children_still_use_result_void() {
             delivery_return_data: vec![], // void
             l2_return_data: vec![],       // void
             l2_delivery_failed: false,
+            scope: vec![],
+            discovery_iteration: 0,
         },
     ];
 

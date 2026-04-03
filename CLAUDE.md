@@ -188,7 +188,6 @@ sync-rollup-composer/
 │   │       ├── start-rollup.sh         # Node entrypoint
 │   │       ├── deploy.sh / deploy_l2.sh # L1/L2 contract deployment
 │   │       ├── send-*.sh              # tx-sender / crosschain-tx-sender / complex-tx-sender
-│   │       ├── deploy-reverse-flash-loan.sh
 │   │       └── verify-contracts.sh     # Blockscout verification
 │   ├── testnet-eez/                    # Local devnet (reth --dev L1)
 │   │   ├── docker-compose.yml          # Main compose (extends base)
@@ -236,7 +235,6 @@ sync-rollup-composer/
 │       ├── test-depth2-generic.sh      # Depth-2 L2→L1→L2 generic bounce (issue #245)
 │       ├── flashloan-health-check.sh   # L1→L2 flash loan E2E
 │       ├── flashloan-test.sh           # Flash loan trigger on pre-deployed contracts
-│       ├── test-l2-to-l1-flash-loan.sh # L2→L1 reverse flash loan
 │       ├── double-deposit-withdrawal-trace.sh  # Concurrent deposit+withdrawal
 │       ├── test-multi-call-cross-chain.sh      # Multi-call cross-chain (CallTwice, issue #256)
 │       └── test-conditional-cross-chain.sh     # Conditional cross-chain (ConditionalCallTwice, issue #256)
@@ -289,7 +287,7 @@ sync-rollup-composer/
 - **tx-sender**: sends test L1 transactions (funds L2 accounts via dev#1) — runs after deploy
 - **crosschain-tx-sender**: sends continuous cross-chain counter increments (dev#4) — runs after deploy
 
-Startup order: `l1 → deploy → builder → deploy-l2 → deploy-reverse-flash-loan → complex-tx-sender`
+Startup order: `l1 → deploy → builder → deploy-l2 → complex-tx-sender`
 
 All core services start by default. Explorers require the explorer overlay files.
 
@@ -321,7 +319,7 @@ HD mnemonic dev keys are allocated by role to prevent nonce collisions. Keys #0-
 | #2 | 0x3C44… | crosschain-health-check test key |
 | #3 | 0x90F7… | bridge-health-check test key |
 | #4 | 0x15d3… | crosschain-tx-sender (continuous counter increments) |
-| #5 | 0x9965… | deploy_l2.sh / deploy-reverse-flash-loan / complex-tx-sender (Docker services only) |
+| #5 | 0x9965… | deploy_l2.sh / complex-tx-sender (Docker services only) |
 | #6 | 0x976E… | double-deposit-withdrawal-trace user 2 |
 | #7 | 0x14dC… | bridge-health-check TEST18 deployer |
 | #8 | 0x2361… | test-l2-proxy-call |
@@ -336,9 +334,9 @@ HD mnemonic dev keys are allocated by role to prevent nonce collisions. Keys #0-
 | #17 | 0xbDA5… | test-multi-call-cross-chain E2E test |
 | #18 | 0xdD2F… | test-conditional-cross-chain E2E test |
 
-**WARNING**: dev#5 is shared between `deploy_l2.sh`, `deploy-reverse-flash-loan`, and `complex-tx-sender`. These are Docker services and MUST NOT run concurrently — enforce via Docker `depends_on`.
+**WARNING**: dev#5 is shared between `deploy_l2.sh` and `complex-tx-sender`. These are Docker services and MUST NOT run concurrently — enforce via Docker `depends_on`.
 
-All E2E tests (scripts/e2e/) use dedicated keys (#2, #3, #6-#8, #10-#18) except `test-l2-to-l1-flash-loan` which uses #0 (builder key, read-only queries). Run sequentially — the single builder can't handle parallel postBatch load.
+All E2E tests (scripts/e2e/) use dedicated keys (#2, #3, #6-#8, #10-#18). Run sequentially — the single builder can't handle parallel postBatch load.
 
 ## Removed Code (do NOT look for)
 

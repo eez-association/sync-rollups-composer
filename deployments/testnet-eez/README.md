@@ -53,6 +53,6 @@ sudo docker compose -f deployments/testnet-eez/docker-compose.yml \
 
 ## Services
 
-Startup order: `l1 -> deploy -> builder -> deploy-l2 -> deploy-reverse-flash-loan -> complex-tx-sender`
+Startup order: `l1 -> deploy -> builder -> deploy-l2 -> complex-tx-sender`
 
 All services start by default (no profiles needed).

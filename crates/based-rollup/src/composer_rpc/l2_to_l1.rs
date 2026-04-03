@@ -252,6 +252,14 @@ async fn handle_request(
                 if let Some(raw_tx) = params.and_then(|p| p.first()).and_then(|v| v.as_str()) {
                     let mut cross_chain_detected = false;
 
+                    // Compute tx hash early so ALL logs can reference it.
+                    let user_tx_hash = compute_l2_tx_hash(raw_tx).unwrap_or_default();
+                    tracing::info!(
+                        target: "based_rollup::proxy",
+                        %user_tx_hash,
+                        "intercepted eth_sendRawTransaction — starting cross-chain detection"
+                    );
+
                     // Single generic path: trace and detect ALL cross-chain calls
                     // via protocol-level detection (executeCrossChainCall child pattern).
                     // No contract-specific selectors. Works for bridgeEther, bridgeTokens,
@@ -267,6 +275,7 @@ async fn handle_request(
                             rollups_address,
                             builder_address,
                             builder_private_key.as_deref(),
+                            &user_tx_hash,
                         )
                         .await;
                         if detected {
@@ -510,6 +519,7 @@ async fn queue_l2_to_l1_multi_call_entries(
                         &first.calldata,
                         first.value,
                         first.source_address,
+                        first.trace_depth,
                     )
                     .await;
                 }
@@ -555,11 +565,13 @@ async fn queue_l2_to_l1_multi_call_entries(
         &first.calldata,
         first.value,
         first.source_address,
+        first.trace_depth,
     )
     .await
 }
 
 /// Fallback: queue a simple L2→L1 call entry when the continuation RPC fails.
+#[allow(clippy::too_many_arguments)]
 async fn queue_l2_to_l1_fallback(
     client: &reqwest::Client,
     upstream_url: &str,
@@ -568,11 +580,15 @@ async fn queue_l2_to_l1_fallback(
     data: &[u8],
     value: U256,
     sender: Address,
+    trace_depth: usize,
 ) -> Option<()> {
     tracing::info!(
         target: "based_rollup::proxy",
         "falling back to initiateL2CrossChainCall for L2→L1 multi-call continuation"
     );
+    let l1_scope: Vec<String> = (0..if trace_depth <= 1 { 0 } else { trace_depth })
+        .map(|_| "0x0".to_string())
+        .collect();
     let initiate_req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "syncrollups_initiateL2CrossChainCall",
@@ -583,7 +599,8 @@ async fn queue_l2_to_l1_fallback(
             "sourceAddress": format!("{sender}"),
             "deliveryReturnData": "0x",
             "deliveryFailed": false,
-            "rawL2Tx": raw_tx_hex
+            "rawL2Tx": raw_tx_hex,
+            "l1DeliveryScope": l1_scope
         }],
         "id": 99991
     });
@@ -654,6 +671,13 @@ async fn queue_independent_calls_l2_to_l1(
         let raw_l2_tx = if i == 0 { raw_tx_hex } else { "" };
 
         // Build the RPC request WITH pre-computed delivery return data.
+        let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 {
+            0
+        } else {
+            call.trace_depth
+        })
+            .map(|_| "0x0".to_string())
+            .collect();
         let initiate_req = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "syncrollups_initiateL2CrossChainCall",
@@ -664,7 +688,8 @@ async fn queue_independent_calls_l2_to_l1(
                 "sourceAddress": format!("{}", call.source_address),
                 "deliveryReturnData": format!("0x{}", hex::encode(&delivery_return_data)),
                 "deliveryFailed": delivery_failed,
-                "rawL2Tx": raw_l2_tx
+                "rawL2Tx": raw_l2_tx,
+                "l1DeliveryScope": l1_scope
             }],
             "id": 99970 + i as u64
         });
@@ -903,6 +928,7 @@ async fn enrich_return_calls_via_l2_trace(
                                             vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
                                             vec![],     // delivery_return_data placeholder
                                             false,      // delivery_failed placeholder
+                                            vec![],     // l1_delivery_scope placeholder
                                         );
                                     all_placeholder_entries.extend(placeholder.l2_table_entries);
                                 }
@@ -1362,6 +1388,7 @@ async fn try_chained_l2_enrichment(
                 vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
                 vec![],     // delivery_return_data placeholder
                 false,      // delivery_failed placeholder
+                vec![],     // l1_delivery_scope placeholder
             );
             all_placeholder_entries.extend(placeholder.l2_table_entries);
         }
@@ -1591,6 +1618,8 @@ async fn simulate_l1_delivery(
     data: &[u8],
     value: U256,
     rlp_encoded_tx: &[u8],
+    root_scope: &[U256],
+    known_delivery_return_data: &[u8],
 ) -> Option<(Vec<u8>, bool, Vec<DetectedReturnCall>)> {
     // First check if destination has code on L1.
     // If it's an EOA, return data is empty and we skip simulation.
@@ -1634,9 +1663,12 @@ async fn simulate_l1_delivery(
     };
 
     // Iterative discovery loop: simulate, extract return calls, rebuild entries, repeat.
+    // Seed with known delivery data from the L2 iterative discovery's own L1 simulation.
+    // This gives correct RESULT hashes on iteration 1, avoiding the convergence cycle
+    // (empty → real → confirm) for calls where delivery_return_data is already known.
     let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
-    let mut final_return_data: Vec<u8> = Vec::new();
-    let mut prev_return_data: Vec<u8> = Vec::new();
+    let mut final_return_data: Vec<u8> = known_delivery_return_data.to_vec();
+    let mut prev_return_data: Vec<u8> = known_delivery_return_data.to_vec();
     let mut final_delivery_failed = false;
 
     for iteration in 1..=MAX_SIMULATION_ITERATIONS {
@@ -1660,6 +1692,7 @@ async fn simulate_l1_delivery(
                 rlp_encoded_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger
                 vec![],                  // placeholder delivery_return_data
                 false,                   // placeholder delivery_failed
+                root_scope.to_vec(),     // l1_delivery_scope from trace depth
             );
             call_entries.l1_deferred_entries
         } else {
@@ -1675,6 +1708,7 @@ async fn simulate_l1_delivery(
                 source_address: _trigger_user,
                 delivery_return_data: final_return_data.clone(),
                 delivery_failed: final_delivery_failed,
+                scope: root_scope.to_vec(),
             };
 
             let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
@@ -1688,6 +1722,7 @@ async fn simulate_l1_delivery(
                         parent_call_index: rc.parent_call_index,
                         l2_return_data: rc.l2_return_data.clone(),
                         l2_delivery_failed: rc.l2_delivery_failed,
+                        scope: rc.scope.clone(),
                     })
                     .collect();
 
@@ -1942,6 +1977,7 @@ async fn simulate_l1_delivery(
             rollups_address,
             trigger_trace,
             rollup_id,
+            root_scope,
         )
         .await;
 
@@ -2437,11 +2473,17 @@ async fn simulate_l1_combined_delivery(
 
     // Iterative discovery loop.
     let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
-    // Per-call results: indexed by position in `calls` slice.
-    let mut per_call_return_data: Vec<Vec<u8>> = vec![vec![]; calls.len()];
-    let mut per_call_delivery_failed: Vec<bool> = vec![false; calls.len()];
+    // Per-call results: seed from known delivery data instead of empty placeholders.
+    // The L2 iterative discovery already captured real delivery return data via its
+    // own L1 simulation. Using it here gives correct RESULT hashes on iteration 1,
+    // eliminating the placeholder→real→confirm convergence cycle for leaf deliveries.
+    let mut per_call_return_data: Vec<Vec<u8>> = calls
+        .iter()
+        .map(|c| c.delivery_return_data.clone())
+        .collect();
+    let mut per_call_delivery_failed: Vec<bool> = calls.iter().map(|c| c.delivery_failed).collect();
     // Track previous return data for convergence (#254 item 7).
-    let mut prev_per_call_return_data: Vec<Vec<u8>> = vec![vec![]; calls.len()];
+    let mut prev_per_call_return_data: Vec<Vec<u8>> = per_call_return_data.clone();
 
     for iteration in 1..=MAX_SIMULATION_ITERATIONS {
         tracing::info!(
@@ -2452,6 +2494,9 @@ async fn simulate_l1_combined_delivery(
         );
 
         // Build combined L1 deferred entries for all calls.
+        // For multi-call patterns (siblings), each call needs scope=[..., sibling_index]
+        // for executeL2TX to route between them via scope navigation.
+        let is_multi_call = calls.len() > 1;
         let mut combined_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> = Vec::new();
         for (i, call) in calls.iter().enumerate() {
             // Collect return calls belonging to this trigger call.
@@ -2459,6 +2504,22 @@ async fn simulate_l1_combined_delivery(
                 .iter()
                 .filter(|rc| rc.parent_call_index == Some(i))
                 .collect();
+
+            // Scope: for single calls, use trace_depth-1 (direct caller excluded).
+            // For multi-call (siblings), append sibling_index for routing.
+            let call_scope = if is_multi_call {
+                let mut s = if call.trace_depth <= 1 {
+                    vec![]
+                } else {
+                    vec![U256::ZERO; call.trace_depth]
+                };
+                s.push(U256::from(i));
+                s
+            } else if call.trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; call.trace_depth]
+            };
 
             let entries = if my_return_calls.is_empty() {
                 // Simple case: just this L2→L1 call.
@@ -2471,6 +2532,7 @@ async fn simulate_l1_combined_delivery(
                     rlp_encoded_tx.to_vec(),
                     per_call_return_data[i].clone(),
                     per_call_delivery_failed[i],
+                    call_scope.clone(),
                 );
                 call_entries.l1_deferred_entries
             } else {
@@ -2484,6 +2546,7 @@ async fn simulate_l1_combined_delivery(
                     source_address: call.source_address,
                     delivery_return_data: per_call_return_data[i].clone(),
                     delivery_failed: per_call_delivery_failed[i],
+                    scope: call_scope.clone(),
                 };
 
                 let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
@@ -2501,6 +2564,7 @@ async fn simulate_l1_combined_delivery(
                             parent_call_index: None,
                             l2_return_data: rc.l2_return_data.clone(),
                             l2_delivery_failed: rc.l2_delivery_failed,
+                            scope: rc.scope.clone(),
                         })
                         .collect();
 
@@ -2764,12 +2828,27 @@ async fn simulate_l1_combined_delivery(
             per_call_delivery_failed[call_idx] = false;
 
             // Extract L1→L2 return calls from this trigger trace.
+            // Parent scope = this call's scope from L2 trace depth.
+            let call_scope: Vec<U256> = if calls.len() > 1 {
+                let mut s = if calls[call_idx].trace_depth <= 1 {
+                    vec![]
+                } else {
+                    vec![U256::ZERO; calls[call_idx].trace_depth]
+                };
+                s.push(U256::from(call_idx));
+                s
+            } else if calls[call_idx].trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; calls[call_idx].trace_depth]
+            };
             let new_returns = extract_l1_to_l2_return_calls(
                 client,
                 l1_rpc_url,
                 rollups_address,
                 trigger_trace,
                 rollup_id,
+                &call_scope,
             )
             .await;
 
@@ -2963,6 +3042,27 @@ fn extract_delivery_output_from_trigger_trace(
     // The output is critical: it becomes the RESULT entry's data field,
     // and a mismatch (void vs actual return data) causes ExecutionNotFound.
     if let Some((output, failed)) = find_delivery_call(trigger_trace, destination) {
+        if failed {
+            // The delivery call itself reverted. This happens when the destination
+            // function triggers further cross-chain calls (non-leaf delivery) and
+            // the entries for those calls aren't loaded yet — the inner CCM
+            // `executeCrossChainCall` reverts with ExecutionNotFound, propagating
+            // up through the proxy to the delivery call.
+            //
+            // The `output` here is the error selector (e.g., 0xed6bc750 =
+            // ExecutionNotFound), NOT the function's actual return data. Using it
+            // as RESULT entry data produces a wrong hash, forcing 2 extra
+            // convergence iterations (error→void→confirm).
+            //
+            // Return void instead: all non-leaf deliveries in practice return void
+            // (incrementProxy, deepCall, callBoth, etc.). If a future contract has
+            // a non-leaf delivery returning non-void, the RESULT hash mismatch
+            // triggers ExecutionNotFound on L1 → rewind (existing safety net).
+            //
+            // Evidence: 16/16 non-leaf delivery successes across 14 E2E tests
+            // return void (0 bytes). 0/16 return non-void.
+            return (vec![], false);
+        }
         return (output, failed);
     }
 
@@ -3032,6 +3132,9 @@ struct DetectedReturnCall {
     /// Whether the L2 simulation of this call reverted.
     /// Used for the L2 RESULT entry `failed` flag (#246 audit).
     l2_delivery_failed: bool,
+    /// Accumulated scope for this return call's entries.
+    /// = parent call's scope ++ [0; trace_depth on L1].
+    scope: Vec<U256>,
 }
 
 /// Maximum number of iterative discovery rounds in `simulate_l1_delivery`.
@@ -3111,6 +3214,7 @@ async fn extract_l1_to_l2_return_calls(
     rollups_address: Address,
     trigger_trace: &Value,
     our_rollup_id: u64,
+    parent_scope: &[U256],
 ) -> Vec<DetectedReturnCall> {
     let lookup = L1ProxyLookup {
         client,
@@ -3172,6 +3276,13 @@ async fn extract_l1_to_l2_return_calls(
                         rollup_id = info.original_rollup_id,
                         "detected L1->L2 return call in delivery trace via walk_trace_tree"
                     );
+                    // Accumulated scope: parent's scope ++ [0].
+                    // Return calls are always first-children of their triggering scope
+                    // (per reentrantCrossChainCalls E2E spec). The trace_depth from the
+                    // L1 trigger trace is NOT used because it includes protocol-internal
+                    // frames (Rollups.newScope, executeOnBehalf) that inflate the depth.
+                    let mut accumulated = parent_scope.to_vec();
+                    accumulated.push(U256::ZERO);
                     Some(DetectedReturnCall {
                         destination: c.destination,
                         data: c.calldata,
@@ -3180,6 +3291,7 @@ async fn extract_l1_to_l2_return_calls(
                         parent_call_index: None,
                         l2_return_data: vec![],
                         l2_delivery_failed: false,
+                        scope: accumulated,
                     })
                 }
                 _ => None, // Not targeting our rollup — skip (forward call or other rollup)
@@ -3215,6 +3327,9 @@ struct DetectedL2InternalCall {
     delivery_return_data: Vec<u8>,
     /// Whether the L1 delivery simulation reverted.
     delivery_failed: bool,
+    /// Depth of the proxy call in the L2 trace tree (root = 0).
+    /// Used to compute L1 delivery scope: scope = vec![0; trace_depth - 1] (direct caller excluded).
+    trace_depth: usize,
 }
 
 /// L2 proxy lookup: queries `authorizedProxies(address)` on the L2 CCM.
@@ -3287,6 +3402,7 @@ async fn walk_l2_trace_generic(
             source_address: c.source_address,
             delivery_return_data: vec![],
             delivery_failed: false,
+            trace_depth: c.trace_depth,
         })
         .collect()
 }
@@ -3380,6 +3496,7 @@ async fn trace_and_detect_l2_internal_calls(
     rollups_address: Address,
     builder_address: Address,
     builder_private_key: Option<&str>,
+    user_tx_hash: &str,
 ) -> bool {
     use alloy_consensus::transaction::TxEnvelope;
     use alloy_rlp::Decodable;
@@ -3434,7 +3551,7 @@ async fn trace_and_detect_l2_internal_calls(
 
     tracing::info!(
         target: "based_rollup::proxy",
-        %to_addr, %sender,
+        %to_addr, %sender, user_tx = %user_tx_hash,
         "tracing L2 tx with debug_traceCall to detect cross-chain calls"
     );
 
@@ -3512,12 +3629,29 @@ async fn trace_and_detect_l2_internal_calls(
     .await;
 
     if detected_calls.is_empty() {
+        // Log the trace tree summary so we can diagnose WHY no calls were detected.
+        let top_error = trace_result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        let child_count = trace_result
+            .get("calls")
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len());
+        tracing::info!(
+            target: "based_rollup::proxy",
+            %to_addr, %sender, user_tx = %user_tx_hash,
+            top_error,
+            child_count,
+            "no L2→L1 cross-chain calls detected in trace — forwarding tx as-is"
+        );
         return false;
     }
 
     tracing::info!(
         target: "based_rollup::proxy",
         count = detected_calls.len(),
+        user_tx = %user_tx_hash,
         "detected internal L2→L1 cross-chain calls via debug_traceCall"
     );
 
@@ -3533,6 +3667,11 @@ async fn trace_and_detect_l2_internal_calls(
             "L2 detected call"
         );
     }
+
+    // Return calls discovered during L2 iterative discovery's simulate_l1_delivery
+    // fallback. Previously discarded — now saved so Phase A/B can skip redundant
+    // rediscovery on its first iteration.
+    let mut early_return_calls: Vec<DetectedReturnCall> = Vec::new();
 
     // Check if the top-level call reverted (multi-call continuation pattern: L2→L1 calls
     // that need entries pre-loaded before the user tx can succeed).
@@ -3568,7 +3707,143 @@ async fn trace_and_detect_l2_internal_calls(
                 "iterative L2 discovery: traceCallMany with loadExecutionTable pre-loading"
             );
 
-            // Step 1: Build L2 table entries for all known calls.
+            // Step 1: Simulate L1 delivery for calls missing return data.
+            // CRITICAL: use REAL delivery return data, not empty placeholders.
+            // The L2 proxy decodes CCM's return as `bytes memory` and returns the
+            // inner bytes to the caller. Empty return data → 0 bytes → Solidity ABI
+            // decoder reverts when the caller expects e.g. uint256, preventing the
+            // iterative discovery from seeing subsequent calls.
+            for call in &mut all_calls {
+                if !call.delivery_return_data.is_empty() || call.delivery_failed {
+                    continue; // already has data from a previous iteration
+                }
+                let sim_req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "debug_traceCallMany",
+                    "params": [
+                        [{
+                            "transactions": [{
+                                "from": format!("{}", call.source_address),
+                                "to": format!("{}", call.destination),
+                                "data": format!("0x{}", hex::encode(&call.calldata)),
+                                "value": format!("0x{:x}", call.value),
+                                "gas": "0x2faf080"
+                            }]
+                        }],
+                        null,
+                        { "tracer": "callTracer" }
+                    ],
+                    "id": 99979
+                });
+                if let Ok(resp) = client.post(l1_rpc_url).json(&sim_req).send().await {
+                    if let Ok(body) = resp.json::<Value>().await {
+                        // result[0][0] = trace of the single tx
+                        if let Some(trace) = body
+                            .get("result")
+                            .and_then(|r| r.get(0))
+                            .and_then(|b| b.as_array())
+                            .and_then(|arr| arr.first())
+                        {
+                            let has_error = trace.get("error").is_some();
+                            if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
+                                let hex = output.strip_prefix("0x").unwrap_or(output);
+                                if let Ok(bytes) = hex::decode(hex) {
+                                    // Check if the error is a PROTOCOL error (entry not loaded yet)
+                                    // vs a real delivery failure. Protocol errors should NOT be used
+                                    // as delivery_return_data — they mean the simulation context is
+                                    // incomplete, not that the delivery itself fails.
+                                    let is_protocol_error = has_error
+                                        && bytes.len() == 4
+                                        && (
+                                            // ExecutionNotInCurrentBlock() = 0xf9d330ad
+                                            bytes == [0xf9, 0xd3, 0x30, 0xad] ||
+                                        // ExecutionNotFound() = 0xed6bc750
+                                        bytes == [0xed, 0x6b, 0xc7, 0x50]
+                                        );
+                                    if is_protocol_error {
+                                        tracing::info!(
+                                            target: "based_rollup::proxy",
+                                            iteration,
+                                            destination = %call.destination,
+                                            error_hex = %format!("0x{}", hex::encode(&bytes)),
+                                            "iterative discovery: L1 delivery returned protocol error — using full simulate_l1_delivery"
+                                        );
+                                        // The direct L1 call failed because entries aren't loaded.
+                                        // Use the full simulate_l1_delivery (with postBatch) to get
+                                        // REAL return data. This is heavier but correct for nested
+                                        // L2→L1→L2 patterns where the L1 delivery triggers further
+                                        // cross-chain calls via executeCrossChainCall.
+                                        if let Some((ret_data, failed, return_calls)) =
+                                            simulate_l1_delivery(
+                                                client,
+                                                l1_rpc_url,
+                                                upstream_url,
+                                                cross_chain_manager_address,
+                                                rollups_address,
+                                                builder_address,
+                                                builder_private_key,
+                                                rollup_id,
+                                                call.source_address,
+                                                call.destination,
+                                                &call.calldata,
+                                                call.value,
+                                                &tx_bytes,
+                                                &vec![U256::ZERO; call.trace_depth.max(1)],
+                                                &call.delivery_return_data,
+                                            )
+                                            .await
+                                        {
+                                            call.delivery_return_data = ret_data.clone();
+                                            call.delivery_failed = failed;
+                                            // Capture return calls discovered during L1 simulation.
+                                            // Previously discarded — now saved for early availability
+                                            // in the discovery pipeline. The Phase A/B loop
+                                            // (simulate_l1_combined_delivery) rediscovers these, but
+                                            // having them here enables future unified discovery.
+                                            if !return_calls.is_empty() {
+                                                early_return_calls
+                                                    .extend(return_calls.iter().cloned());
+                                            }
+                                            tracing::info!(
+                                                target: "based_rollup::proxy",
+                                                iteration,
+                                                destination = %call.destination,
+                                                return_data_len = ret_data.len(),
+                                                return_data_hex = %format!("0x{}", hex::encode(&ret_data[..ret_data.len().min(32)])),
+                                                delivery_failed = failed,
+                                                early_return_calls = return_calls.len(),
+                                                "iterative discovery: L1 delivery return data via full simulate_l1_delivery"
+                                            );
+                                        }
+                                    } else {
+                                        call.delivery_return_data = bytes.clone();
+                                        call.delivery_failed = has_error;
+                                        tracing::info!(
+                                            target: "based_rollup::proxy",
+                                            iteration,
+                                            destination = %call.destination,
+                                            return_data_len = bytes.len(),
+                                            return_data_hex = %format!("0x{}", hex::encode(&bytes[..bytes.len().min(32)])),
+                                            delivery_failed = has_error,
+                                            "iterative discovery: L1 delivery return data via debug_traceCallMany"
+                                        );
+                                    }
+                                }
+                            } else if has_error {
+                                call.delivery_failed = true;
+                                tracing::info!(
+                                    target: "based_rollup::proxy",
+                                    iteration,
+                                    destination = %call.destination,
+                                    "iterative discovery: L1 delivery reverted (no output)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Step 1b: Build L2 table entries with real return data.
             let mut l2_table_entries = Vec::new();
             for call in &all_calls {
                 let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
@@ -3577,11 +3852,25 @@ async fn trace_and_detect_l2_internal_calls(
                     call.value,
                     call.source_address,
                     rollup_id,
-                    tx_bytes.clone(), // rlp_encoded_tx for L2TX trigger
-                    vec![],           // delivery_return_data (placeholder for discovery)
-                    false,            // delivery_failed (placeholder for discovery)
+                    tx_bytes.clone(),
+                    call.delivery_return_data.clone(),
+                    call.delivery_failed,
+                    vec![], // l1_delivery_scope (irrelevant for L2 table loading)
                 );
                 l2_table_entries.extend(call_entries.l2_table_entries);
+            }
+
+            // Log the entries built for this iteration.
+            for (idx, entry) in l2_table_entries.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    iteration,
+                    idx,
+                    action_hash = %entry.action_hash,
+                    next_action_type = ?entry.next_action.action_type,
+                    next_action_scope_len = entry.next_action.scope.len(),
+                    "iterative discovery: L2 table entry for loadExecutionTable"
+                );
             }
 
             // Step 2: Encode loadExecutionTable calldata.
@@ -3590,6 +3879,15 @@ async fn trace_and_detect_l2_internal_calls(
             let load_table_data = format!("0x{}", hex::encode(load_table_calldata.as_ref()));
             let ccm_hex = format!("{cross_chain_manager_address}");
             let builder_hex = format!("{builder_address}");
+
+            tracing::info!(
+                target: "based_rollup::proxy",
+                iteration,
+                calldata_len = load_table_data.len(),
+                calldata_prefix = &load_table_data[..load_table_data.len().min(40)],
+                entry_count = l2_table_entries.len(),
+                "iterative discovery: loadExecutionTable calldata built"
+            );
 
             // Step 3: Build traceCallMany request.
             // reth's debug_traceCallMany format:
@@ -3625,6 +3923,15 @@ async fn trace_and_detect_l2_internal_calls(
                 "id": 99987
             });
 
+            // Log the full request for traceability/reproducibility.
+            tracing::info!(
+                target: "based_rollup::proxy",
+                iteration,
+                user_tx = %user_tx_hash,
+                request = %serde_json::to_string(&trace_req).unwrap_or_default(),
+                "iterative discovery: debug_traceCallMany REQUEST"
+            );
+
             // Step 4: Execute traceCallMany.
             let resp = match client.post(upstream_url).json(&trace_req).send().await {
                 Ok(r) => match r.json::<Value>().await {
@@ -3647,6 +3954,15 @@ async fn trace_and_detect_l2_internal_calls(
                     break;
                 }
             };
+
+            // Log the full response for traceability/reproducibility.
+            tracing::info!(
+                target: "based_rollup::proxy",
+                iteration,
+                user_tx = %user_tx_hash,
+                response = %serde_json::to_string(&resp).unwrap_or_default(),
+                "iterative discovery: debug_traceCallMany RESPONSE"
+            );
 
             // Step 5: Parse traces — result is an array of per-tx traces.
             // debug_traceCallMany returns result[bundle_idx][tx_idx].
@@ -3696,7 +4012,45 @@ async fn trace_and_detect_l2_internal_calls(
                 "L2 traceCallMany: user tx trace status"
             );
 
-            // Step 6: Walk user tx trace for new calls using generic walker.
+            // Step 6: Log user tx trace tree summary for full traceability.
+            {
+                fn count_calls(node: &Value, depth: usize, summary: &mut Vec<String>) {
+                    if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
+                        for c in calls {
+                            let to = c.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+                            let error = c.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                            let sel = c.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
+                            let sel_short = &sel[..sel.len().min(10)];
+                            let child_count = c
+                                .get("calls")
+                                .and_then(|v| v.as_array())
+                                .map_or(0, |a| a.len());
+                            let err = if error.is_empty() { "ok" } else { error };
+                            summary.push(format!(
+                                "d={}:{}:{}:ch={}:{}",
+                                depth + 1,
+                                &to[to.len().saturating_sub(8)..],
+                                sel_short,
+                                child_count,
+                                err
+                            ));
+                            count_calls(c, depth + 1, summary);
+                        }
+                    }
+                }
+                let mut summary = Vec::new();
+                count_calls(user_trace, 0, &mut summary);
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    iteration,
+                    user_error,
+                    trace_nodes = summary.len(),
+                    trace_tree = %summary.join(" | "),
+                    "iterative discovery: user tx trace tree"
+                );
+            }
+
+            // Walk user tx trace for new calls using generic walker.
             let new_detected = walk_l2_trace_generic(
                 client,
                 upstream_url,
@@ -3705,6 +4059,25 @@ async fn trace_and_detect_l2_internal_calls(
                 &mut proxy_cache,
             )
             .await;
+
+            tracing::info!(
+                target: "based_rollup::proxy",
+                iteration,
+                detected_in_retrace = new_detected.len(),
+                known_calls = all_calls.len(),
+                "iterative discovery: walker results from re-trace"
+            );
+            for (idx, d) in new_detected.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    iteration,
+                    idx,
+                    destination = %d.destination,
+                    source = %d.source_address,
+                    trace_depth = d.trace_depth,
+                    "iterative discovery: detected call in re-trace"
+                );
+            }
 
             // Step 7: Find truly new calls using count-based comparison.
             // A call is "new" only if new_detected has MORE of that
@@ -3743,9 +4116,29 @@ async fn trace_and_detect_l2_internal_calls(
         // Update detected_calls with the full set from iterative discovery.
         detected_calls = all_calls;
 
+        if !early_return_calls.is_empty() {
+            tracing::info!(
+                target: "based_rollup::proxy",
+                early_return_call_count = early_return_calls.len(),
+                "iterative L2 discovery captured return calls from simulate_l1_delivery"
+            );
+            for (ri, rc) in early_return_calls.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    ri,
+                    dest = %rc.destination,
+                    source = %rc.source_address,
+                    data_len = rc.data.len(),
+                    scope_len = rc.scope.len(),
+                    "early return call from L2 iterative discovery"
+                );
+            }
+        }
+
         tracing::info!(
             target: "based_rollup::proxy",
             count = detected_calls.len(),
+            early_return_calls = early_return_calls.len(),
             "iterative L2 discovery complete"
         );
 
@@ -3760,6 +4153,145 @@ async fn trace_and_detect_l2_internal_calls(
                 value = %call.value,
                 "iterative discovery final call"
             );
+        }
+    }
+
+    // Post-discovery verification: if early return calls were found, retrace the user
+    // tx on L2 with continuation entries (scope navigation) to discover calls that are
+    // only reachable through return call delivery. This handles future patterns where
+    // a contract's behavior depends on side effects of the return call (e.g., token
+    // transfers that gate subsequent cross-chain calls).
+    //
+    // This is ADDITIVE: the iterative loop already discovered all calls reachable
+    // without scope navigation. This step can only ADD new calls, never remove them.
+    if !early_return_calls.is_empty() && !detected_calls.is_empty() {
+        // Convert our types to table_builder types for continuation entry building.
+        let tb_l2_calls: Vec<crate::table_builder::L2DetectedCall> = detected_calls
+            .iter()
+            .map(|c| crate::table_builder::L2DetectedCall {
+                destination: c.destination,
+                data: c.calldata.clone(),
+                value: c.value,
+                source_address: c.source_address,
+                delivery_return_data: c.delivery_return_data.clone(),
+                delivery_failed: c.delivery_failed,
+                scope: vec![U256::ZERO; c.trace_depth.max(1)],
+            })
+            .collect();
+        let tb_return_calls: Vec<crate::table_builder::L2ReturnCall> = early_return_calls
+            .iter()
+            .map(|rc| crate::table_builder::L2ReturnCall {
+                destination: rc.destination,
+                data: rc.data.clone(),
+                value: rc.value,
+                source_address: rc.source_address,
+                parent_call_index: rc.parent_call_index,
+                l2_return_data: rc.l2_return_data.clone(),
+                l2_delivery_failed: rc.l2_delivery_failed,
+                scope: rc.scope.clone(),
+            })
+            .collect();
+
+        let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+            &tb_l2_calls,
+            &tb_return_calls,
+            rollup_id,
+        );
+
+        if !analyzed.is_empty() {
+            let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
+                &analyzed,
+                U256::from(rollup_id),
+                &tx_bytes,
+            );
+
+            if !continuation.l2_entries.is_empty() {
+                let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
+                    &continuation.l2_entries,
+                );
+                let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
+                let ccm_hex = format!("{cross_chain_manager_address}");
+                let builder_hex = format!("{builder_address}");
+
+                let retrace_req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "debug_traceCallMany",
+                    "params": [
+                        [{
+                            "transactions": [
+                                {
+                                    "from": builder_hex,
+                                    "to": ccm_hex,
+                                    "data": load_data,
+                                    "gas": "0x1c9c380"
+                                },
+                                {
+                                    "from": format!("{sender}"),
+                                    "to": format!("{to_addr}"),
+                                    "data": format!("0x{}", hex::encode(input)),
+                                    "value": format!("0x{:x}", value),
+                                    "gas": "0x2faf080"
+                                }
+                            ]
+                        }],
+                        null,
+                        { "tracer": "callTracer" }
+                    ],
+                    "id": 99990
+                });
+
+                tracing::info!(
+                    target: "based_rollup::proxy",
+                    l2_entry_count = continuation.l2_entries.len(),
+                    "post-discovery retrace: retracing user tx with continuation entries"
+                );
+
+                let mut proxy_cache =
+                    std::collections::HashMap::<Address, Option<super::trace::ProxyInfo>>::new();
+                if let Ok(resp) = client.post(upstream_url).json(&retrace_req).send().await {
+                    if let Ok(body) = resp.json::<Value>().await {
+                        if let Some(traces) = body
+                            .get("result")
+                            .and_then(|r| r.get(0))
+                            .and_then(|b| b.as_array())
+                        {
+                            if traces.len() >= 2 {
+                                let new_detected = walk_l2_trace_generic(
+                                    client,
+                                    upstream_url,
+                                    cross_chain_manager_address,
+                                    &traces[1],
+                                    &mut proxy_cache,
+                                )
+                                .await;
+
+                                let truly_new =
+                                    filter_new_by_count(new_detected, &detected_calls, |a, b| {
+                                        a.destination == b.destination
+                                            && a.calldata == b.calldata
+                                            && a.value == b.value
+                                            && a.source_address == b.source_address
+                                    });
+
+                                if !truly_new.is_empty() {
+                                    tracing::info!(
+                                        target: "based_rollup::proxy",
+                                        new_count = truly_new.len(),
+                                        "post-discovery retrace found NEW L2→L1 calls \
+                                         (only reachable via scope navigation)"
+                                    );
+                                    detected_calls.extend(truly_new);
+                                } else {
+                                    tracing::info!(
+                                        target: "based_rollup::proxy",
+                                        "post-discovery retrace: no new calls (existing discovery sufficient)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3783,21 +4315,172 @@ async fn trace_and_detect_l2_internal_calls(
     );
 
     if detected_calls.len() >= 2 && has_duplicates {
-        tracing::info!(
-            target: "based_rollup::composer_rpc::l2_to_l1",
-            count = detected_calls.len(),
-            "duplicate calls detected — routing independently with chained simulation"
-        );
-        return queue_independent_calls_l2_to_l1(
-            client,
-            l1_rpc_url,
-            upstream_url,
-            raw_tx_hex,
-            &detected_calls,
-            rollups_address,
-            rollup_id,
-        )
-        .await;
+        // Check if any duplicate call has return calls (nested L2→L1→L2 pattern).
+        // If so, route via buildL2ToL1ExecutionTable (supports return calls)
+        // instead of initiateL2CrossChainCall (simple only).
+        let detected_return_calls: Vec<DetectedReturnCall> = {
+            // Run simulate_l1_delivery for ONE call to check for return calls.
+            // If it finds return calls, ALL duplicate calls need the continuation path.
+            let first = &detected_calls[0];
+            let root_scope: Vec<U256> = if first.trace_depth <= 1 {
+                vec![]
+            } else {
+                vec![U256::ZERO; first.trace_depth]
+            };
+            if let Some((_ret, _failed, returns)) = simulate_l1_delivery(
+                client,
+                l1_rpc_url,
+                upstream_url,
+                cross_chain_manager_address,
+                rollups_address,
+                builder_address,
+                builder_private_key,
+                rollup_id,
+                first.source_address,
+                first.destination,
+                &first.calldata,
+                first.value,
+                &tx_bytes,
+                &root_scope,
+                &first.delivery_return_data,
+            )
+            .await
+            {
+                returns
+            } else {
+                vec![]
+            }
+        };
+
+        if !detected_return_calls.is_empty() {
+            // Duplicate NESTED calls: each gets return calls with REAL chained data.
+            // The return calls target the same L1 contract (e.g., Counter) but each
+            // invocation returns different data (state-dependent: 1, 2, 3...).
+            // Simulate ALL return calls in a single chained debug_traceCallMany bundle
+            // so each sees cumulative state from prior calls.
+            let first = &detected_calls[0];
+            let matching_count = detected_calls
+                .iter()
+                .filter(|c| c.destination == first.destination && c.calldata == first.calldata)
+                .count();
+
+            // Simulate return calls CHAINED on the DESTINATION chain (L2 for L2→L1→L2).
+            // Return calls go back to L2 via executeIncomingCrossChainCall. The actual
+            // destination is the L2 contract (e.g., CounterL2). We simulate calling
+            // that contract directly on L2 to get sequential return data.
+            //
+            // For Counter.increment() called twice: returns [1, 2] (state-dependent).
+            let rc_template = &detected_return_calls[0];
+            let mut rc_txs: Vec<Value> = Vec::new();
+            for _ in 0..matching_count {
+                rc_txs.push(serde_json::json!({
+                    "from": format!("{}", rc_template.source_address),
+                    "to": format!("{}", rc_template.destination),
+                    "data": format!("0x{}", hex::encode(&rc_template.data)),
+                    "value": format!("0x{:x}", rc_template.value),
+                    "gas": "0x2faf080"
+                }));
+            }
+
+            // Simulate chained on L2 (upstream_url = L2 RPC)
+            let sim_req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "debug_traceCallMany",
+                "params": [
+                    [{ "transactions": rc_txs }],
+                    null,
+                    { "tracer": "callTracer" }
+                ],
+                "id": 99976
+            });
+
+            let mut chained_rc_data: Vec<(Vec<u8>, bool)> = Vec::new();
+            if let Ok(resp) = client.post(upstream_url).json(&sim_req).send().await {
+                if let Ok(body) = resp.json::<Value>().await {
+                    if let Some(traces) = body
+                        .get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                    {
+                        for trace in traces {
+                            let has_error = trace.get("error").is_some();
+                            let output =
+                                trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+                            let hex = output.strip_prefix("0x").unwrap_or(output);
+                            let bytes = hex::decode(hex).unwrap_or_default();
+                            chained_rc_data.push((bytes, has_error));
+                        }
+                    }
+                }
+            }
+
+            tracing::info!(
+                target: "based_rollup::composer_rpc::l2_to_l1",
+                count = detected_calls.len(),
+                matching_nested = matching_count,
+                return_calls_simulated = chained_rc_data.len(),
+                "duplicate NESTED calls — chained L1 return call simulation"
+            );
+            for (idx, (data, failed)) in chained_rc_data.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::composer_rpc::l2_to_l1",
+                    idx,
+                    return_data_len = data.len(),
+                    return_data_hex = %format!("0x{}", hex::encode(&data[..data.len().min(32)])),
+                    delivery_failed = failed,
+                    "chained return call result"
+                );
+            }
+
+            // Build return calls with REAL sequential data
+            let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
+            let mut rc_data_idx = 0;
+            for (i, call) in detected_calls.iter().enumerate() {
+                let is_same_pattern =
+                    call.destination == first.destination && call.calldata == first.calldata;
+                if is_same_pattern {
+                    for rc in &detected_return_calls {
+                        let mut rc_clone = rc.clone();
+                        rc_clone.parent_call_index = Some(i);
+                        // Use REAL chained data instead of cloned data
+                        if rc_data_idx < chained_rc_data.len() {
+                            let (ref data, failed) = chained_rc_data[rc_data_idx];
+                            rc_clone.l2_return_data = data.clone();
+                            rc_clone.l2_delivery_failed = failed;
+                        }
+                        all_return_calls.push(rc_clone);
+                    }
+                    rc_data_idx += 1;
+                }
+            }
+
+            return queue_l2_to_l1_multi_call_entries(
+                client,
+                upstream_url,
+                raw_tx_hex,
+                &detected_calls,
+                &all_return_calls,
+                rollup_id,
+            )
+            .await
+            .is_some();
+        } else {
+            tracing::info!(
+                target: "based_rollup::composer_rpc::l2_to_l1",
+                count = detected_calls.len(),
+                "duplicate simple calls detected — routing independently with chained simulation"
+            );
+            return queue_independent_calls_l2_to_l1(
+                client,
+                l1_rpc_url,
+                upstream_url,
+                raw_tx_hex,
+                &detected_calls,
+                rollups_address,
+                rollup_id,
+            )
+            .await;
+        }
     }
 
     if detected_calls.len() >= 2 {
@@ -3813,7 +4496,16 @@ async fn trace_and_detect_l2_internal_calls(
         const MAX_RECURSIVE_DEPTH: usize = 5;
 
         let mut all_detected_l2_calls = detected_calls.clone();
-        let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
+        // Seed with return calls already discovered during L2 iterative discovery.
+        // This avoids redundant rediscovery in Phase A's first iteration.
+        let mut all_return_calls: Vec<DetectedReturnCall> = early_return_calls.clone();
+        if !all_return_calls.is_empty() {
+            tracing::info!(
+                target: "based_rollup::proxy",
+                count = all_return_calls.len(),
+                "Phase A/B seeded with early return calls from L2 iterative discovery"
+            );
+        }
         let mut current_l2_calls = detected_calls.clone();
 
         for depth in 0..MAX_RECURSIVE_DEPTH {
@@ -3938,6 +4630,11 @@ async fn trace_and_detect_l2_internal_calls(
 
     // Single call path: simulate on L1 to get delivery data + return calls.
     let call = &detected_calls[0];
+    let root_scope: Vec<U256> = if call.trace_depth <= 1 {
+        vec![]
+    } else {
+        vec![U256::ZERO; call.trace_depth]
+    };
     let (delivery_return_data, delivery_failed, return_calls) = simulate_l1_delivery(
         client,
         l1_rpc_url,
@@ -3952,6 +4649,8 @@ async fn trace_and_detect_l2_internal_calls(
         &call.calldata,
         call.value,
         &tx_bytes,
+        &root_scope,
+        &call.delivery_return_data,
     )
     .await
     .unwrap_or((vec![], false, vec![]));
@@ -4309,6 +5008,14 @@ async fn trace_and_detect_l2_internal_calls(
     }
 
     // Simple single-call path (no depth > 1): use initiateL2CrossChainCall
+    // Scope = vec![0; trace_depth] — determines newScope nesting in executeL2TX on L1.
+    let l1_scope: Vec<String> = (0..if call.trace_depth <= 1 {
+        0
+    } else {
+        call.trace_depth
+    })
+        .map(|_| "0x0".to_string())
+        .collect();
     let initiate_req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "syncrollups_initiateL2CrossChainCall",
@@ -4319,7 +5026,8 @@ async fn trace_and_detect_l2_internal_calls(
             "sourceAddress": format!("{}", call.source_address),
             "deliveryReturnData": format!("0x{}", hex::encode(&delivery_return_data)),
             "deliveryFailed": delivery_failed,
-            "rawL2Tx": raw_tx_hex
+            "rawL2Tx": raw_tx_hex,
+            "l1DeliveryScope": l1_scope
         }],
         "id": 99988
     });
@@ -4429,132 +5137,106 @@ async fn simulate_l2_return_call_delivery(
             data_len = rc.data.len(),
             selector = %data_prefix,
             value = %rc.value,
-            "simulating return call on L2 (simple trace: from=CCM, to=destination, data=calldata)"
+            scope_len = rc.scope.len(),
+            "simulating return call on L2 via executeIncomingCrossChainCall (protocol path)"
         );
 
-        // Phase 1: Simple trace WITHOUT loadExecutionTable to discover calls even in reverts.
-        // We trace the return call's execution directly (from=CCM, to=destination, data=calldata).
-        // _processCallAtScope uses try/catch, so the destination contract doesn't revert
-        // even when the nested proxy call fails — callTracer shows the subcalls.
+        // Simulate the return call using the real protocol path:
+        // tx[0]: loadExecutionTable(placeholder entries) — makes scope navigation work
+        // tx[1]: executeIncomingCrossChainCall(dest, value, data, source, rollupId, scope)
         //
-        // Phase 2: If phase 1 finds nothing, try with loadExecutionTable pre-loading.
-        // Build dummy entries for the return call so the execution doesn't revert,
-        // then trace again.
+        // Previous approach called debug_traceCall(from=CCM, to=dest) directly, which:
+        // - Used wrong msg.sender (CCM instead of proxy)
+        // - Skipped scope navigation entirely
+        // - Didn't match real execution context
+        //
+        // The protocol path goes through CCM → proxy → destination, matching
+        // real L2 block execution where the driver calls executeIncomingCrossChainCall.
 
-        // Try simple trace first (fast path — works because _processCallAtScope try/catch).
-        let simple_trace_req = serde_json::json!({
+        // Build the executeIncomingCrossChainCall calldata using the return call's info.
+        let incoming_action = crate::cross_chain::CrossChainAction {
+            action_type: crate::cross_chain::CrossChainActionType::Call,
+            rollup_id: U256::from(rollup_id),
+            destination: rc.destination,
+            value: rc.value,
+            data: rc.data.clone(),
+            failed: false,
+            source_address: rc.source_address,
+            source_rollup: U256::ZERO, // L1 (MAINNET_ROLLUP_ID)
+            scope: rc.scope.clone(),
+        };
+        let exec_calldata =
+            crate::cross_chain::encode_execute_incoming_call_calldata(&incoming_action);
+        let exec_data = format!("0x{}", hex::encode(exec_calldata.as_ref()));
+
+        // Build placeholder L2 entries for loadExecutionTable so scope navigation
+        // can find entries if the destination triggers further cross-chain calls.
+        let placeholder_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+            rc.destination,
+            rc.data.clone(),
+            rc.value,
+            rc.source_address,
+            rollup_id,
+            vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
+            vec![],     // delivery_return_data placeholder
+            false,      // delivery_failed placeholder
+            vec![],     // l1_delivery_scope placeholder
+        );
+
+        let mut detected_for_call: Vec<DetectedL2InternalCall> = Vec::new();
+
+        // Build traceCallMany: [loadExecutionTable, executeIncomingCrossChainCall]
+        let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
+            &placeholder_entries.l2_table_entries,
+        );
+        let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
+
+        let trace_req = serde_json::json!({
             "jsonrpc": "2.0",
-            "method": "debug_traceCall",
+            "method": "debug_traceCallMany",
             "params": [
-                {
-                    "from": format!("{ccm_address}"),
-                    "to": format!("{}", rc.destination),
-                    "data": format!("0x{}", hex::encode(&rc.data)),
-                    "value": format!("0x{:x}", rc.value),
-                    "gas": "0x1c9c380"
-                },
-                "latest",
+                [
+                    {
+                        "transactions": [
+                            {
+                                "from": system_addr,
+                                "to": ccm_hex,
+                                "data": load_data,
+                                "gas": "0x1c9c380"
+                            },
+                            {
+                                "from": system_addr,
+                                "to": ccm_hex,
+                                "data": exec_data,
+                                "value": format!("0x{:x}", rc.value),
+                                "gas": "0x2faf080"
+                            }
+                        ]
+                    }
+                ],
+                null,
                 { "tracer": "callTracer" }
             ],
             "id": 99970
         });
 
-        let mut detected_for_call: Vec<DetectedL2InternalCall> = Vec::new();
-
-        if let Ok(resp) = client.post(l2_rpc_url).json(&simple_trace_req).send().await {
+        if let Ok(resp) = client.post(l2_rpc_url).json(&trace_req).send().await {
             if let Ok(body) = resp.json::<Value>().await {
-                if let Some(trace) = body.get("result") {
-                    detected_for_call = walk_l2_trace_generic(
-                        client,
-                        l2_rpc_url,
-                        ccm_address,
-                        trace,
-                        &mut proxy_cache,
-                    )
-                    .await;
-                }
-            }
-        }
-
-        // If simple trace found nothing and the call likely reverted, try with
-        // loadExecutionTable pre-loading via traceCallMany.
-        if detected_for_call.is_empty() {
-            tracing::debug!(
-                target: "based_rollup::proxy",
-                idx = i,
-                destination = %rc.destination,
-                "simple trace found no nested calls — trying traceCallMany with loadExecutionTable"
-            );
-
-            // Build placeholder L2 entries. We don't know the exact nested call yet,
-            // but we can build a generic CALL+RESULT entry for the return call itself.
-            // This makes the top-level execution succeed (the return call's scope
-            // navigation consumes the entry), revealing nested proxy calls.
-            let placeholder_entries = crate::cross_chain::build_l2_to_l1_call_entries(
-                rc.destination,
-                rc.data.clone(),
-                rc.value,
-                rc.source_address,
-                rollup_id,
-                vec![0xc0], // rlp_encoded_tx placeholder (empty RLP list)
-                vec![],     // delivery_return_data placeholder
-                false,      // delivery_failed placeholder
-            );
-
-            if !placeholder_entries.l2_table_entries.is_empty() {
-                let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
-                    &placeholder_entries.l2_table_entries,
-                );
-                let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
-
-                let bundle_trace_req = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "debug_traceCallMany",
-                    "params": [
-                        [
-                            {
-                                "transactions": [
-                                    {
-                                        "from": system_addr,
-                                        "to": ccm_hex,
-                                        "data": load_data,
-                                        "gas": "0x1c9c380"
-                                    },
-                                    {
-                                        "from": format!("{ccm_address}"),
-                                        "to": format!("{}", rc.destination),
-                                        "data": format!("0x{}", hex::encode(&rc.data)),
-                                        "value": format!("0x{:x}", rc.value),
-                                        "gas": "0x2faf080"
-                                    }
-                                ]
-                            }
-                        ],
-                        null,
-                        { "tracer": "callTracer" }
-                    ],
-                    "id": 99971
-                });
-
-                if let Ok(resp) = client.post(l2_rpc_url).json(&bundle_trace_req).send().await {
-                    if let Ok(body) = resp.json::<Value>().await {
-                        // Extract tx1 trace (the return call execution with entries loaded)
-                        if let Some(traces) = body
-                            .get("result")
-                            .and_then(|r| r.get(0))
-                            .and_then(|b| b.as_array())
-                        {
-                            if traces.len() >= 2 {
-                                detected_for_call = walk_l2_trace_generic(
-                                    client,
-                                    l2_rpc_url,
-                                    ccm_address,
-                                    &traces[1],
-                                    &mut proxy_cache,
-                                )
-                                .await;
-                            }
-                        }
+                // Extract tx[1] trace (executeIncomingCrossChainCall with entries loaded)
+                if let Some(traces) = body
+                    .get("result")
+                    .and_then(|r| r.get(0))
+                    .and_then(|b| b.as_array())
+                {
+                    if traces.len() >= 2 {
+                        detected_for_call = walk_l2_trace_generic(
+                            client,
+                            l2_rpc_url,
+                            ccm_address,
+                            &traces[1],
+                            &mut proxy_cache,
+                        )
+                        .await;
                     }
                 }
             }

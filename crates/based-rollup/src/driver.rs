@@ -1802,43 +1802,26 @@ where
         // subsequent blocks from this batch, we ensure they are held until
         // derivation confirms the entry-bearing block.
         let has_pending_entries = !self.pending_l1_entries.is_empty();
-        // Continuation groups have > 2 L1 entries (simple deposits = 1, simple
-        // L2→L1 calls = 2, multi-call continuations = 3+).
-        let has_continuation_entries =
-            self.pending_l1_group_starts
-                .iter()
-                .enumerate()
-                .any(|(i, &start)| {
-                    let end = self
-                        .pending_l1_group_starts
-                        .get(i + 1)
-                        .copied()
-                        .unwrap_or(self.pending_l1_entries.len());
-                    end - start > 2
-                });
         let batch_size = if has_pending_entries {
-            if has_continuation_entries {
-                // Continuation entries (multi-call patterns): include ALL pending blocks.
-                // The entry block is the last one (just built). Earlier blocks are
-                // non-entry blocks that accumulated during the hold or between cycles.
-                //
-                // send_to_l1 builds a single aggregate immediate entry spanning
-                // first_pre → last_clean, so the state delta chain works:
-                //   Entry[0] immediate: pre_first → clean_last(=clean_entry_block)
-                //   Entry[1..N] deferred: clean_entry_block → intermediates
-                //
-                // §4f nonce safety is preserved: continuation entries are only for
-                // the LAST block, and blocks BEFORE it don't depend on entry protocol
-                // tx nonces (they were built before the entries were queued).
-                self.pending_submissions.len().min(MAX_BATCH_SIZE)
-            } else {
-                // Simple cross-chain entries (single call): limit to 1 block.
-                // The entry block is always the last block built before the flush.
-                // If multiple blocks are pending, only take the first — it may or
-                // may not have entries, but limiting to 1 ensures the entry block
-                // is submitted alone when it's reached.
-                1.min(self.pending_submissions.len())
-            }
+            // Include ALL pending blocks when entries are present.
+            // The entry block is the last one (just built). Earlier blocks are
+            // non-entry blocks that accumulated during the hold or between cycles
+            // (e.g., from complex-tx-sender generating L2 blocks).
+            //
+            // send_to_l1 builds a single aggregate immediate entry spanning
+            // first_pre → last_clean, so the state delta chain works:
+            //   Entry[0] immediate: pre_first → clean_last(=clean_entry_block)
+            //   Entry[1..N] deferred: clean_entry_block → intermediates
+            //
+            // Previously, simple entries used batch_size=1, which sent the FIRST
+            // pending block without entries but WITH entry state deltas computed
+            // for the LAST block. This caused ExecutionNotFound when intermediate
+            // blocks existed (the deferred entry's currentState didn't match the
+            // on-chain stateRoot after the immediate entry for the wrong block).
+            //
+            // §4f nonce safety is preserved: entry protocol txs are only in the
+            // LAST block, and earlier blocks don't depend on entry nonces.
+            self.pending_submissions.len().min(MAX_BATCH_SIZE)
         } else {
             self.pending_submissions.len().min(MAX_BATCH_SIZE)
         };

@@ -155,6 +155,11 @@ pub struct L2CrossChainCallParams {
     /// When present alongside `l2_return_data`, skips independent L2 simulation.
     #[serde(default)]
     pub l2_call_success: Option<bool>,
+    /// Scope array for the L1 delivery CALL action (determines newScope nesting
+    /// depth in executeL2TX). Computed from trace_depth of the proxy call in the
+    /// L2 trace: scope = vec![0; trace_depth]. Empty for direct proxy calls.
+    #[serde(default)]
+    pub l1_delivery_scope: Vec<U256>,
 }
 
 /// A queued cross-chain call with its entry pair, gas price, and raw L1 tx.
@@ -266,6 +271,15 @@ pub struct BuildExecutionTableCall {
     /// meaning the target is our L2 rollup).
     #[serde(default)]
     pub target_rollup_id: Option<u64>,
+    /// Accumulated scope for this call.
+    #[serde(default)]
+    pub scope: Vec<U256>,
+    /// Iterative discovery iteration when this call was first detected.
+    #[serde(default)]
+    pub discovery_iteration: usize,
+    /// Original L1 trace depth from walk_trace_tree.
+    #[serde(default)]
+    pub l1_trace_depth: usize,
 }
 
 /// Result of building a multi-call execution table.
@@ -317,6 +331,9 @@ pub struct BuildL2ToL1Call {
     /// Whether the L1 delivery simulation reverted.
     #[serde(default)]
     pub delivery_failed: bool,
+    /// Accumulated scope for L1 delivery.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// A return call (L1→L2) for the reverse multi-call continuation execution table builder.
@@ -342,6 +359,9 @@ pub struct BuildL2ToL1ReturnCall {
     /// Whether the L2 simulation reverted.
     #[serde(default)]
     pub l2_delivery_failed: bool,
+    /// Accumulated scope for this return call.
+    #[serde(default)]
+    pub scope: Vec<U256>,
 }
 
 /// Parameters for computing an action hash.
@@ -721,6 +741,7 @@ where
             params.raw_l2_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger on L1
             params.delivery_return_data.to_vec(),
             params.delivery_failed,
+            params.l1_delivery_scope, // scope from trace depth
         );
 
         let call_id = entries.l2_table_entries[0].action_hash;
@@ -801,6 +822,9 @@ where
                 call_success: c.call_success,
                 parent_call_index: c.parent_call_index,
                 target_rollup_id: c.target_rollup_id,
+                scope: c.scope.clone(),
+                discovery_iteration: c.discovery_iteration,
+                l1_trace_depth: c.l1_trace_depth,
             })
             .collect();
 
@@ -943,6 +967,7 @@ where
                 source_address: c.source_address,
                 delivery_return_data: c.delivery_return_data.to_vec(),
                 delivery_failed: c.delivery_failed,
+                scope: c.scope.clone(),
             })
             .collect();
 
@@ -961,6 +986,7 @@ where
                     .map(|b| b.to_vec())
                     .unwrap_or_default(),
                 l2_delivery_failed: c.l2_delivery_failed,
+                scope: c.scope.clone(),
             })
             .collect();
 
@@ -1082,10 +1108,12 @@ where
                     None::<()>,
                 ));
             }
-            // L2TX trigger: one executeL2TX per root L2→L1 call. Each invocation
-            // consumes one L2TX-triggered entry via _findAndApplyExecution (swap-and-pop).
-            // Continuation entries (reentrant children) are consumed within scope resolution.
-            let root_call_count = params.l2_calls.len();
+            // L2TX trigger: ONE executeL2TX for the entire chained entry set.
+            // In the chained model, all entries chain from a single L2TX trigger:
+            //   L2TX → CALL(A,scope=[0]) → RESULT → CALL(B,scope=[1]) → RESULT → terminal
+            // The single executeL2TX consumes all entries via scope navigation.
+            // (The old per-call model used N triggers for N separate L2TX entries,
+            // but chaining replaced that with RESULT→CALL links.)
             queue.push(QueuedL2ToL1Call {
                 l2_table_entries: continuation.l2_entries,
                 l1_deferred_entries: continuation.l1_entries,
@@ -1097,7 +1125,7 @@ where
                     .fold(U256::ZERO, |a, b| a + b),
                 raw_l2_tx: params.raw_l2_tx.clone(),
                 rlp_encoded_tx: params.raw_l2_tx.to_vec(),
-                trigger_count: root_call_count,
+                trigger_count: 1,
             });
         }
 

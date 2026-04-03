@@ -702,6 +702,7 @@ pub fn build_l2_to_l1_call_entries(
     rlp_encoded_tx: Vec<u8>,
     delivery_return_data: Vec<u8>,
     delivery_failed: bool,
+    l1_delivery_scope: Vec<U256>,
 ) -> WithdrawalEntries {
     let rollup_id_u256 = U256::from(rollup_id);
 
@@ -801,9 +802,10 @@ pub fn build_l2_to_l1_call_entries(
     );
 
     // nextAction for L2TX trigger = delivery CALL (executes on L1 via _resolveScopes)
-    // Per spec: scope=[] (empty). _resolveScopes sees CALL with empty scope → enters
-    // _processCallAtScope directly to execute the delivery.
-    // For withdrawals: sends ETH to user. For general calls: calls destination with data.
+    // Scope determines how deeply _resolveScopes nests newScope() calls before
+    // executing at _processCallAtScope. Depth = number of user contract boundaries
+    // between the L2 tx entry and the proxy call in the L2 trace.
+    // Example: SCA→SCB→proxy = scope=[0,0] (2 levels of wrapping).
     let l1_delivery_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: U256::ZERO, // L1 scope
@@ -813,7 +815,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_u256,
-        scope: vec![],
+        scope: l1_delivery_scope,
     };
 
     // Entry 2 action_hash: matches what _processCallAtScope builds after executing
@@ -2040,12 +2042,23 @@ pub fn compute_consumed_trigger_prefix(
 /// `group_starts[k]` is the index of the first entry in trigger group k.
 /// `roots` has T+1 values (T = number of trigger groups).
 ///
-/// For group k (entries from `group_starts[k]` to `group_starts[k+1]` or end):
-///   - First entry: `StateDelta(roots[k], roots[k+1], preserve existing ether_delta)`
-///   - Remaining entries: `StateDelta(roots[k+1], roots[k+1], preserve existing ether_delta)`
+/// For group k with N entries (from `group_starts[k]` to `group_starts[k+1]` or end):
+///   - When N == 1: `StateDelta(roots[k] → roots[k+1])`
+///   - When N > 1: generates N+1 unique chained roots `[r₀, r₁, ..., rₙ]` where
+///     `r₀ = roots[k]`, `rₙ = roots[k+1]`, and intermediate `rⱼ` are synthetic:
+///     `rⱼ = keccak256(pre_root || post_root || rollup_id || j)`.
+///     Each entry i gets `StateDelta(rᵢ → rᵢ₊₁)`.
 ///
-/// This is protocol-generic: works for any entry type (deposits, withdrawals,
-/// continuations, or any future pattern).
+/// Unique `currentState` per entry is REQUIRED by the protocol: entries with the
+/// same `actionHash` (e.g., siblingScopes RESULT chaining) are disambiguated by
+/// `_findAndApplyExecution` checking `rollups[rollupId].stateRoot == currentState`.
+/// See `contracts/sync-rollups-protocol/script/e2e/siblingScopes/E2E.s.sol:101`.
+///
+/// Synthetic roots are safe because:
+/// - L1 `_findAndApplyExecution` only checks `stateRoot == currentState` (not "real" L2 root)
+/// - All entries in a group are consumed atomically by one L1 tx (EVM atomicity)
+/// - Fullnode reads entries from L1 postBatch as-is (no independent root recomputation)
+/// - The final root (`roots[k+1]`) IS the real L2 state root
 pub fn attach_generic_state_deltas(
     entries: &mut [CrossChainExecutionEntry],
     roots: &[B256],
@@ -2076,8 +2089,30 @@ pub fn attach_generic_state_deltas(
 
         let pre_root = roots[k];
         let post_root = roots[k + 1];
+        let group_size = end.saturating_sub(start);
 
-        for i in start..end {
+        // Build the per-entry root chain: [r_0, r_1, ..., r_N]
+        // r_0 = pre_root, r_N = post_root, intermediates are synthetic.
+        let entry_roots: Vec<B256> = (0..=group_size)
+            .map(|j| {
+                if j == 0 {
+                    pre_root
+                } else if j == group_size {
+                    post_root
+                } else {
+                    // Synthetic: keccak256(pre || post || rollup_id || j)
+                    use alloy_primitives::keccak256;
+                    let mut buf = Vec::with_capacity(32 + 32 + 8 + 8);
+                    buf.extend_from_slice(pre_root.as_slice());
+                    buf.extend_from_slice(post_root.as_slice());
+                    buf.extend_from_slice(&rollup_id.to_be_bytes());
+                    buf.extend_from_slice(&(j as u64).to_be_bytes());
+                    keccak256(&buf)
+                }
+            })
+            .collect();
+
+        for (idx, i) in (start..end).enumerate() {
             if i >= entries.len() {
                 break;
             }
@@ -2089,23 +2124,12 @@ pub fn attach_generic_state_deltas(
                 .map(|d| d.ether_delta)
                 .unwrap_or(I256::ZERO);
 
-            if i == start {
-                // First entry in group: state transition from pre to post
-                entries[i].state_deltas = vec![CrossChainStateDelta {
-                    rollup_id: rollup_id_u256,
-                    current_state: pre_root,
-                    new_state: post_root,
-                    ether_delta: existing_ether_delta,
-                }];
-            } else {
-                // Subsequent entries in group: identity delta at post_root
-                entries[i].state_deltas = vec![CrossChainStateDelta {
-                    rollup_id: rollup_id_u256,
-                    current_state: post_root,
-                    new_state: post_root,
-                    ether_delta: existing_ether_delta,
-                }];
-            }
+            entries[i].state_deltas = vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: entry_roots[idx],
+                new_state: entry_roots[idx + 1],
+                ether_delta: existing_ether_delta,
+            }];
         }
     }
 }

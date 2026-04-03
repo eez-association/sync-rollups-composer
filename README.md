@@ -156,7 +156,7 @@ sync-rollup-composer/
 
 Explorer ports (requires explorer overlay): L1 frontend 4000, L2 frontend 4001, L1 API 4002, L2 API 4003.
 
-Startup order: `l1 → deploy → builder → deploy-l2 → deploy-reverse-flash-loan → complex-tx-sender`
+Startup order: `l1 → deploy → builder → deploy-l2 → complex-tx-sender`
 
 ## Build and Test
 

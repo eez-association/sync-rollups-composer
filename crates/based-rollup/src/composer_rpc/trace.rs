@@ -67,6 +67,16 @@ pub struct DetectedCall {
     /// Who called the proxy (`from` field of the trace node) — used as
     /// `sourceAddress` in the cross-chain action.
     pub source_address: Address,
+    /// Depth of the proxy node in the trace tree (root = 0).
+    /// Used to compute scope arrays: `scope_depth = trace_depth`.
+    /// Each CALL/DELEGATECALL/STATICCALL frame increments depth by 1.
+    pub trace_depth: usize,
+    /// Raw output bytes from the proxy call's trace node. For reentrant
+    /// patterns, this captures the return value of the proxy's
+    /// `executeOnBehalf` call (which includes scope-resolved return data).
+    /// Used by post-convergence enrichment to extract delivery return data
+    /// from intermediate hops without additional simulation.
+    pub output: Vec<u8>,
 }
 
 /// Identity of a cross-chain proxy.
@@ -291,6 +301,7 @@ pub async fn walk_trace_tree(
         ephemeral_proxies,
         detected_calls,
         unresolved_proxies,
+        0, // root node is at depth 0
     )
     .await;
 }
@@ -333,6 +344,7 @@ pub fn extract_ephemeral_proxies_from_trace(
 ///
 /// Separated to allow `Box::pin` wrapping for async recursion without
 /// exposing the pinning in the public API.
+#[allow(clippy::too_many_arguments)]
 async fn walk_trace_tree_inner(
     node: &Value,
     manager_addresses: &[Address],
@@ -341,6 +353,7 @@ async fn walk_trace_tree_inner(
     ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
     detected_calls: &mut Vec<DetectedCall>,
     unresolved_proxies: &mut HashSet<Address>,
+    depth: usize,
 ) {
     let parsed = match parse_trace_node(node) {
         Some(p) => p,
@@ -355,6 +368,7 @@ async fn walk_trace_tree_inner(
                 ephemeral_proxies,
                 detected_calls,
                 unresolved_proxies,
+                depth,
             )
             .await;
             return;
@@ -376,6 +390,7 @@ async fn walk_trace_tree_inner(
             ephemeral_proxies,
             detected_calls,
             unresolved_proxies,
+            depth,
         )
         .await;
         return;
@@ -400,6 +415,7 @@ async fn walk_trace_tree_inner(
             ephemeral_proxies,
             detected_calls,
             unresolved_proxies,
+            depth,
         )
         .await;
         return;
@@ -421,14 +437,26 @@ async fn walk_trace_tree_inner(
                 source = %parsed.from,
                 calldata_len = parsed.input.len(),
                 value = %parsed.value,
+                depth,
                 "detected cross-chain proxy call via executeCrossChainCall child"
             );
+
+            // Capture proxy call output for post-convergence enrichment.
+            // The output contains the return value from executeOnBehalf,
+            // which includes scope-resolved return data for reentrant patterns.
+            let proxy_output = node
+                .get("output")
+                .and_then(|v| v.as_str())
+                .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok())
+                .unwrap_or_default();
 
             detected_calls.push(DetectedCall {
                 destination: proxy_info.original_address,
                 calldata: parsed.input,
                 value: parsed.value,
                 source_address: parsed.from,
+                trace_depth: depth,
+                output: proxy_output,
             });
         } else {
             // Proxy identity not found — record as unresolved so callers can
@@ -441,20 +469,25 @@ async fn walk_trace_tree_inner(
                 "node has executeCrossChainCall child but proxy identity not found — marking unresolved"
             );
             unresolved_proxies.insert(parsed.to);
-            recurse_children(
-                node,
-                manager_addresses,
-                lookup,
-                proxy_cache,
-                ephemeral_proxies,
-                detected_calls,
-                unresolved_proxies,
-            )
-            .await;
         }
 
-        // When proxy was found: do NOT recurse into proxy children —
-        // the executeCrossChainCall and everything beneath are protocol internals.
+        // ALWAYS recurse into proxy children to find reentrant cross-chain
+        // calls. In deep patterns (e.g., reentrantCrossChainCalls), the
+        // protocol's scope navigation (newScope → executeOnBehalf) triggers
+        // additional proxy calls deeper in the trace tree. Step 2 (line 378)
+        // already skips manager-originated calls, preventing false positives
+        // from protocol-internal forward deliveries.
+        recurse_children(
+            node,
+            manager_addresses,
+            lookup,
+            proxy_cache,
+            ephemeral_proxies,
+            detected_calls,
+            unresolved_proxies,
+            depth,
+        )
+        .await;
         return;
     }
 
@@ -467,6 +500,7 @@ async fn walk_trace_tree_inner(
         ephemeral_proxies,
         detected_calls,
         unresolved_proxies,
+        depth,
     )
     .await;
 }
@@ -476,6 +510,8 @@ async fn walk_trace_tree_inner(
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Recurse depth-first into the `calls` array of a trace node.
+/// Each child is at `depth + 1` from the current node.
+#[allow(clippy::too_many_arguments)]
 async fn recurse_children(
     node: &Value,
     manager_addresses: &[Address],
@@ -484,6 +520,7 @@ async fn recurse_children(
     ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
     detected_calls: &mut Vec<DetectedCall>,
     unresolved_proxies: &mut HashSet<Address>,
+    depth: usize,
 ) {
     if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
         for child in calls {
@@ -495,6 +532,7 @@ async fn recurse_children(
                 ephemeral_proxies,
                 detected_calls,
                 unresolved_proxies,
+                depth + 1,
             ))
             .await;
         }

@@ -397,11 +397,27 @@ impl DerivationPipeline {
                 }
             }
 
+            // Compute effective state root BEFORE L2 conversion. The original L1
+            // deferred entries carry the full state delta chain (clean → ... → speculative).
+            // L2 conversion (convert_l1_entries_to_l2_pairs) skips entries whose
+            // nextAction is CALL (continuation entries), losing their state deltas and
+            // breaking the chain. Must use the original entries here.
+            let mut effective_state_root = batch_final_state_root;
+            let rollup_id_u256 = U256::from(self.config.rollup_id);
+            for entry in &deferred_entries {
+                for delta in &entry.state_deltas {
+                    if delta.current_state == effective_state_root
+                        && delta.rollup_id == rollup_id_u256
+                    {
+                        effective_state_root = delta.new_state;
+                    }
+                }
+            }
+
             // Reconstruct L2-format entry pairs from L1-format entries + CALL actions.
             // L1 entries have (actionHash=hash(CALL), nextAction=RESULT) — fullnodes
-            // need the full entry pairs for effective_state_root computation via
-            // chained state deltas (§4e). The CALL actions come from
-            // ExecutionConsumed events emitted when entries are consumed on L1.
+            // need the L2-format entries for the CCM execution table. The CALL actions
+            // come from ExecutionConsumed events emitted when entries are consumed on L1.
             let call_actions: Vec<cross_chain::CrossChainAction> = consumed_map
                 .values()
                 .flat_map(|v| v.iter())
@@ -440,22 +456,6 @@ impl DerivationPipeline {
             } else {
                 deferred_entries
             };
-
-            // Compute effective state root by applying consumed entries' chained
-            // state deltas to the clean batch_final_state_root. Each CALL entry's
-            // StateDelta chains: Y → X₁ → X₂ → ... → X. The effective root
-            // equals the state after the last consumed entry (see §3e, §4e).
-            let mut effective_state_root = batch_final_state_root;
-            let rollup_id_u256 = U256::from(self.config.rollup_id);
-            for entry in &deferred_entries {
-                for delta in &entry.state_deltas {
-                    if delta.current_state == effective_state_root
-                        && delta.rollup_id == rollup_id_u256
-                    {
-                        effective_state_root = delta.new_state;
-                    }
-                }
-            }
 
             // L1 context = parent of the containing L1 block.
             // The builder uses latest_l1_block when building, and the tx lands in
