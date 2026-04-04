@@ -31,7 +31,8 @@ use tokio::net::TcpListener;
 // Shared helpers from the common module.
 use super::common::{
     cors_response, detect_cross_chain_proxy_on_l2, error_response, eth_call_view, extract_methods,
-    get_l1_block_context, get_verification_key, parse_address_from_abi_return,
+    get_l1_block_context, get_rollup_state_root, get_verification_key,
+    parse_address_from_abi_return,
 };
 
 /// Decode a `0x`-prefixed 4-byte error selector into a human-readable name.
@@ -1220,7 +1221,20 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
         .and_then(|r| r.get(0))
         .and_then(|b| b.as_array())
     {
-        Some(arr) => arr,
+        Some(arr) => {
+            // Log each tx's success/failure for generic debugging of any chained simulation.
+            for (ti, t) in arr.iter().enumerate() {
+                let err = t.get("error").and_then(|v| v.as_str()).unwrap_or("none");
+                tracing::debug!(
+                    target: "based_rollup::l1_proxy",
+                    ti,
+                    total = arr.len(),
+                    error = err,
+                    "chained L2 sim: bundle tx result"
+                );
+            }
+            arr
+        }
         None => {
             tracing::warn!(
                 target: "based_rollup::l1_proxy",
@@ -1292,6 +1306,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
     //   loadTable + prior execs + current exec), so they see proxies created
     //   during delivery. Parse the query results and re-walk the trace with
     //   the resolved identities pre-populated.
+
     let children = if !cross_chain_manager_address.is_zero() {
         let pre = if bundle_ephemeral_proxies.is_empty() {
             None
@@ -1309,6 +1324,13 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
             pre,
         )
         .await;
+
+        tracing::debug!(
+            target: "based_rollup::l1_proxy",
+            pass1_children = pass1_children.len(),
+            unresolved = unresolved.len(),
+            "chained L2 sim: walk_l2_simulation_trace result"
+        );
 
         if unresolved.is_empty() {
             // All proxies resolved on first pass — no second RPC call needed.
@@ -1836,6 +1858,7 @@ async fn build_and_run_l1_postbatch_trace(
             parent = ?a.parent_call_index,
             depth = a.depth,
             dest = %a.call_action.destination,
+            value = %a.call_action.value,
             scope_len = a.scope.len(),
             delivery_data_len = a.delivery_return_data.len(),
             l2_return_data_len = a.l2_return_data.len(),
@@ -1876,8 +1899,16 @@ async fn build_and_run_l1_postbatch_trace(
         cont.l1_entries
     };
 
-    // Log entries
+    // Log entries with state delta details
     for (idx, e) in entries.iter().enumerate() {
+        let delta_info = if let Some(d) = e.state_deltas.first() {
+            format!(
+                "rollup={} current={} new={} ether_delta={}",
+                d.rollup_id, d.current_state, d.new_state, d.ether_delta
+            )
+        } else {
+            "no deltas".to_string()
+        };
         tracing::info!(
             target: "based_rollup::l1_proxy",
             label, idx,
@@ -1886,17 +1917,28 @@ async fn build_and_run_l1_postbatch_trace(
             next_dest = %e.next_action.destination,
             next_scope_len = e.next_action.scope.len(),
             next_data_len = e.next_action.data.len(),
+            next_value = %e.next_action.value,
+            delta = %delta_info,
             "L1 entry for postBatch simulation"
         );
     }
 
-    // Clear state deltas for simulation-only entries.
+    // Fix placeholder state deltas for simulation entries.
     // build_continuation_entries produces entries with placeholder
-    // currentState=0x0 / newState=0x0. Clear deltas so
-    // _findAndApplyExecution's allMatch stays true.
+    // currentState=0x0 / newState=0x0. _findAndApplyExecution checks
+    // rollups[rollupId].stateRoot == delta.currentState — placeholders
+    // won't match. Query the real on-chain stateRoot and set identity
+    // deltas (current=real, new=real) while preserving ether_delta.
     let mut entries = entries;
+    let on_chain_state_root = get_rollup_state_root(client, l1_rpc_url, rollups_address, rollup_id)
+        .await
+        .unwrap_or(alloy_primitives::B256::ZERO);
     for e in &mut entries {
-        e.state_deltas.clear();
+        for d in &mut e.state_deltas {
+            d.current_state = on_chain_state_root;
+            d.new_state = on_chain_state_root;
+            // ether_delta is preserved from build_continuation_entries
+        }
     }
 
     if entries.is_empty() {
@@ -2242,6 +2284,104 @@ async fn trace_and_detect_internal_calls(
         &mut proxy_cache,
     )
     .await;
+
+    // Iterative L1 discovery: if the initial trace found cross-chain calls but the
+    // user tx reverted, retrace with entries loaded to discover calls hidden behind
+    // the revert. Example: Aggregator calls Bridge.bridgeEther (reverts without
+    // entries) then proxy.incrementProxy (never reached). Loading entries for the
+    // bridge deposit allows the retrace to reach incrementProxy.
+    //
+    // This mirrors trace_and_detect_l2_internal_calls in l2_to_l1.rs (Problem 1).
+    // Uses build_and_run_l1_postbatch_trace which already handles entry construction,
+    // proof signing, and traceCallMany execution.
+    if top_level_error && !detected_calls.is_empty() {
+        if let Some(builder_key_hex) = &builder_private_key {
+            let key_clean = builder_key_hex
+                .strip_prefix("0x")
+                .unwrap_or(builder_key_hex);
+            if let Ok(signer) = key_clean.parse::<alloy_signer_local::PrivateKeySigner>() {
+                const MAX_L1_DISCOVERY_ITERATIONS: usize = 5;
+                let user_from = from.to_string();
+                let user_to = to.to_string();
+                let user_data = data.to_string();
+                let user_value = value.to_string();
+
+                for iteration in 1..=MAX_L1_DISCOVERY_ITERATIONS {
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        iteration,
+                        known_calls = detected_calls.len(),
+                        "iterative L1 discovery: retracing user tx with postBatch entries"
+                    );
+
+                    let trace_result = build_and_run_l1_postbatch_trace(
+                        client,
+                        l1_rpc_url,
+                        rollups_address,
+                        rollup_id,
+                        &signer,
+                        &detected_calls,
+                        &user_from,
+                        &user_to,
+                        &user_data,
+                        &user_value,
+                        &format!("l1-discovery-iter-{iteration}"),
+                    )
+                    .await;
+
+                    let Some((user_trace, _full_resp)) = trace_result else {
+                        tracing::warn!(
+                            target: "based_rollup::l1_proxy",
+                            iteration,
+                            "iterative L1 discovery: traceCallMany failed — stopping"
+                        );
+                        break;
+                    };
+
+                    // Walk the retrace for new cross-chain calls.
+                    let new_detected = walk_l1_trace_generic(
+                        client,
+                        l1_rpc_url,
+                        rollups_address,
+                        &user_trace,
+                        &mut proxy_cache,
+                    )
+                    .await;
+
+                    // Find truly new calls (not already in detected_calls).
+                    let truly_new: Vec<_> = new_detected
+                        .into_iter()
+                        .filter(|new_call| {
+                            !detected_calls.iter().any(|existing| {
+                                existing.destination == new_call.destination
+                                    && existing.calldata == new_call.calldata
+                                    && existing.value == new_call.value
+                                    && existing.source_address == new_call.source_address
+                            })
+                        })
+                        .collect();
+
+                    if truly_new.is_empty() {
+                        tracing::info!(
+                            target: "based_rollup::l1_proxy",
+                            iteration,
+                            total = detected_calls.len(),
+                            "iterative L1 discovery converged — no new calls"
+                        );
+                        break;
+                    }
+
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        iteration,
+                        new_count = truly_new.len(),
+                        "iterative L1 discovery found new cross-chain calls"
+                    );
+                    detected_calls.extend(truly_new);
+                }
+            }
+        }
+    }
 
     // Enrich detected calls with L2 return data by simulating each L1→L2 call
     // on L2. The RESULT action hash includes the exact return bytes from the
@@ -2643,7 +2783,7 @@ async fn trace_and_detect_internal_calls(
                         }
                         let mut summary = Vec::new();
                         summarize_trace(user_trace, 0, &mut summary);
-                        tracing::info!(
+                        tracing::debug!(
                             target: "based_rollup::l1_proxy",
                             iteration,
                             user_error,
@@ -2652,14 +2792,6 @@ async fn trace_and_detect_internal_calls(
                             "iterative discovery: L1 user tx trace tree"
                         );
                     }
-
-                    // Log response for reproducibility.
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        iteration,
-                        response = %serde_json::to_string(&resp).unwrap_or_default(),
-                        "iterative discovery: L1 debug_traceCallMany RESPONSE"
-                    );
 
                     // Walk the user tx trace for new cross-chain calls
                     // using the generic trace walker.
@@ -3521,63 +3653,6 @@ async fn trace_and_detect_internal_calls(
                             .await;
 
                             if let Some((trace, success)) = sim_result {
-                                // === FULL TRACE DUMP for debugging ===
-                                tracing::info!(
-                                    target: "based_rollup::l1_proxy",
-                                    idx,
-                                    sim_success = success,
-                                    "post-convergence: L2 sim FULL TRACE: {}",
-                                    serde_json::to_string(&trace).unwrap_or_default()
-                                );
-
-                                // === WALK TRACE TREE with per-node logging ===
-                                {
-                                    let dest_lower = format!("{call_destination}").to_lowercase();
-                                    fn log_trace_walk(node: &Value, depth: usize, dest: &str) {
-                                        let to =
-                                            node.get("to").and_then(|v| v.as_str()).unwrap_or("?");
-                                        let from = node
-                                            .get("from")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("?");
-                                        let has_error = node.get("error").is_some();
-                                        let output_len = node
-                                            .get("output")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.len() / 2)
-                                            .unwrap_or(0);
-                                        let input_sel = node
-                                            .get("input")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("0x");
-                                        let sel = &input_sel[..input_sel.len().min(10)];
-                                        let is_match = to.to_lowercase() == dest;
-                                        tracing::info!(
-                                            target: "based_rollup::l1_proxy",
-                                            "  TRACE d={} to={}..{} from={}..{} sel={} err={} out_len={} match={}",
-                                            depth,
-                                            &to[..to.len().min(10)],
-                                            &to[to.len().saturating_sub(4)..],
-                                            &from[..from.len().min(10)],
-                                            &from[from.len().saturating_sub(4)..],
-                                            sel, has_error, output_len, is_match
-                                        );
-                                        if let Some(calls) =
-                                            node.get("calls").and_then(|v| v.as_array())
-                                        {
-                                            for c in calls {
-                                                log_trace_walk(c, depth + 1, dest);
-                                            }
-                                        }
-                                    }
-                                    tracing::info!(
-                                        target: "based_rollup::l1_proxy",
-                                        "post-convergence: L2 sim trace walk (dest={}):",
-                                        call_destination
-                                    );
-                                    log_trace_walk(&trace, 0, &dest_lower);
-                                }
-
                                 // BFS extraction
                                 let inner =
                                     extract_inner_destination_return_data(&trace, call_destination)

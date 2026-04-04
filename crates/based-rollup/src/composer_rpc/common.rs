@@ -373,6 +373,35 @@ pub(crate) async fn get_verification_key(
         .map_err(|e| eyre::eyre!("invalid VK: {e}"))
 }
 
+/// Query the on-chain stateRoot for a rollup from the Rollups contract.
+///
+/// Uses the same `rollups(uint256)` call as `get_verification_key` but
+/// extracts word 2 (stateRoot) instead of word 1 (verificationKey).
+pub(crate) async fn get_rollup_state_root(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    rollups_address: Address,
+    rollup_id: u64,
+) -> eyre::Result<alloy_primitives::B256> {
+    let selector = &alloy_primitives::keccak256(b"rollups(uint256)")[..4];
+    let calldata = format!("0x{}{:0>64x}", hex::encode(selector), rollup_id);
+
+    let result_hex = eth_call_view(client, l1_rpc_url, rollups_address, &calldata)
+        .await
+        .ok_or_else(|| eyre::eyre!("eth_call for rollups() returned no result"))?;
+
+    // rollups() returns (address owner, bytes32 verificationKey, bytes32 stateRoot, uint256 etherBalance)
+    // stateRoot is at offset 128..192 (word 2)
+    let hex_clean = result_hex.strip_prefix("0x").unwrap_or(&result_hex);
+    if hex_clean.len() < 192 {
+        return Err(eyre::eyre!("rollups() return too short for stateRoot"));
+    }
+    let sr_hex = &hex_clean[128..192];
+    format!("0x{sr_hex}")
+        .parse::<alloy_primitives::B256>()
+        .map_err(|e| eyre::eyre!("invalid stateRoot: {e}"))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 //  L2 proxy detection
 // ──────────────────────────────────────────────────────────────────────────────

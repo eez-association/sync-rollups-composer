@@ -555,6 +555,14 @@ pub fn build_continuation_entries(
         } else {
             alloy_primitives::I256::try_from(call_value).unwrap_or(alloy_primitives::I256::ZERO)
         };
+        tracing::info!(
+            target: "based_rollup::table_builder",
+            call_idx,
+            dest = %detected.call_action.destination,
+            call_value = %call_value,
+            ether_delta = %ether_delta,
+            "L1 entry ether_delta computation"
+        );
         let l1_entry_deltas = vec![CrossChainStateDelta {
             rollup_id: our_rollup_id,
             current_state: alloy_primitives::B256::ZERO, // placeholder — driver fills

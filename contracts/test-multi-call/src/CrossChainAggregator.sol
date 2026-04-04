@@ -76,7 +76,7 @@ contract CrossChainAggregator {
                 abi.encodeCall(IL2Executor.swapAndBridgeBack, (tokenIn, address(this)))
             );
             require(success, "remote swap failed");
-            remoteOut = IERC20(tokenOut).balanceOf(address(this)) - outBefore - localOut;
+            remoteOut = IERC20(tokenOut).balanceOf(address(this)) - outBefore;
         }
 
         totalOut = localOut + remoteOut;

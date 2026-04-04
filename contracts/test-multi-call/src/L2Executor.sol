@@ -32,15 +32,30 @@ contract L2Executor {
         tokenB = _tokenB;
     }
 
-    function swapAndBridgeBack(address tokenIn, address recipient) external returns (uint256 amountOut) {
-        uint256 balance = IERC20(tokenIn).balanceOf(address(this));
-        require(balance > 0, "no tokens to swap");
+    /// @notice Swap and bridge back. The `l1TokenIn` parameter is the L1 address
+    ///         of the token (passed from the L1 Aggregator via cross-chain call).
+    ///         We map it to the local L2 wrapped token address.
+    function swapAndBridgeBack(address l1TokenIn, address recipient) external returns (uint256 amountOut) {
+        // Map L1 token address to L2 wrapped token address.
+        // The bridge deposit already delivered wrapped tokens to this contract.
+        // We don't use l1TokenIn directly — it has no code on L2.
+        // Instead, check which of our known L2 tokens has a balance.
+        address localTokenIn;
+        if (IERC20(tokenA).balanceOf(address(this)) > 0) {
+            localTokenIn = tokenA;
+        } else if (IERC20(tokenB).balanceOf(address(this)) > 0) {
+            localTokenIn = tokenB;
+        } else {
+            revert("no tokens to swap");
+        }
 
-        IERC20(tokenIn).approve(amm, balance);
-        amountOut = IAMM(amm).swap(tokenIn, balance);
+        uint256 balance = IERC20(localTokenIn).balanceOf(address(this));
 
-        address tokenOut = tokenIn == tokenA ? tokenB : tokenA;
-        IERC20(tokenOut).approve(bridge, amountOut);
-        IBridge(bridge).bridgeTokens(tokenOut, amountOut, 0, recipient);
+        IERC20(localTokenIn).approve(amm, balance);
+        amountOut = IAMM(amm).swap(localTokenIn, balance);
+
+        address localTokenOut = localTokenIn == tokenA ? tokenB : tokenA;
+        IERC20(localTokenOut).approve(bridge, amountOut);
+        IBridge(bridge).bridgeTokens(localTokenOut, amountOut, 0, recipient);
     }
 }

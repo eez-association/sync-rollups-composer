@@ -17,3 +17,6 @@ ui/tsconfig.tsbuildinfo
 **/proptest-regressions/
 .shared/
 .claude/worktrees/
+contracts/test-multi-call/cache/
+contracts/test-multi-call/out/
+contracts/test-multi-call/scripts/
