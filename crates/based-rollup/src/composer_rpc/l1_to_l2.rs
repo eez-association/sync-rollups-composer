@@ -692,11 +692,16 @@ fn destination_call_succeeded_in_trace(trace: &Value, destination: Address) -> b
 fn extract_inner_destination_return_data(trace: &Value, destination: Address) -> Option<Vec<u8>> {
     let dest_hex_lower = format!("{destination}").to_lowercase();
 
-    // BFS (breadth-first search) to find the SHALLOWEST successful call
-    // to the destination. For reentrant patterns (deepCall(4) → deepCall(2) →
-    // deepCall(0)), all calls target the same address. We want the outermost
-    // call's output (deepCall(4)=3), not the innermost (deepCall(0)=1).
-    // BFS guarantees we find the shallowest match first.
+    // BFS (breadth-first search) to find the SHALLOWEST call to the destination.
+    // For reentrant patterns (deepCall(4) → deepCall(2) → deepCall(0)), all calls
+    // target the same address. We want the outermost call's output (deepCall(4)=3),
+    // not the innermost (deepCall(0)=1). BFS guarantees we find the shallowest first.
+    //
+    // Two passes:
+    //   1. First pass: find shallowest SUCCESSFUL call (no "error" field)
+    //   2. If not found: find shallowest FAILED call (has "error" field)
+    //      This captures revert data for contracts that always revert (e.g., RevertCounter).
+    //      The output of a reverted call contains the revert bytes (Error(string), etc.).
     let mut queue = std::collections::VecDeque::new();
     if let Some(calls) = trace.get("calls").and_then(|v| v.as_array()) {
         for c in calls {
@@ -704,13 +709,21 @@ fn extract_inner_destination_return_data(trace: &Value, destination: Address) ->
         }
     }
 
+    let mut first_failed_output: Option<Vec<u8>> = None;
+
     while let Some(node) = queue.pop_front() {
         if let Some(to) = node.get("to").and_then(|v| v.as_str()) {
-            if to.to_lowercase() == dest_hex_lower && node.get("error").is_none() {
+            if to.to_lowercase() == dest_hex_lower {
                 let output = node.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
                 let data =
                     hex::decode(output.strip_prefix("0x").unwrap_or(output)).unwrap_or_default();
-                return Some(data);
+                if node.get("error").is_none() {
+                    // Successful call — return immediately (preferred)
+                    return Some(data);
+                } else if first_failed_output.is_none() && !data.is_empty() {
+                    // Failed call with revert data — save as fallback
+                    first_failed_output = Some(data);
+                }
             }
         }
         // Enqueue children for BFS traversal
@@ -721,7 +734,8 @@ fn extract_inner_destination_return_data(trace: &Value, destination: Address) ->
         }
     }
 
-    None
+    // Return failed call's revert data if no successful call found
+    first_failed_output
 }
 
 /// Simulate an L1->L2 call on L2 to capture the actual return data.
