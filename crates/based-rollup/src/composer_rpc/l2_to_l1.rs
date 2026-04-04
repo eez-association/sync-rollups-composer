@@ -1631,6 +1631,7 @@ async fn simulate_l1_delivery(
     rlp_encoded_tx: &[u8],
     root_scope: &[U256],
     known_delivery_return_data: &[u8],
+    known_delivery_failed: bool,
 ) -> Option<(Vec<u8>, bool, Vec<DetectedReturnCall>)> {
     // First check if destination has code on L1.
     // If it's an EOA, return data is empty and we skip simulation.
@@ -1680,7 +1681,7 @@ async fn simulate_l1_delivery(
     let mut all_return_calls: Vec<DetectedReturnCall> = Vec::new();
     let mut final_return_data: Vec<u8> = known_delivery_return_data.to_vec();
     let mut prev_return_data: Vec<u8> = known_delivery_return_data.to_vec();
-    let mut final_delivery_failed = false;
+    let mut final_delivery_failed = known_delivery_failed;
 
     for iteration in 1..=MAX_SIMULATION_ITERATIONS {
         tracing::info!(
@@ -1700,11 +1701,11 @@ async fn simulate_l1_delivery(
                 value,
                 _trigger_user,
                 rollup_id,
-                rlp_encoded_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger
-                vec![],                  // placeholder delivery_return_data
-                false,                   // placeholder delivery_failed
-                root_scope.to_vec(),     // l1_delivery_scope from trace depth
-                false,                   // tx_reverts
+                rlp_encoded_tx.to_vec(),        // RLP-encoded L2 tx for L2TX trigger
+                final_return_data.clone(),       // use known data (from iterative discovery or previous iteration)
+                final_delivery_failed,           // use known failed flag
+                root_scope.to_vec(),             // l1_delivery_scope from trace depth
+                false,                           // tx_reverts (simulation path, not real queueing)
             );
             call_entries.l1_deferred_entries
         } else {
@@ -1976,9 +1977,13 @@ async fn simulate_l1_delivery(
 
         // Trigger simulation is unreliable for L2→L1 calls: entries have
         // placeholder state deltas and the ECDSA proof may not match real L1
-        // state. Always assume delivery succeeds — §4f + rewind handles real
+        // state. When delivery failure was already detected by the caller
+        // (known_delivery_failed=true via iterative L2 discovery), preserve it.
+        // Otherwise assume delivery succeeds — §4f + rewind handles real
         // failures on L1.
-        final_delivery_failed = false;
+        if !known_delivery_failed {
+            final_delivery_failed = false;
+        }
 
         // Extract L1→L2 return calls from the trigger trace BEFORE deciding
         // the return data fallback — we need to know whether this is depth-1
@@ -3809,6 +3814,7 @@ async fn trace_and_detect_l2_internal_calls(
                                                 &tx_bytes,
                                                 &vec![U256::ZERO; call.trace_depth.max(1)],
                                                 &call.delivery_return_data,
+                                                call.delivery_failed,
                                             )
                                             .await
                                         {
@@ -4382,6 +4388,7 @@ async fn trace_and_detect_l2_internal_calls(
                 &tx_bytes,
                 &root_scope,
                 &first.delivery_return_data,
+                first.delivery_failed,
             )
             .await
             {
@@ -4693,6 +4700,7 @@ async fn trace_and_detect_l2_internal_calls(
         &tx_bytes,
         &root_scope,
         &call.delivery_return_data,
+        call.delivery_failed,
     )
     .await
     .unwrap_or((vec![], false, vec![]));
