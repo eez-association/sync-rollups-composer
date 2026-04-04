@@ -25,18 +25,21 @@ import { ProxyDeploySection } from "./components/ProxyDeploySection";
 import { CrossChainCallBuilder } from "./components/CrossChainCallBuilder";
 import { BridgePanel } from "./components/BridgePanel";
 import { FlashLoanPanel } from "./components/FlashLoanPanel";
+import { AggregatorPanel } from "./components/AggregatorPanel";
+import { useAggregator } from "./hooks/useAggregator";
 import { FaucetPanel } from "./components/FaucetPanel";
 import { VisualizerView } from "./components/VisualizerView";
 import { TxHistoryPanel } from "./components/TxHistoryPanel";
 
 
-type DashboardTab = "dashboard" | "counter-demo" | "bridge" | "flash-loan";
+type DashboardTab = "dashboard" | "counter-demo" | "bridge" | "flash-loan" | "aggregator";
 
 /** Dashboard sub-tabs that can be deep-linked via hash */
 const HASH_TO_TAB: Record<string, DashboardTab> = {
   "flash-loan": "flash-loan",
   "counter-demo": "counter-demo",
   "bridge": "bridge",
+  "aggregator": "aggregator",
 };
 
 function getInitialView(): string {
@@ -116,6 +119,7 @@ export function App() {
   });
   const flashLoanReverse = useFlashLoanReverse(log, wallet.sendL2ProxyTx);
   const faucet = useFaucet(log, wallet.address);
+  const aggregator = useAggregator(log, wallet.sendL1Tx, wallet.sendL1ProxyTx, wallet.address);
 
   const execVis = useExecutionVisualizer();
   const txHistory = useTxHistory();
@@ -435,6 +439,15 @@ export function App() {
             >
               Flash Loan
             </button>
+            <button
+              style={{
+                ...subTabStyle,
+                ...(dashboardTab === "aggregator" ? subTabActiveExtra : {}),
+              }}
+              onClick={() => switchTab("aggregator")}
+            >
+              Aggregator
+            </button>
           </div>
 
           {/* Tab content */}
@@ -523,6 +536,20 @@ export function App() {
                 onExecuteReverse={flashLoanReverse.execute}
                 onReset={flashLoan.reset}
                 onResetReverse={flashLoanReverse.reset}
+                walletConnected={wallet.isConnected}
+                walletAddress={wallet.address}
+              />
+            )}
+
+            {dashboardTab === "aggregator" && (
+              <AggregatorPanel
+                state={aggregator.state}
+                onExecute={() => aggregator.execute(aggregator.state.totalAmount, aggregator.state.splitPercent)}
+                onWrapEth={aggregator.wrapEth}
+                onUnwrapWeth={aggregator.unwrapWeth}
+                onReset={aggregator.reset}
+                onSetSplit={aggregator.setSplit}
+                onSetAmount={aggregator.setAmount}
                 walletConnected={wallet.isConnected}
                 walletAddress={wallet.address}
               />

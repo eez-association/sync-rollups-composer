@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { config, L1_CHAIN, L2_CHAIN, ESTIMATION_SENDER } from "../config";
+import { config, L1_CHAIN, L2_CHAIN } from "../config";
 import { rpcCall } from "../rpc";
 import type { WalletState } from "../types";
 
@@ -183,25 +183,20 @@ export function useWallet(log: Logger) {
   /**
    * Send a tx to L1.
    *
-   * When wallet is connected, auto-switches to L1 and routes through wallet.
+   * Requires a connected wallet — auto-switches to L1 chain and routes through wallet.
    * L1_CHAIN.rpcUrls points to the L1 proxy (port 9556), so wallet L1 sends
    * go through the proxy automatically.
-   * Otherwise falls back to direct RPC (L1 reth --dev supports eth_sendTransaction).
    */
   const sendL1Tx = useCallback(
     async (txParams: Record<string, string>): Promise<string> => {
-      if (stateRef.current.isConnected) {
-        await ensureChain(L1_CHAIN);
-        return (await window.ethereum!.request({
-          method: "eth_sendTransaction",
-          params: [prepareWalletParams(txParams, stateRef.current.address!)],
-        })) as string;
+      if (!stateRef.current.isConnected) {
+        throw new Error("Connect wallet to send transactions");
       }
-
-      // L1 uses reth --dev which supports eth_sendTransaction
-      return (await rpcCall(config.l1Rpc, "eth_sendTransaction", [
-        { ...txParams, from: ESTIMATION_SENDER },
-      ])) as string;
+      await ensureChain(L1_CHAIN);
+      return (await window.ethereum!.request({
+        method: "eth_sendTransaction",
+        params: [prepareWalletParams(txParams, stateRef.current.address!)],
+      })) as string;
     },
     [ensureChain],
   );
@@ -214,24 +209,19 @@ export function useWallet(log: Logger) {
    * then forwards to L1. Without the proxy, the execution table is
    * empty and the tx reverts with ExecutionNotFound.
    *
-   * When wallet is connected, auto-switches to L1 and routes through wallet.
+   * Requires a connected wallet — auto-switches to L1 chain and routes through wallet.
    * (L1_CHAIN.rpcUrls already points to port 9556.)
-   * Otherwise falls back to direct RPC through the proxy.
    */
   const sendL1ProxyTx = useCallback(
     async (txParams: Record<string, string>): Promise<string> => {
-      if (stateRef.current.isConnected) {
-        await ensureChain(L1_CHAIN);
-        return (await window.ethereum!.request({
-          method: "eth_sendTransaction",
-          params: [prepareWalletParams(txParams, stateRef.current.address!)],
-        })) as string;
+      if (!stateRef.current.isConnected) {
+        throw new Error("Connect wallet to send transactions");
       }
-
-      // L1 proxy forwards to L1 reth --dev which supports eth_sendTransaction
-      return (await rpcCall(config.l1ProxyRpc, "eth_sendTransaction", [
-        { ...txParams, from: ESTIMATION_SENDER },
-      ])) as string;
+      await ensureChain(L1_CHAIN);
+      return (await window.ethereum!.request({
+        method: "eth_sendTransaction",
+        params: [prepareWalletParams(txParams, stateRef.current.address!)],
+      })) as string;
     },
     [ensureChain],
   );

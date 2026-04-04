@@ -52,6 +52,17 @@ services:
       - ../../contracts/sync-rollups-protocol/out:/app/contracts/sync-rollups-protocol/out
       - ../../contracts/sync-rollups-protocol/cache:/app/contracts/sync-rollups-protocol/cache
 
+  deploy-aggregator:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile.dev
+      target: deploy
+    image: based-rollup:dev-deploy
+    volumes:
+      - ../../contracts/test-multi-call/out:/app/contracts/test-multi-call/out
+      - ../../contracts/sync-rollups-protocol/out:/app/contracts/sync-rollups-protocol/out
+      - ../../contracts/sync-rollups-protocol/cache:/app/contracts/sync-rollups-protocol/cache
+
   builder:
     build:
       context: ../..

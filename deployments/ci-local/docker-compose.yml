@@ -138,6 +138,35 @@ services:
       builder:
         condition: service_healthy
 
+  # Aggregator deployment — runs after flash loan deploy is complete.
+  deploy-aggregator:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile
+      target: deploy
+    image: based-rollup:deploy
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/deploy-aggregator.sh
+    volumes:
+      - ../../contracts:/app/contracts
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+      L1_RPC: http://l1:8545
+      L2_RPC: http://builder:8545
+      L1_PROXY: http://builder:9556
+    depends_on:
+      deploy-flash-loan:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
   # L2 — based-rollup builder node (+2000 port offset)
   builder:
     extends:
@@ -214,7 +243,7 @@ services:
         condition: service_healthy
 
   # Complex transaction sender — ERC20, contract deployments, edge cases
-  # WARNING: dev#5 is shared with deploy-flash-loan.sh — MUST wait for it to finish.
+  # WARNING: dev#5 is shared with deploy-flash-loan.sh and deploy-aggregator.sh — MUST wait for both.
   complex-tx-sender:
     image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
     restart: unless-stopped
@@ -227,7 +256,7 @@ services:
     volumes:
       - ../shared/scripts:/app/scripts
     depends_on:
-      deploy-flash-loan:
+      deploy-aggregator:
         condition: service_completed_successfully
       builder:
         condition: service_healthy

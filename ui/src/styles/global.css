@@ -265,6 +265,32 @@ body::before {
   100% { background-position: 200% 0; }
 }
 
+/* ── Cross-chain flow visualization keyframes ── */
+@keyframes portalSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes breathing {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+@keyframes bloomPulse {
+  0%   { filter: brightness(1); }
+  50%  { filter: brightness(1.6); }
+  100% { filter: brightness(1); }
+}
+@keyframes strokeReveal {
+  from { stroke-dashoffset: 200; }
+  to   { stroke-dashoffset: 0; }
+}
+@keyframes shockwave {
+  from { r: 10; opacity: 0.8; }
+  to   { r: 60; opacity: 0; }
+}
+@keyframes liquidWave {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50px); }
+}
+
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    UNIFIED BUTTON SYSTEM

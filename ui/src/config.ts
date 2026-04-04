@@ -49,6 +49,16 @@ export const config = {
   reverseExecutorL1: params.get("reverseExecutorL1") || "",
   /** Faucet address — loaded from /shared/rollup.env or URL param */
   faucetAddress: params.get("faucetAddress") || "",
+  /** Aggregator contract addresses (loaded from rollup.env) */
+  aggWeth: params.get("aggWeth") || "",
+  aggUsdc: params.get("aggUsdc") || "",
+  aggL1Amm: params.get("aggL1Amm") || "",
+  aggAggregator: params.get("aggAggregator") || "",
+  aggL2Executor: params.get("aggL2Executor") || "",
+  aggL2Amm: params.get("aggL2Amm") || "",
+  aggL2ExecutorProxy: params.get("aggL2ExecutorProxy") || "",
+  aggWrappedWethL2: params.get("aggWrappedWethL2") || "",
+  aggWrappedUsdcL2: params.get("aggWrappedUsdcL2") || "",
 };
 
 /** Mutable — set after loading env files */
