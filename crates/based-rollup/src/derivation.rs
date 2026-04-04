@@ -402,28 +402,43 @@ impl DerivationPipeline {
             // L2 conversion (convert_l1_entries_to_l2_pairs) skips entries whose
             // nextAction is CALL (continuation entries), losing their state deltas and
             // breaking the chain. Must use the original entries here.
-            let mut effective_state_root = batch_final_state_root;
-            let rollup_id_u256 = U256::from(self.config.rollup_id);
-            for entry in &deferred_entries {
-                for delta in &entry.state_deltas {
-                    if delta.current_state == effective_state_root
-                        && delta.rollup_id == rollup_id_u256
-                    {
-                        effective_state_root = delta.new_state;
-                    }
-                }
-            }
-
-            // Detect REVERT batches from the ORIGINAL entries (before consumed filtering).
-            // REVERT entries (§D.12 atomicity) are L1-only — entries 1+2 are consumed
-            // inside a reverted scope (no ExecutionConsumed events), so they're already
-            // filtered out of deferred_entries. Entry 0 (L2TX→CALL) passes through but
-            // must NOT be reconstructed as a continuation — the L2 entries are already
-            // in the block body's loadExecutionTable calldata.
+            //
+            // Detect REVERT batches FIRST — they need special handling for
+            // effective_state_root (see below).
             let batch_has_revert = entries.iter().any(|e| {
                 e.next_action.action_type == cross_chain::CrossChainActionType::Revert
                     || e.next_action.action_type == cross_chain::CrossChainActionType::RevertContinue
             });
+
+            let mut effective_state_root = batch_final_state_root;
+            let rollup_id_u256 = U256::from(self.config.rollup_id);
+            if batch_has_revert {
+                // REVERT batch: deferred entry deltas are consumed-and-reverted on L1
+                // (inside ScopeReverted scope). The on-chain stateRoot after executeL2TX
+                // is the CAPTURED value from _handleScopeRevert = Entry 1's newState =
+                // post_root = batch_final_state_root (because clean == speculative for
+                // reverted L2 txs). Skip delta chaining — effective_state_root stays
+                // at batch_final_state_root.
+                info!(
+                    target: "based_rollup::derivation",
+                    %l1_block,
+                    effective_state_root = %effective_state_root,
+                    "REVERT batch: skipping effective_state_root delta chaining \
+                     (deferred deltas consumed inside reverted scope)"
+                );
+            } else {
+                for entry in &deferred_entries {
+                    for delta in &entry.state_deltas {
+                        if delta.current_state == effective_state_root
+                            && delta.rollup_id == rollup_id_u256
+                        {
+                            effective_state_root = delta.new_state;
+                        }
+                    }
+                }
+            }
+
+            // batch_has_revert already computed above (before effective_state_root).
             if batch_has_revert {
                 info!(
                     target: "based_rollup::derivation",
