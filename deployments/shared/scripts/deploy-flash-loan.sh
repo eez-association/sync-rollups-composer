@@ -3,8 +3,10 @@
 # Standalone script — runs AFTER deploy.sh and deploy_l2.sh complete.
 # Reads config from /shared/rollup.env (written by deploy.sh).
 #
-# L1 deployments use dev#0 (deployer key, same as deploy.sh).
+# L1 deployments use dev#21 (dedicated flash loan deployer, avoids nonce
+# conflicts with the builder which uses dev#0 for postBatch).
 # L2 deployments use dev#5 (same as deploy_l2.sh).
+# Funding: dev#9 funds dev#21 on L1 before deployment.
 #
 # WARNING: The private keys below are well-known anvil default keys.
 # They are PUBLIC and MUST NEVER be used on mainnet, testnets, or any chain
@@ -16,8 +18,12 @@ L2_RPC="${L2_RPC:-http://builder:8545}"
 SHARED_DIR="${SHARED_DIR:-/shared}"
 CONTRACTS_DIR="${CONTRACTS_DIR:-/app/contracts}"
 
-DEPLOYER_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-DEPLOYER_ADDR=$(cast wallet address --private-key "$DEPLOYER_KEY")
+# dev#21 — dedicated flash loan L1 deployer (no nonce conflicts with builder)
+DEPLOYER_KEY="0xc511b2aa70776d4ff1d376e8537903dae36896132c90b91d52c1dfbae267cd8b"
+DEPLOYER_ADDR="0x02484cb50AAC86Eae85610D6f4Bf026f30f6627D"
+# dev#9 — L1 funder (funds dev#21)
+FUNDER_KEY="0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6"
+# dev#5 — L2 deployer
 L2_DEPLOY_KEY="0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
 DEV5_ADDR="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 
@@ -88,6 +94,16 @@ until cast block-number --rpc-url "$L2_RPC" >/dev/null 2>&1; do
     sleep 1
 done
 echo "L2 is ready (block $(cast block-number --rpc-url "$L2_RPC"))."
+
+# --- Fund dev#21 on L1 (from dev#9) ---
+DEPLOYER_BAL=$(cast balance --rpc-url "$L1_RPC" "$DEPLOYER_ADDR" 2>/dev/null || echo "0")
+if [ "$(printf '%d' "$DEPLOYER_BAL" 2>/dev/null || echo 0)" -lt 1000000000000000000 ] 2>/dev/null; then
+    echo "Funding flash loan deployer ($DEPLOYER_ADDR) from dev#9..."
+    cast send --rpc-url "$L1_RPC" --private-key "$FUNDER_KEY" \
+        "$DEPLOYER_ADDR" --value 10ether --gas-limit 21000 > /dev/null 2>&1
+    sleep 2
+    echo "  Funded: $(cast balance --rpc-url "$L1_RPC" "$DEPLOYER_ADDR") wei"
+fi
 
 # --- Build contracts ---
 echo ""
