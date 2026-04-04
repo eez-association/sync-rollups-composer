@@ -2187,10 +2187,37 @@ where
                                 };
 
                             if !consumed_hashes.is_empty() {
-                                // Count how many entries we need per hash
+                                // Count how many entries we need per hash.
+                                // REVERT groups: entries 1+ (RESULT→REVERT, REVERT_CONTINUE)
+                                // are consumed INSIDE the reverted scope — their ExecutionConsumed
+                                // events are reverted by ScopeReverted. Only Entry 0 (L2TX trigger,
+                                // consumed outside the scope) needs verification.
+                                let revert_internal: std::collections::HashSet<usize> = {
+                                    let mut set = std::collections::HashSet::new();
+                                    for (k, &is_revert) in revert_flags.iter().enumerate() {
+                                        if !is_revert {
+                                            continue;
+                                        }
+                                        let start = group_starts.get(k).copied().unwrap_or(0);
+                                        let end = group_starts.get(k + 1).copied().unwrap_or(l1_entries.len());
+                                        // Skip entry 0 of the group (L2TX trigger, consumed outside scope).
+                                        // Mark entries 1..N as revert-internal (expected-unconsumed).
+                                        for idx in (start + 1)..end {
+                                            set.insert(idx);
+                                        }
+                                    }
+                                    set
+                                };
+
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
                                     std::collections::HashMap::new();
-                                for e in l1_entries.iter().filter(|e| e.action_hash != B256::ZERO) {
+                                for (idx, e) in l1_entries.iter().enumerate() {
+                                    if e.action_hash == B256::ZERO {
+                                        continue; // immediate entry
+                                    }
+                                    if revert_internal.contains(&idx) {
+                                        continue; // REVERT-internal: consumed inside reverted scope
+                                    }
                                     *entry_counts.entry(e.action_hash).or_default() += 1;
                                 }
                                 // Check that consumed count >= entry count for each hash
