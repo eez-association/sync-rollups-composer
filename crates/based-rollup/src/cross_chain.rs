@@ -860,11 +860,11 @@ pub fn build_l2_to_l1_call_entries(
     // between the L2 tx entry and the proxy call in the L2 trace.
     // Example: SCA→SCB→proxy = scope=[0,0] (2 levels of wrapping).
     //
-    // For REVERT entries (tx_reverts=true): scope must be at least [0] so that
-    // the delivery executes inside newScope([0]), which the REVERT(scope=[0])
-    // can match and trigger ScopeReverted. With scope=[], the CALL executes at
-    // root scope via _processCallAtScope directly — no newScope frame to catch
-    // the ScopeReverted (per revertCounterL2 protocol E2E test).
+    // For REVERT entries (tx_reverts=true): the delivery CALL scope must be at
+    // least [0] so that _resolveScopes enters newScope([0]), giving REVERT a
+    // scope frame to match against. With scope=[], the CALL executes at root
+    // scope via _processCallAtScope directly — no newScope frame to catch
+    // ScopeReverted (per revertCounterL2 protocol E2E test).
     let effective_scope = if tx_reverts && l1_delivery_scope.is_empty() {
         vec![U256::ZERO] // minimum scope=[0] for REVERT matching
     } else {
@@ -946,7 +946,14 @@ pub fn build_l2_to_l1_call_entries(
     // each _applyStateDeltas call (Rollups.sol:517). No ETH flows between
     // Entry 1 and Entry 2 consumption.
     let l1_deferred_entries = if tx_reverts {
-        let revert_next = revert_action(rollup_id_u256, effective_scope.clone());
+        // REVERT scope is ALWAYS [0] — the first child scope of _resolveScopes.
+        // This is independent of the delivery scope (which can be [0], [0,0], etc.).
+        // REVERT([0]) is caught by newScope([0]) → ScopeReverted bubbles to
+        // newScope([]) → caught by _resolveScopes. This reverts ALL effects
+        // within the scope, regardless of delivery depth.
+        // Evidence: both revertCounterL2 (delivery=[0]) and deepScopeRevert
+        // (delivery=[0,0]) use REVERT(scope=[0]).
+        let revert_next = revert_action(rollup_id_u256, vec![U256::ZERO]);
         let revert_continue_hash = compute_revert_continue_hash(rollup_id_u256);
         vec![
             CrossChainExecutionEntry {

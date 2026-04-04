@@ -2661,8 +2661,8 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
         "REVERT rollupId must be our L2 rollup"
     );
     assert_eq!(
-        e1.next_action.scope, delivery_scope,
-        "REVERT scope must equal delivery scope"
+        e1.next_action.scope, vec![U256::ZERO],
+        "REVERT scope must always be [0] (first child of _resolveScopes)"
     );
     assert!(
         !e1.next_action.failed,

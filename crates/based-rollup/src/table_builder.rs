@@ -2027,7 +2027,9 @@ pub fn build_l2_to_l1_continuation_entries(
     // When tx_reverts=true, replace the last L1 entry's terminal RESULT with
     // REVERT and append a REVERT_CONTINUE → terminal RESULT entry.
     // This ensures all L1 state changes are undone via ScopeReverted (§D.12).
-    // REVERT scope=[] targets the root scope, undoing ALL calls in the chain.
+    // REVERT scope=[0] targets the first child scope of _resolveScopes.
+    // This is ALWAYS [0] regardless of delivery depth — per protocol tests
+    // revertCounterL2 and deepScopeRevert both use REVERT(scope=[0]).
     if tx_reverts && !l1_entries.is_empty() {
         use crate::cross_chain::{
             compute_revert_continue_hash, revert_action,
@@ -2041,7 +2043,7 @@ pub fn build_l2_to_l1_continuation_entries(
             // Save the terminal for the REVERT_CONTINUE entry
             let terminal = std::mem::replace(
                 &mut last.next_action,
-                revert_action(our_rollup_id, vec![]), // scope=[] for root
+                revert_action(our_rollup_id, vec![alloy_primitives::U256::ZERO]), // scope=[0]
             );
 
             // Append REVERT_CONTINUE → terminal RESULT
