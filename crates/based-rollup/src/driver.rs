@@ -132,6 +132,9 @@ pub struct Driver<P, Pool> {
     pending_l1_entries: Vec<CrossChainExecutionEntry>,
     /// Index of the first entry in each trigger group within `pending_l1_entries`.
     pending_l1_group_starts: Vec<usize>,
+    /// Whether each L1 entry group uses REVERT/REVERT_CONTINUE (atomicity revert).
+    /// Indexed by group, parallel to `pending_l1_group_starts`.
+    pending_l1_revert_flags: Vec<bool>,
     /// Trigger metadata for groups that need L1 trigger txs (`executeL2TX`).
     /// Indexed by group. `None` for protocol-triggered groups (deposits).
     pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>,
@@ -439,6 +442,7 @@ where
             queued_l2_to_l1_calls,
             pending_l1_entries: Vec::new(),
             pending_l1_group_starts: Vec::new(),
+            pending_l1_revert_flags: Vec::new(),
             pending_l1_trigger_metadata: Vec::new(),
             prev_health_l2_head: 0,
             last_l2_head_advance: std::time::Instant::now(),
@@ -1179,6 +1183,7 @@ where
         // during the Sync transition. See issue #237.
         let pre_drain_l1_len = self.pending_l1_entries.len();
         let pre_drain_l1_groups = self.pending_l1_group_starts.len();
+        let pre_drain_l1_revert = self.pending_l1_revert_flags.len();
         let pre_drain_l1_meta = self.pending_l1_trigger_metadata.len();
 
         let mut queued_l1_txs_for_block: Vec<Bytes> = Vec::new();
@@ -1248,6 +1253,7 @@ where
                         self.pending_l1_entries.extend(l1_entry);
                     }
                     self.pending_l1_group_starts.push(group_start);
+                    self.pending_l1_revert_flags.push(false); // deposits never revert
                     self.pending_l1_trigger_metadata.push(None); // protocol trigger, no L1 executeL2TX needed
 
                     // Save for re-push on build failure (call is consumed by value)
@@ -1301,6 +1307,7 @@ where
                     self.pending_l1_entries
                         .extend(w.l1_deferred_entries.iter().cloned());
                     self.pending_l1_group_starts.push(group_start);
+                    self.pending_l1_revert_flags.push(w.tx_reverts);
                     self.pending_l1_trigger_metadata.push(Some(TriggerMetadata {
                         user: w.user,
                         amount: w.amount,
@@ -1423,6 +1430,7 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
+                    self.pending_l1_revert_flags.truncate(pre_drain_l1_revert);
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -1480,6 +1488,7 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
+                    self.pending_l1_revert_flags.truncate(pre_drain_l1_revert);
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -1618,6 +1627,7 @@ where
                         // Entries will be re-queued on the next builder cycle.
                         self.pending_l1_entries.clear();
                         self.pending_l1_group_starts.clear();
+                        self.pending_l1_revert_flags.clear();
                         self.pending_l1_trigger_metadata.clear();
                         built.state_root // No entries → speculative IS clean
                     }
@@ -1634,7 +1644,7 @@ where
                     &intermediate_roots,
                     self.config.rollup_id,
                     &self.pending_l1_group_starts,
-                    &[], // TODO(revert-continue): wire pending_l1_revert_flags in Step 7
+                    &self.pending_l1_revert_flags,
                 );
                 info!(
                     target: "based_rollup::driver",
@@ -1708,6 +1718,7 @@ where
             }
             self.pending_l1_entries.clear();
             self.pending_l1_group_starts.clear();
+            self.pending_l1_revert_flags.clear();
             self.pending_l1_trigger_metadata.clear();
             return Ok(());
         };
@@ -1962,6 +1973,7 @@ where
         // Drain L1 entry queues for submission.
         let l1_entries_owned = std::mem::take(&mut self.pending_l1_entries);
         let group_starts = std::mem::take(&mut self.pending_l1_group_starts);
+        let revert_flags = std::mem::take(&mut self.pending_l1_revert_flags);
         let trigger_metadata = std::mem::take(&mut self.pending_l1_trigger_metadata);
 
         info!(
@@ -2275,6 +2287,7 @@ where
                             }
                             self.pending_l1_entries = l1_entries_owned;
                             self.pending_l1_group_starts = group_starts;
+                            self.pending_l1_revert_flags = revert_flags;
                             self.pending_l1_trigger_metadata = trigger_metadata;
                         }
                         return Ok(());
@@ -2291,6 +2304,7 @@ where
                 // Put entries back
                 self.pending_l1_entries = l1_entries_owned;
                 self.pending_l1_group_starts = group_starts;
+                self.pending_l1_revert_flags = revert_flags;
                 self.pending_l1_trigger_metadata = trigger_metadata;
             }
         }
@@ -2748,6 +2762,7 @@ where
         self.pending_submissions.clear();
         self.pending_l1_entries.clear();
         self.pending_l1_group_starts.clear();
+        self.pending_l1_revert_flags.clear();
         self.pending_l1_trigger_metadata.clear();
         self.pending_entry_verification_block = None;
         self.entry_verify_deferrals = 0;
