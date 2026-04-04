@@ -859,6 +859,17 @@ pub fn build_l2_to_l1_call_entries(
     // executing at _processCallAtScope. Depth = number of user contract boundaries
     // between the L2 tx entry and the proxy call in the L2 trace.
     // Example: SCA→SCB→proxy = scope=[0,0] (2 levels of wrapping).
+    //
+    // For REVERT entries (tx_reverts=true): scope must be at least [0] so that
+    // the delivery executes inside newScope([0]), which the REVERT(scope=[0])
+    // can match and trigger ScopeReverted. With scope=[], the CALL executes at
+    // root scope via _processCallAtScope directly — no newScope frame to catch
+    // the ScopeReverted (per revertCounterL2 protocol E2E test).
+    let effective_scope = if tx_reverts && l1_delivery_scope.is_empty() {
+        vec![U256::ZERO] // minimum scope=[0] for REVERT matching
+    } else {
+        l1_delivery_scope.clone()
+    };
     let l1_delivery_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: U256::ZERO, // L1 scope
@@ -868,12 +879,17 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_u256,
-        scope: l1_delivery_scope.clone(),
+        scope: effective_scope.clone(),
     };
 
     // Entry 2 action_hash: matches what _processCallAtScope builds after executing
     // the delivery call on L1: RESULT(rollupId=CALL.rollupId=0, data=returnData).
     // For withdrawals (EOA): returnData empty. For contracts: from L1 simulation.
+    let delivery_return_data_len = delivery_return_data.len();
+    let delivery_return_data_hex_snap = format!(
+        "0x{}",
+        hex::encode(&delivery_return_data[..delivery_return_data.len().min(40)])
+    );
     let l1_delivery_result = CrossChainAction {
         action_type: CrossChainActionType::Result,
         rollup_id: U256::ZERO,
@@ -930,7 +946,7 @@ pub fn build_l2_to_l1_call_entries(
     // each _applyStateDeltas call (Rollups.sol:517). No ETH flows between
     // Entry 1 and Entry 2 consumption.
     let l1_deferred_entries = if tx_reverts {
-        let revert_next = revert_action(rollup_id_u256, l1_delivery_scope.clone());
+        let revert_next = revert_action(rollup_id_u256, effective_scope.clone());
         let revert_continue_hash = compute_revert_continue_hash(rollup_id_u256);
         vec![
             CrossChainExecutionEntry {
@@ -988,6 +1004,46 @@ pub fn build_l2_to_l1_call_entries(
             },
         ]
     };
+
+    if tx_reverts {
+        tracing::info!(
+            target: "based_rollup::cross_chain",
+            l2_entries = l2_table_entries.len(),
+            l1_entries = l1_deferred_entries.len(),
+            %l2_call_hash,
+            %l2_result_hash,
+            delivery_return_data_len,
+            delivery_failed,
+            delivery_return_data_hex = %delivery_return_data_hex_snap,
+            "build_l2_to_l1_call_entries: REVERT entries built"
+        );
+        for (i, entry) in l1_deferred_entries.iter().enumerate() {
+            tracing::info!(
+                target: "based_rollup::cross_chain",
+                idx = i,
+                action_hash = %entry.action_hash,
+                next_action_type = ?entry.next_action.action_type,
+                next_action_rollup_id = %entry.next_action.rollup_id,
+                next_action_failed = entry.next_action.failed,
+                next_action_data_len = entry.next_action.data.len(),
+                next_action_scope_len = entry.next_action.scope.len(),
+                ether_delta = %entry.state_deltas.first().map(|d| d.ether_delta).unwrap_or_default(),
+                "build_l2_to_l1_call_entries: REVERT L1 entry"
+            );
+        }
+        for (i, entry) in l2_table_entries.iter().enumerate() {
+            tracing::info!(
+                target: "based_rollup::cross_chain",
+                idx = i,
+                action_hash = %entry.action_hash,
+                next_action_type = ?entry.next_action.action_type,
+                next_action_failed = entry.next_action.failed,
+                next_action_data_len = entry.next_action.data.len(),
+                next_action_data_hex = %format!("0x{}", hex::encode(&entry.next_action.data[..entry.next_action.data.len().min(40)])),
+                "build_l2_to_l1_call_entries: REVERT L2 entry"
+            );
+        }
+    }
 
     WithdrawalEntries {
         l2_table_entries,

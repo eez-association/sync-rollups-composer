@@ -759,6 +759,22 @@ where
 
         let call_id = entries.l2_table_entries[0].action_hash;
 
+        if params.tx_reverts {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                destination = %params.destination,
+                source = %params.source_address,
+                delivery_return_data_hex = %format!("0x{}", hex::encode(&params.delivery_return_data)),
+                delivery_return_data_len = params.delivery_return_data.len(),
+                delivery_failed = params.delivery_failed,
+                tx_reverts = params.tx_reverts,
+                l2_entries = entries.l2_table_entries.len(),
+                l1_entries = entries.l1_deferred_entries.len(),
+                %call_id,
+                "initiate_l2_cross_chain_call: REVERT mode — entries built"
+            );
+        }
+
         tracing::info!(
             target: "based_rollup::rpc",
             destination = %params.destination,

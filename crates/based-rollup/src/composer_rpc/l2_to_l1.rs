@@ -611,6 +611,16 @@ async fn queue_l2_to_l1_fallback(
         "id": 99991
     });
 
+    tracing::info!(
+        target: "based_rollup::proxy",
+        %destination,
+        %sender,
+        tx_reverts,
+        trace_depth,
+        request_json = %serde_json::to_string(&initiate_req).unwrap_or_default(),
+        "queue_l2_to_l1_fallback: sending initiateL2CrossChainCall"
+    );
+
     if let Ok(resp) = client.post(upstream_url).json(&initiate_req).send().await {
         if let Ok(body) = resp.json::<Value>().await {
             if body.get("error").is_none() {
@@ -1674,6 +1684,24 @@ async fn simulate_l1_delivery(
         }
     };
 
+    // When delivery failure is already known (from iterative L2 discovery's direct L1
+    // simulation), skip the full postBatch+executeL2TX bundle simulation entirely.
+    // The bundle simulation produces wrong return data for failed deliveries because
+    // placeholder state deltas cause _findAndApplyExecution to miss entries (stateRoot
+    // != currentState), making executeL2TX revert with ExecutionNotFound.
+    // The direct L1 simulation (debug_traceCallMany to destination) already captured
+    // the correct revert data — use it as-is.
+    if known_delivery_failed && !known_delivery_return_data.is_empty() {
+        tracing::info!(
+            target: "based_rollup::proxy",
+            %destination,
+            return_data_len = known_delivery_return_data.len(),
+            return_data_hex = %format!("0x{}", hex::encode(&known_delivery_return_data[..known_delivery_return_data.len().min(40)])),
+            "simulate_l1_delivery: skipping bundle simulation — using known delivery failure data"
+        );
+        return Some((known_delivery_return_data.to_vec(), true, vec![]));
+    }
+
     // Iterative discovery loop: simulate, extract return calls, rebuild entries, repeat.
     // Seed with known delivery data from the L2 iterative discovery's own L1 simulation.
     // This gives correct RESULT hashes on iteration 1, avoiding the convergence cycle
@@ -1682,6 +1710,15 @@ async fn simulate_l1_delivery(
     let mut final_return_data: Vec<u8> = known_delivery_return_data.to_vec();
     let mut prev_return_data: Vec<u8> = known_delivery_return_data.to_vec();
     let mut final_delivery_failed = known_delivery_failed;
+
+    tracing::info!(
+        target: "based_rollup::proxy",
+        %destination,
+        known_delivery_return_data_len = known_delivery_return_data.len(),
+        known_delivery_return_data_hex = %format!("0x{}", hex::encode(&known_delivery_return_data[..known_delivery_return_data.len().min(40)])),
+        known_delivery_failed,
+        "simulate_l1_delivery: starting with known delivery data"
+    );
 
     for iteration in 1..=MAX_SIMULATION_ITERATIONS {
         tracing::info!(
@@ -4198,6 +4235,19 @@ async fn trace_and_detect_l2_internal_calls(
             detected_calls = detected_calls.len(),
             "L2 tx reverts after cross-chain calls — will build REVERT entries for L1 atomicity"
         );
+        for (i, call) in detected_calls.iter().enumerate() {
+            tracing::info!(
+                target: "based_rollup::proxy",
+                idx = i,
+                destination = %call.destination,
+                source = %call.source_address,
+                delivery_return_data_len = call.delivery_return_data.len(),
+                delivery_return_data_hex = %format!("0x{}", hex::encode(&call.delivery_return_data)),
+                delivery_failed = call.delivery_failed,
+                trace_depth = call.trace_depth,
+                "tx_reverts: detected call delivery details"
+            );
+        }
     }
 
     // Post-discovery verification: if early return calls were found, retrace the user
