@@ -20,8 +20,6 @@ services:
       dockerfile: deployments/shared/Dockerfile.dev
       target: deploy
     image: based-rollup:dev-deploy
-    environment:
-      DEPLOY_FLASH_LOAN: "true"
     volumes:
       - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
       - ./genesis-l2.json:/etc/based-rollup/genesis.json
@@ -35,8 +33,16 @@ services:
       dockerfile: deployments/shared/Dockerfile.dev
       target: deploy
     image: based-rollup:dev-deploy
-    environment:
-      DEPLOY_FLASH_LOAN: "true"
+    volumes:
+      - ../../contracts/sync-rollups-protocol/out:/app/contracts/sync-rollups-protocol/out
+      - ../../contracts/sync-rollups-protocol/cache:/app/contracts/sync-rollups-protocol/cache
+
+  deploy-flash-loan:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile.dev
+      target: deploy
+    image: based-rollup:dev-deploy
     volumes:
       - ../../contracts/sync-rollups-protocol/out:/app/contracts/sync-rollups-protocol/out
       - ../../contracts/sync-rollups-protocol/cache:/app/contracts/sync-rollups-protocol/cache

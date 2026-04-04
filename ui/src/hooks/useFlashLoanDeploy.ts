@@ -291,6 +291,21 @@ export function useFlashLoanDeploy(
     const token = config.flashTokenAddress || "0x0000000000000000000000000000000000000000";
     const rollupIdNum = parseInt(rollupId, 10);
 
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const missing: string[] = [];
+    if (!pool || pool === ZERO) missing.push("Flash Loan Pool (FLASH_POOL_ADDRESS)");
+    if (!bridge || bridge === ZERO) missing.push("Bridge L1 (BRIDGE_L1_ADDRESS)");
+    if (!token || token === ZERO) missing.push("Flash Loan Token (FLASH_TOKEN_ADDRESS)");
+
+    if (missing.length > 0) {
+      const msg =
+        `Cannot deploy L1 executor: missing contract addresses \u2014 ${missing.join(", ")}. ` +
+        `Ensure the deploy-l2 service completed successfully or configure via URL params.`;
+      setState((s) => ({ ...s, phase: "need-deploy", error: msg }));
+      log(msg, "err");
+      return;
+    }
+
     const constructorArgs = encodeExecutorConstructorArgs(
       pool,
       bridge,
