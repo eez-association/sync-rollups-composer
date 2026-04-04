@@ -20,3 +20,5 @@ ui/tsconfig.tsbuildinfo
 contracts/test-multi-call/cache/
 contracts/test-multi-call/out/
 contracts/test-multi-call/scripts/
+contracts/test-atomicity/cache/
+contracts/test-atomicity/out/
