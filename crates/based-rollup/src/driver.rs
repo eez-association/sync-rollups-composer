@@ -1634,6 +1634,7 @@ where
                     &intermediate_roots,
                     self.config.rollup_id,
                     &self.pending_l1_group_starts,
+                    &[], // TODO(revert-continue): wire pending_l1_revert_flags in Step 7
                 );
                 info!(
                     target: "based_rollup::driver",

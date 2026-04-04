@@ -879,6 +879,7 @@ async fn simulate_l1_to_l2_call_on_l2(
                 vec![],     // delivery_return_data placeholder
                 false,      // delivery_failed placeholder
                 vec![],     // l1_delivery_scope placeholder
+                false,      // tx_reverts
             );
             placeholders.extend(placeholder.l2_table_entries);
         }

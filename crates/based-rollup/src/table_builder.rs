@@ -1332,6 +1332,7 @@ pub fn build_l2_to_l1_continuation_entries(
     detected: &[DetectedCall],
     our_rollup_id: U256,
     rlp_encoded_tx: &[u8],
+    tx_reverts: bool,
 ) -> L2ToL1ContinuationEntries {
     if detected.is_empty() {
         return L2ToL1ContinuationEntries {
@@ -2019,6 +2020,46 @@ pub fn build_l2_to_l1_continuation_entries(
                 target: "based_rollup::table_builder",
                 root_pos,
                 "unexpected: root_pos > 0 in non-multi-call pattern (single calls should not reach here)"
+            );
+        }
+    }
+
+    // When tx_reverts=true, replace the last L1 entry's terminal RESULT with
+    // REVERT and append a REVERT_CONTINUE → terminal RESULT entry.
+    // This ensures all L1 state changes are undone via ScopeReverted (§D.12).
+    // REVERT scope=[] targets the root scope, undoing ALL calls in the chain.
+    if tx_reverts && !l1_entries.is_empty() {
+        use crate::cross_chain::{
+            compute_revert_continue_hash, revert_action,
+        };
+
+        let last = l1_entries.last_mut().unwrap();
+        // Verify the last entry has a terminal RESULT nextAction
+        if last.next_action.action_type == CrossChainActionType::Result
+            && last.next_action.rollup_id == our_rollup_id
+        {
+            // Save the terminal for the REVERT_CONTINUE entry
+            let terminal = std::mem::replace(
+                &mut last.next_action,
+                revert_action(our_rollup_id, vec![]), // scope=[] for root
+            );
+
+            // Append REVERT_CONTINUE → terminal RESULT
+            l1_entries.push(CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: our_rollup_id,
+                    current_state: alloy_primitives::B256::ZERO,
+                    new_state: alloy_primitives::B256::ZERO,
+                    ether_delta: alloy_primitives::I256::ZERO,
+                }],
+                action_hash: compute_revert_continue_hash(our_rollup_id),
+                next_action: terminal,
+            });
+
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                l1_entry_count = l1_entries.len(),
+                "appended REVERT/REVERT_CONTINUE entries for tx_reverts"
             );
         }
     }

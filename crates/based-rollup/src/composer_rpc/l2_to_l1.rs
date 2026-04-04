@@ -929,6 +929,7 @@ async fn enrich_return_calls_via_l2_trace(
                                             vec![],     // delivery_return_data placeholder
                                             false,      // delivery_failed placeholder
                                             vec![],     // l1_delivery_scope placeholder
+                                            false,      // tx_reverts
                                         );
                                     all_placeholder_entries.extend(placeholder.l2_table_entries);
                                 }
@@ -1389,6 +1390,7 @@ async fn try_chained_l2_enrichment(
                 vec![],     // delivery_return_data placeholder
                 false,      // delivery_failed placeholder
                 vec![],     // l1_delivery_scope placeholder
+                false,      // tx_reverts
             );
             all_placeholder_entries.extend(placeholder.l2_table_entries);
         }
@@ -1693,6 +1695,7 @@ async fn simulate_l1_delivery(
                 vec![],                  // placeholder delivery_return_data
                 false,                   // placeholder delivery_failed
                 root_scope.to_vec(),     // l1_delivery_scope from trace depth
+                false,                   // tx_reverts
             );
             call_entries.l1_deferred_entries
         } else {
@@ -1735,6 +1738,7 @@ async fn simulate_l1_delivery(
                 &analyzed,
                 alloy_primitives::U256::from(rollup_id),
                 rlp_encoded_tx,
+                false, // tx_reverts
             );
 
             tracing::info!(
@@ -2533,6 +2537,7 @@ async fn simulate_l1_combined_delivery(
                     per_call_return_data[i].clone(),
                     per_call_delivery_failed[i],
                     call_scope.clone(),
+                    false, // tx_reverts
                 );
                 call_entries.l1_deferred_entries
             } else {
@@ -2577,6 +2582,7 @@ async fn simulate_l1_combined_delivery(
                     &analyzed,
                     alloy_primitives::U256::from(rollup_id),
                     rlp_encoded_tx,
+                    false, // tx_reverts
                 );
 
                 tracing::info!(
@@ -3856,6 +3862,7 @@ async fn trace_and_detect_l2_internal_calls(
                     call.delivery_return_data.clone(),
                     call.delivery_failed,
                     vec![], // l1_delivery_scope (irrelevant for L2 table loading)
+                    false,  // tx_reverts
                 );
                 l2_table_entries.extend(call_entries.l2_table_entries);
             }
@@ -4203,6 +4210,7 @@ async fn trace_and_detect_l2_internal_calls(
                 &analyzed,
                 U256::from(rollup_id),
                 &tx_bytes,
+                false, // tx_reverts
             );
 
             if !continuation.l2_entries.is_empty() {
@@ -5181,6 +5189,7 @@ async fn simulate_l2_return_call_delivery(
             vec![],     // delivery_return_data placeholder
             false,      // delivery_failed placeholder
             vec![],     // l1_delivery_scope placeholder
+            false,      // tx_reverts
         );
 
         let mut detected_for_call: Vec<DetectedL2InternalCall> = Vec::new();

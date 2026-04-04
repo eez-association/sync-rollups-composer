@@ -2348,6 +2348,7 @@ fn test_reorg_clears_all_cross_chain_state() {
             raw_l1_tx: Bytes::new(),
             extra_l2_entries: vec![],
             l1_entries: vec![],
+            tx_reverts: false,
         });
 
     assert!(!pending_cross_chain_entries.is_empty());

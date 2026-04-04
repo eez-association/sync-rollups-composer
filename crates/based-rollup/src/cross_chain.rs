@@ -213,6 +213,58 @@ impl CrossChainAction {
     }
 }
 
+// ──────────────────────────────────────────────
+//  REVERT / REVERT_CONTINUE helpers (§D.12)
+// ──────────────────────────────────────────────
+
+/// Build a canonical REVERT action.
+///
+/// Signals scope revert on L1. The `scope` determines which `newScope` level
+/// catches the `ScopeReverted` error. Fields match spec §D.12 and
+/// `IntegrationTest.t.sol:Scenario 5`.
+pub fn revert_action(rollup_id: U256, scope: Vec<U256>) -> CrossChainAction {
+    CrossChainAction {
+        action_type: CrossChainActionType::Revert,
+        rollup_id,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: false,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope,
+    }
+}
+
+/// Build a canonical REVERT_CONTINUE action.
+///
+/// Looked up via `_getRevertContinuation(rollupId)` on L1.
+/// The hash of this action is deterministic for a given `rollup_id`.
+/// Fields: `failed=true`, everything else zero/empty (spec §D.12).
+pub fn revert_continue_action(rollup_id: U256) -> CrossChainAction {
+    CrossChainAction {
+        action_type: CrossChainActionType::RevertContinue,
+        rollup_id,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: true,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    }
+}
+
+/// Compute the deterministic action hash for REVERT_CONTINUE.
+///
+/// `keccak256(abi.encode(Action{REVERT_CONTINUE, rollupId, 0, 0, "", true, 0, 0, []}))`
+pub fn compute_revert_continue_hash(rollup_id: U256) -> B256 {
+    let action = revert_continue_action(rollup_id);
+    keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &action.to_sol_action(),
+    ))
+}
+
 impl CrossChainStateDelta {
     /// Convert to the Solidity ABI struct representation.
     fn to_sol(&self) -> ICrossChainManagerL2::StateDelta {
@@ -703,6 +755,7 @@ pub fn build_l2_to_l1_call_entries(
     delivery_return_data: Vec<u8>,
     delivery_failed: bool,
     l1_delivery_scope: Vec<U256>,
+    tx_reverts: bool,
 ) -> WithdrawalEntries {
     let rollup_id_u256 = U256::from(rollup_id);
 
@@ -815,7 +868,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_u256,
-        scope: l1_delivery_scope,
+        scope: l1_delivery_scope.clone(),
     };
 
     // Entry 2 action_hash: matches what _processCallAtScope builds after executing
@@ -869,28 +922,72 @@ pub fn build_l2_to_l1_call_entries(
         -I256::try_from(value).unwrap_or(I256::ZERO)
     };
 
-    let l1_deferred_entries = vec![
-        CrossChainExecutionEntry {
-            state_deltas: vec![CrossChainStateDelta {
-                rollup_id: rollup_id_u256,
-                current_state: B256::ZERO,
-                new_state: B256::ZERO,
-                ether_delta: I256::ZERO, // consumed BEFORE ETH sent
-            }],
-            action_hash: l1_trigger_hash,
-            next_action: l1_delivery_action,
-        },
-        CrossChainExecutionEntry {
-            state_deltas: vec![CrossChainStateDelta {
-                rollup_id: rollup_id_u256,
-                current_state: B256::ZERO,
-                new_state: B256::ZERO,
-                ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
-            }],
-            action_hash: l1_delivery_result_hash,
-            next_action: l2tx_terminal, // §C.6: L2TX terminal is always void
-        },
-    ];
+    // When tx_reverts=true, Entry 1's nextAction becomes REVERT and we add
+    // a REVERT_CONTINUE entry (Entry 2). The scope revert mechanism in
+    // Rollups.sol undoes the delivery call's L1 state changes.
+    //
+    // Entry 2's ether_delta = 0 because _etherDelta is RESET to 0 after
+    // each _applyStateDeltas call (Rollups.sol:517). No ETH flows between
+    // Entry 1 and Entry 2 consumption.
+    let l1_deferred_entries = if tx_reverts {
+        let revert_next = revert_action(rollup_id_u256, l1_delivery_scope.clone());
+        let revert_continue_hash = compute_revert_continue_hash(rollup_id_u256);
+        vec![
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: I256::ZERO, // consumed BEFORE ETH sent
+                }],
+                action_hash: l1_trigger_hash,
+                next_action: l1_delivery_action,
+            },
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
+                }],
+                action_hash: l1_delivery_result_hash,
+                next_action: revert_next, // REVERT instead of terminal RESULT
+            },
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: I256::ZERO, // _etherDelta reset after Entry 1
+                }],
+                action_hash: revert_continue_hash,
+                next_action: l2tx_terminal, // terminal RESULT(failed=false)
+            },
+        ]
+    } else {
+        vec![
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: I256::ZERO, // consumed BEFORE ETH sent
+                }],
+                action_hash: l1_trigger_hash,
+                next_action: l1_delivery_action,
+            },
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
+                }],
+                action_hash: l1_delivery_result_hash,
+                next_action: l2tx_terminal, // §C.6: L2TX terminal is always void
+            },
+        ]
+    };
 
     WithdrawalEntries {
         l2_table_entries,
@@ -2064,6 +2161,7 @@ pub fn attach_generic_state_deltas(
     roots: &[B256],
     rollup_id: u64,
     group_starts: &[usize],
+    revert_group_flags: &[bool],
 ) {
     let rollup_id_u256 = U256::from(rollup_id);
     let num_groups = group_starts.len();
@@ -2090,13 +2188,26 @@ pub fn attach_generic_state_deltas(
         let pre_root = roots[k];
         let post_root = roots[k + 1];
         let group_size = end.saturating_sub(start);
+        let is_revert_group = revert_group_flags.get(k).copied().unwrap_or(false);
 
         // Build the per-entry root chain: [r_0, r_1, ..., r_N]
         // r_0 = pre_root, r_N = post_root, intermediates are synthetic.
+        //
+        // For REVERT groups: _handleScopeRevert captures stateRoot AFTER Entry 1's
+        // delta but BEFORE Entry 2's (Rollups.sol:375). The captured value becomes
+        // the final stateRoot. So Entry 1's newState must equal post_root (the real
+        // block root). Entry 2's delta is consumed inside the reverted scope — its
+        // effect is discarded. We use identity (post→post) for the last entry.
+        //
+        // Normal:  [pre, syn_1, ..., syn_{N-1}, post]
+        // REVERT:  [pre, syn_1, ..., post, post]  (last 2 = post)
         let entry_roots: Vec<B256> = (0..=group_size)
             .map(|j| {
                 if j == 0 {
                     pre_root
+                } else if is_revert_group && j >= group_size.saturating_sub(1) {
+                    // REVERT group: second-to-last and last roots = post_root
+                    post_root
                 } else if j == group_size {
                     post_root
                 } else {
