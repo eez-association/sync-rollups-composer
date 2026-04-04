@@ -414,6 +414,25 @@ impl DerivationPipeline {
                 }
             }
 
+            // Detect REVERT batches from the ORIGINAL entries (before consumed filtering).
+            // REVERT entries (§D.12 atomicity) are L1-only — entries 1+2 are consumed
+            // inside a reverted scope (no ExecutionConsumed events), so they're already
+            // filtered out of deferred_entries. Entry 0 (L2TX→CALL) passes through but
+            // must NOT be reconstructed as a continuation — the L2 entries are already
+            // in the block body's loadExecutionTable calldata.
+            let batch_has_revert = entries.iter().any(|e| {
+                e.next_action.action_type == cross_chain::CrossChainActionType::Revert
+                    || e.next_action.action_type == cross_chain::CrossChainActionType::RevertContinue
+            });
+            if batch_has_revert {
+                info!(
+                    target: "based_rollup::derivation",
+                    %l1_block,
+                    "REVERT batch detected — skipping L2 entry reconstruction \
+                     (L2 entries already in block body loadExecutionTable)"
+                );
+            }
+
             // Reconstruct L2-format entry pairs from L1-format entries + CALL actions.
             // L1 entries have (actionHash=hash(CALL), nextAction=RESULT) — fullnodes
             // need the L2-format entries for the CCM execution table. The CALL actions
@@ -423,7 +442,12 @@ impl DerivationPipeline {
                 .flat_map(|v| v.iter())
                 .cloned()
                 .collect();
-            let deferred_entries = if !call_actions.is_empty() {
+            let deferred_entries = if batch_has_revert {
+                // REVERT batch: skip reconstruction. The block body already has correct
+                // L2 entries. Pass through the consumed entry (Entry 0) as-is — it carries
+                // the state delta for effective_state_root computation.
+                deferred_entries
+            } else if !call_actions.is_empty() {
                 let mut pairs =
                     cross_chain::convert_l1_entries_to_l2_pairs(&deferred_entries, &call_actions);
                 // Append continuation entries for multi-call patterns (§4e).
