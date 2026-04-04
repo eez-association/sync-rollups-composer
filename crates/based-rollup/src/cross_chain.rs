@@ -1054,11 +1054,27 @@ pub fn convert_l1_entries_to_l2_pairs(
         .iter()
         .any(|e| e.next_action.action_type == CrossChainActionType::Call);
 
+    // Detect REVERT batches — any entry with nextAction=REVERT indicates the
+    // batch uses scope revert (§D.12 atomicity). REVERT entries are L1-only;
+    // L2 entries are already in the block body's loadExecutionTable calldata.
+    let has_revert = l1_entries
+        .iter()
+        .any(|e| e.next_action.action_type == CrossChainActionType::Revert);
+
     let mut result = Vec::with_capacity(l1_entries.len() * 2);
     for entry in l1_entries {
         // Skip continuation entries (nextAction is CALL, not RESULT).
         // These are handled by reconstruct_continuation_l2_entries.
         if entry.next_action.action_type == CrossChainActionType::Call {
+            continue;
+        }
+        // Skip REVERT/REVERT_CONTINUE entries — these are L1-only scope revert
+        // entries (§D.12 atomicity) with no L2 counterpart. The L2 tx reverts
+        // atomically via EVM; the L2 entries (CALL→RESULT pair) are already
+        // in the block body's loadExecutionTable calldata.
+        if entry.next_action.action_type == CrossChainActionType::Revert
+            || entry.next_action.action_type == CrossChainActionType::RevertContinue
+        {
             continue;
         }
         let idx = consumed_idx.entry(entry.action_hash).or_insert(0);
@@ -1169,6 +1185,20 @@ pub fn reconstruct_continuation_l2_entries(
     let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
 
     let mut continuation_entries = Vec::new();
+
+    // Skip reconstruction for REVERT batches — L2 entries are already in the
+    // block body's loadExecutionTable calldata. REVERT entries (§D.12) are L1-only;
+    // the L2 tx reverts atomically and CCM entries remain in the block body.
+    let has_revert_entries = l1_entries
+        .iter()
+        .any(|e| e.next_action.action_type == CrossChainActionType::Revert);
+    if has_revert_entries {
+        tracing::info!(
+            target: "based_rollup::cross_chain",
+            "skipping continuation reconstruction for REVERT batch (L2 entries in block body)"
+        );
+        return continuation_entries;
+    }
 
     for entry in l1_entries {
         // Continuation pattern: nextAction is a CALL (not RESULT)
