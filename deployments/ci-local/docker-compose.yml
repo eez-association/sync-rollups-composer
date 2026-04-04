@@ -83,7 +83,7 @@ services:
         condition: service_healthy
 
   # L2 deployment — runs after builder is healthy.
-  # Sets canonicalBridgeAddress + deploys flash loan contracts on L2.
+  # Sets canonicalBridgeAddress on L2.
   deploy-l2:
     build:
       context: ../..
@@ -105,6 +105,35 @@ services:
       CONTRACTS_DIR: /app/contracts
     depends_on:
       deploy:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+  # Flash loan deployment — runs after deploy-l2 is complete.
+  # Deploys TestToken, FlashLoanPool, FlashLoanBridgeExecutor on L1 and L2.
+  deploy-flash-loan:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile
+      target: deploy
+    image: based-rollup:deploy
+    user: root
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        cd /app
+        bash scripts/deploy-flash-loan.sh
+    volumes:
+      - ../../contracts:/app/contracts
+      - ../shared/scripts:/app/scripts
+      - shared:/shared
+    environment:
+      SHARED_DIR: /shared
+      CONTRACTS_DIR: /app/contracts
+      L1_RPC: http://l1:8545
+      L2_RPC: http://builder:8545
+    depends_on:
+      deploy-l2:
         condition: service_completed_successfully
       builder:
         condition: service_healthy
@@ -185,6 +214,7 @@ services:
         condition: service_healthy
 
   # Complex transaction sender — ERC20, contract deployments, edge cases
+  # WARNING: dev#5 is shared with deploy-flash-loan.sh — MUST wait for it to finish.
   complex-tx-sender:
     image: ghcr.io/foundry-rs/foundry:v1.6.0-rc1
     restart: unless-stopped
@@ -197,7 +227,7 @@ services:
     volumes:
       - ../shared/scripts:/app/scripts
     depends_on:
-      deploy-l2:
+      deploy-flash-loan:
         condition: service_completed_successfully
       builder:
         condition: service_healthy

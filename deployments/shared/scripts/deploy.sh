@@ -98,13 +98,6 @@ cd "$CONTRACTS_DIR/sync-rollups-protocol"
 #   DN+3:  CREATE  Bridge
 #   DN+4:  CALL    Bridge.initialize(Rollups, 0, deployer)
 #   DN+5:  CALL    Bridge.setCanonicalBridgeAddress(Bridge_L2)
-# If DEPLOY_FLASH_LOAN=true:
-#   DN+6:  CREATE  TestToken
-#   DN+7:  CREATE  FlashLoan pool
-#   DN+8:  CALL    token.transfer(pool, 10000e18)
-#   DN+9:  CALL    token.transfer(dev5, 10000e18)
-#   DN+10: CALL    Rollups.createCrossChainProxy(ExecutorL2, 1)
-#   DN+11: CREATE  FlashLoanBridgeExecutor (needs EXECUTOR_L2_PROXY — sent after phase 1)
 # ============================================================================
 
 echo ""
@@ -208,7 +201,7 @@ BRIDGE_INIT_CALLDATA=$(cast calldata "initialize(address,uint256,address)" \
 BRIDGE_SET_CANONICAL_CALLDATA=$(cast calldata "setCanonicalBridgeAddress(address)" \
     "$BRIDGE_L2_ADDRESS")
 
-# --- Flash loan pre-computation ---
+# --- Flash loan addresses (defaults — deploy-flash-loan.sh updates these) ---
 FLASH_TOKEN_ADDRESS="0x0000000000000000000000000000000000000000"
 FLASH_POOL_ADDRESS="0x0000000000000000000000000000000000000000"
 FLASH_EXECUTOR_L2_ADDRESS="0x0000000000000000000000000000000000000000"
@@ -216,87 +209,6 @@ FLASH_NFT_ADDRESS="0x0000000000000000000000000000000000000000"
 FLASH_EXECUTOR_L2_PROXY_ADDRESS="0x0000000000000000000000000000000000000000"
 FLASH_EXECUTOR_L1_ADDRESS="0x0000000000000000000000000000000000000000"
 WRAPPED_TOKEN_L2="0x0000000000000000000000000000000000000000"
-
-if [ "${DEPLOY_FLASH_LOAN:-false}" = "true" ]; then
-    echo ""
-    echo "=== Flash Loan Pre-computation ==="
-
-    DEV5_ADDR="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
-    L2_ROLLUP_ID=1
-
-    # Pre-compute L2 flash loan contract addresses (dev#5 at nonce 0 and 1)
-    EXECUTOR_L2=$(cast compute-address "$DEV5_ADDR" --nonce 0 | awk '{print $NF}')
-    FLASH_NFT=$(cast compute-address "$DEV5_ADDR" --nonce 1 | awk '{print $NF}')
-
-    # Pre-compute L1 flash loan contract addresses
-    FLASH_TOKEN_ADDRESS=$(cast compute-address "$DEPLOYER_ADDR" --nonce $((DN+6)) | awk '{print $NF}')
-    FLASH_POOL_ADDRESS=$(cast compute-address "$DEPLOYER_ADDR" --nonce $((DN+7)) | awk '{print $NF}')
-    # DN+8, DN+9, DN+10 are CALLs (not CREATEs)
-    FLASH_EXECUTOR_L1_ADDRESS=$(cast compute-address "$DEPLOYER_ADDR" --nonce $((DN+11)) | awk '{print $NF}')
-
-    echo "  ExecutorL2 (dev#5 nonce=0):  $EXECUTOR_L2"
-    echo "  FlashNFT   (dev#5 nonce=1):  $FLASH_NFT"
-    echo "  TestToken  (DN+6):           $FLASH_TOKEN_ADDRESS"
-    echo "  FlashPool  (DN+7):           $FLASH_POOL_ADDRESS"
-    echo "  ExecutorL1 (DN+11):          $FLASH_EXECUTOR_L1_ADDRESS"
-
-    # Extract flash loan bytecodes
-    cd "$CONTRACTS_DIR/sync-rollups-protocol"
-    TOKEN_BYTECODE=$(_bc "out/IntegrationTestFlashLoan.t.sol/TestToken.json")
-    POOL_BYTECODE=$(_bc "out/FlashLoan.sol/FlashLoan.json")
-    EXECUTOR_BYTECODE=$(_bc "out/FlashLoanBridgeExecutor.sol/FlashLoanBridgeExecutor.json")
-
-    if [ -z "$TOKEN_BYTECODE" ] || [ "$TOKEN_BYTECODE" = "null" ]; then
-        echo "WARNING: TestToken bytecode not found — disabling flash loan deployment"
-        DEPLOY_FLASH_LOAN=false
-    fi
-    if [ -z "$POOL_BYTECODE" ] || [ "$POOL_BYTECODE" = "null" ]; then
-        echo "WARNING: FlashLoan bytecode not found — disabling flash loan deployment"
-        DEPLOY_FLASH_LOAN=false
-    fi
-    if [ -z "$EXECUTOR_BYTECODE" ] || [ "$EXECUTOR_BYTECODE" = "null" ]; then
-        echo "WARNING: FlashLoanBridgeExecutor bytecode not found — disabling flash loan deployment"
-        DEPLOY_FLASH_LOAN=false
-    fi
-fi
-
-if [ "${DEPLOY_FLASH_LOAN:-false}" = "true" ]; then
-    # Build calldata for token transfers
-    TRANSFER_POOL_CALLDATA=$(cast calldata "transfer(address,uint256)" \
-        "$FLASH_POOL_ADDRESS" "10000000000000000000000")
-    TRANSFER_DEV5_CALLDATA=$(cast calldata "transfer(address,uint256)" \
-        "$DEV5_ADDR" "10000000000000000000000")
-
-    # Build calldata for createCrossChainProxy
-    CREATE_PROXY_CALLDATA=$(cast calldata "createCrossChainProxy(address,uint256)" \
-        "$EXECUTOR_L2" "$L2_ROLLUP_ID")
-
-    # Pre-compute WrappedToken CREATE2 address on L2
-    # Bridge_L2 deploys WrappedToken via CREATE2 with:
-    #   salt       = keccak256(abi.encodePacked(token, originRollupId))
-    #   initCode   = type(WrappedToken).creationCode ++ abi.encode(name, symbol, decimals, bridgeL2)
-    echo "Computing WrappedToken L2 CREATE2 address from artifacts..."
-    WT_CREATION_CODE=$(_bc "$CONTRACTS_DIR/sync-rollups-protocol/out/WrappedToken.sol/WrappedToken.json")
-    WT_CONSTRUCTOR_ARGS=$(cast abi-encode "f(string,string,uint8,address)" "Test Token" "TT" 18 "$BRIDGE_L2_ADDRESS")
-    WT_INIT_CODE="${WT_CREATION_CODE}${WT_CONSTRUCTOR_ARGS#0x}"
-    WT_INIT_HASH=$(cast keccak256 "$WT_INIT_CODE")
-    # salt = keccak256(abi.encodePacked(address(20 bytes), uint256(32 bytes)))
-    TOKEN_LOWER=$(echo "${FLASH_TOKEN_ADDRESS#0x}" | tr '[:upper:]' '[:lower:]')
-    WT_SALT=$(cast keccak256 "0x${TOKEN_LOWER}0000000000000000000000000000000000000000000000000000000000000000")
-    # CREATE2: keccak256(0xff ++ deployer ++ salt ++ initCodeHash)[12:]
-    CREATE2_DEPLOYER_LOWER=$(echo "${BRIDGE_L2_ADDRESS#0x}" | tr '[:upper:]' '[:lower:]')
-    WT_FULL_HASH=$(cast keccak256 "0xff${CREATE2_DEPLOYER_LOWER}${WT_SALT#0x}${WT_INIT_HASH#0x}")
-    WRAPPED_TOKEN_L2="0x${WT_FULL_HASH:26}"
-    echo "  WrappedToken L2 (CREATE2): $WRAPPED_TOKEN_L2"
-    echo "  salt:     $WT_SALT"
-    echo "  initHash: $WT_INIT_HASH"
-
-    # EXECUTOR_L2_PROXY requires calling computeCrossChainProxyAddress on Rollups AFTER it
-    # is deployed. We send DN+0 through DN+10 in phase 2a, then query the proxy address
-    # and send DN+11 in phase 2b.
-    FLASH_EXECUTOR_L2_ADDRESS="$EXECUTOR_L2"
-    FLASH_NFT_ADDRESS="$FLASH_NFT"
-fi
 
 # --- Generate faucet keypair (local, no L1 calls) ---
 echo ""
@@ -326,7 +238,6 @@ echo "Tx output dir: $TX_DIR"
 # cast sends the tx immediately without estimation. Unused gas is not charged on dev chains.
 DEPLOY_GAS=8000000   # Generous limit for contract creation txs
 CALL_GAS=1000000     # Generous limit for contract calls
-PROXY_GAS=5000000    # createCrossChainProxy needs more gas (deploys a proxy contract)
 
 # DN+0: Deploy Verifier
 cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+0)) \
@@ -357,33 +268,6 @@ cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+4)) \
 cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+5)) \
     --gas-limit $CALL_GAS \
     "$BRIDGE_ADDRESS" "$BRIDGE_SET_CANONICAL_CALLDATA" > "$TX_DIR/05_bridge_canonical" 2>&1 &
-
-if [ "${DEPLOY_FLASH_LOAN:-false}" = "true" ]; then
-    # DN+6: Deploy TestToken
-    cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+6)) \
-        --gas-limit $DEPLOY_GAS \
-        --create "$TOKEN_BYTECODE" > "$TX_DIR/06_token" 2>&1 &
-
-    # DN+7: Deploy FlashLoan pool
-    cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+7)) \
-        --gas-limit $DEPLOY_GAS \
-        --create "$POOL_BYTECODE" > "$TX_DIR/07_pool" 2>&1 &
-
-    # DN+8: token.transfer to pool (CALL to pre-computed TOKEN_ADDRESS)
-    cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+8)) \
-        --gas-limit $CALL_GAS \
-        "$FLASH_TOKEN_ADDRESS" "$TRANSFER_POOL_CALLDATA" > "$TX_DIR/08_transfer_pool" 2>&1 &
-
-    # DN+9: token.transfer to dev#5 (CALL to pre-computed TOKEN_ADDRESS)
-    cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+9)) \
-        --gas-limit $CALL_GAS \
-        "$FLASH_TOKEN_ADDRESS" "$TRANSFER_DEV5_CALLDATA" > "$TX_DIR/09_transfer_dev5" 2>&1 &
-
-    # DN+10: createCrossChainProxy (CALL to pre-computed ROLLUPS_ADDRESS)
-    cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" --nonce $((DN+10)) \
-        --gas-limit $PROXY_GAS \
-        "$ROLLUPS_ADDRESS" "$CREATE_PROXY_CALLDATA" > "$TX_DIR/10_create_proxy" 2>&1 &
-fi
 
 # Fund faucet (FUNDER_KEY — independent nonce, runs in parallel with deployer txs)
 cast send --rpc-url "$L1_RPC" --private-key "$FUNDER_KEY" --nonce "$FUNDER_FAUCET_NONCE" \
@@ -433,53 +317,6 @@ DEPLOY_TIMESTAMP=$(cast block --rpc-url "$L1_RPC" "$DEPLOY_BLOCK" --field timest
 ROLLUP_ID=$(cast call --rpc-url "$L1_RPC" "$ROLLUPS_ADDRESS" "rollupCounter()(uint256)" 2>&1)
 echo "Rollup counter after registration: ${ROLLUP_ID}"
 
-# --- Phase 2b: Flash loan executor (needs EXECUTOR_L2_PROXY from on-chain query) ---
-if [ "${DEPLOY_FLASH_LOAN:-false}" = "true" ]; then
-    echo ""
-    echo "=== Phase 2b: Flash loan executor deployment ==="
-
-    # Query computeCrossChainProxyAddress (read-only view call, instant — Rollups is now deployed)
-    EXECUTOR_L2_PROXY=$(cast call --rpc-url "$L1_RPC" \
-        "$ROLLUPS_ADDRESS" \
-        "computeCrossChainProxyAddress(address,uint256)(address)" \
-        "$EXECUTOR_L2" "$L2_ROLLUP_ID" 2>&1)
-    FLASH_EXECUTOR_L2_PROXY_ADDRESS="$EXECUTOR_L2_PROXY"
-    echo "  ExecutorL2 Proxy (from Rollups): $FLASH_EXECUTOR_L2_PROXY_ADDRESS"
-
-    # Build FlashLoanBridgeExecutor constructor args with the now-known proxy address
-    EXECUTOR_CONSTRUCTOR=$(cast abi-encode "f(address,address,address,address,address,address,address,uint256,address)" \
-        "$FLASH_POOL_ADDRESS" \
-        "$BRIDGE_ADDRESS" \
-        "$EXECUTOR_L2_PROXY" \
-        "$EXECUTOR_L2" \
-        "$WRAPPED_TOKEN_L2" \
-        "$FLASH_NFT" \
-        "$BRIDGE_L2_ADDRESS" \
-        "$L2_ROLLUP_ID" \
-        "$FLASH_TOKEN_ADDRESS")
-
-    # DN+11: Deploy FlashLoanBridgeExecutor
-    EXECUTOR_DEPLOY_OUTPUT=$(cast send --rpc-url "$L1_RPC" --private-key "$DEPLOYER_KEY" \
-        --nonce $((DN+11)) --gas-limit 8000000 \
-        --create "${EXECUTOR_BYTECODE}${EXECUTOR_CONSTRUCTOR#0x}" 2>&1)
-    EXECUTOR_STATUS=$( (echo "$EXECUTOR_DEPLOY_OUTPUT" | grep -E "^status" || true) | awk '{print $2}')
-    if [ "$EXECUTOR_STATUS" != "1" ]; then
-        echo "WARNING: FlashLoanBridgeExecutor deployment failed"
-        echo "$EXECUTOR_DEPLOY_OUTPUT"
-        FLASH_EXECUTOR_L1_ADDRESS="0x0000000000000000000000000000000000000000"
-    else
-        echo "  FlashLoanBridgeExecutor deployed at: $FLASH_EXECUTOR_L1_ADDRESS"
-    fi
-
-    # Verify token balances
-    POOL_BAL=$(cast call --rpc-url "$L1_RPC" "$FLASH_TOKEN_ADDRESS" \
-        "balanceOf(address)(uint256)" "$FLASH_POOL_ADDRESS" 2>&1)
-    DEV5_BAL=$(cast call --rpc-url "$L1_RPC" "$FLASH_TOKEN_ADDRESS" \
-        "balanceOf(address)(uint256)" "$DEV5_ADDR" 2>&1)
-    echo "  Pool token balance: $POOL_BAL"
-    echo "  Dev#5 token balance: $DEV5_BAL"
-fi
-
 # --- Faucet key file ---
 echo "$FAUCET_PRIVATE_KEY" > "${SHARED_DIR}/faucet.key"
 echo "Faucet private key written to ${SHARED_DIR}/faucet.key"
@@ -504,18 +341,6 @@ echo "Bridge L2:         ${BRIDGE_L2_ADDRESS}"
 echo "L2Context:         ${L2_CONTEXT_ADDRESS}"
 echo "CCM:               ${CROSS_CHAIN_MANAGER_ADDRESS}"
 echo "Faucet:            ${FAUCET_ADDRESS}"
-
-if [ "${DEPLOY_FLASH_LOAN:-false}" = "true" ]; then
-    echo ""
-    echo "=== Flash Loan L1 Deployment Summary ==="
-    echo "TestToken:            $FLASH_TOKEN_ADDRESS"
-    echo "FlashLoan Pool:       $FLASH_POOL_ADDRESS"
-    echo "ExecutorL2 (pre-comp):$EXECUTOR_L2"
-    echo "FlashNFT   (pre-comp):$FLASH_NFT"
-    echo "WrappedToken L2:      $WRAPPED_TOKEN_L2"
-    echo "ExecutorL2 Proxy:     $FLASH_EXECUTOR_L2_PROXY_ADDRESS"
-    echo "ExecutorL1:           $FLASH_EXECUTOR_L1_ADDRESS"
-fi
 
 # 8. Write single config file (atomic: write to .tmp then rename)
 mkdir -p "$SHARED_DIR"
@@ -555,7 +380,8 @@ echo ""
 echo "Config written to ${SHARED_DIR}/rollup.env"
 cat "${SHARED_DIR}/rollup.env"
 
-# L2 deployment (canonical bridge + flash loan contracts) is handled by deploy_l2.sh
+# L2 deployment (canonical bridge verification) is handled by deploy_l2.sh
 # which runs as a separate Docker service after the builder is healthy.
+# Flash loan deployment is handled by deploy-flash-loan.sh (separate service).
 echo ""
 echo "L1 deployment complete. L2 setup will run via deploy-l2 service."
