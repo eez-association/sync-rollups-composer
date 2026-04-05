@@ -1225,17 +1225,29 @@ where
                     // = true terminal failure. Skip L2 entries — protocol specifies no
                     // loadExecutionTable for terminal reverts.
                     // Terminal failure requires revert data > 4 bytes.
-                    // L2 entries: loaded via loadExecutionTable in this block.
-                    // Terminal failures are handled at the RPC level — when the delivery
-                    // always fails, extra_l2_entries is cleared before queuing.
-                    rpc_entries.push(call.call_entry.clone());
-                    if call.extra_l2_entries.is_empty() {
-                        // Simple deposit: CALL trigger + RESULT table entry
-                        rpc_entries.push(call.result_entry.clone());
+                    // 4-byte data = error selector (e.g., ExecutionNotFound 0xed6bc750)
+                    // from simulation environment failures, NOT real terminal reverts.
+                    // Real Error(string) revert data is always >= 68 bytes (selector +
+                    // offset + length + padded string).
+                    let is_terminal_failure = call.result_entry.next_action.failed
+                        && call.result_entry.next_action.data.len() > 4;
+                    if !is_terminal_failure {
+                        rpc_entries.push(call.call_entry.clone());
+                        if call.extra_l2_entries.is_empty() {
+                            // Simple deposit: CALL trigger + RESULT table entry
+                            rpc_entries.push(call.result_entry.clone());
+                        } else {
+                            // Multi-call continuation: continuation entries provide their own RESULT entries.
+                            // Skip result_entry to avoid conflicting actionHash.
+                            rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                        }
                     } else {
-                        // Multi-call continuation: continuation entries provide their own RESULT entries.
-                        // Skip result_entry to avoid conflicting actionHash.
-                        rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                        tracing::info!(
+                            target: "based_rollup::driver",
+                            call_id = %call.call_entry.action_hash,
+                            data_len = call.result_entry.next_action.data.len(),
+                            "terminal failure: skipping L2 entries (delivery always reverts)"
+                        );
                     }
                     if !call.raw_l1_tx.is_empty() {
                         queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
@@ -1431,6 +1443,7 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
+
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -1488,6 +1501,7 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
+
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -2183,30 +2197,21 @@ where
 
                             if !consumed_hashes.is_empty() {
                                 // Count how many entries we need per hash.
-                                // REVERT-internal entries: entries whose nextAction is REVERT
-                                // or whose actionHash matches REVERT_CONTINUE are consumed
-                                // INSIDE the reverted scope on L1 — their ExecutionConsumed
-                                // events are reverted by ScopeReverted. Skip them in the
-                                // consumption check. Only Entry 0 (L2TX trigger, consumed
-                                // outside the scope) needs verification.
-                                let revert_continue_hash =
-                                    crate::cross_chain::compute_revert_continue_hash(
-                                        alloy_primitives::U256::from(self.config.rollup_id),
-                                    );
+                                // Skip REVERT/REVERT_CONTINUE entries — they are consumed inside
+                                // reverted scopes so their ExecutionConsumed events are reverted
+                                // by ScopeReverted. We identify them by action_type (Revert) and
+                                // by matching the REVERT_CONTINUE action hash.
+                                let revert_continue_hash = crate::cross_chain::compute_revert_continue_hash(
+                                    alloy_primitives::U256::from(self.config.rollup_id)
+                                );
 
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
                                     std::collections::HashMap::new();
                                 for e in l1_entries.iter() {
-                                    if e.action_hash == B256::ZERO {
-                                        continue; // immediate entry
+                                    if e.action_hash == alloy_primitives::B256::ZERO {
+                                        continue;
                                     }
-                                    // Skip entries consumed inside the REVERT scope:
-                                    // - Entry with nextAction=REVERT (scope resolution → revert)
-                                    // - Entry with actionHash=REVERT_CONTINUE (consumed by
-                                    //   _getRevertContinuation)
-                                    if e.next_action.action_type
-                                        == crate::cross_chain::CrossChainActionType::Revert
-                                    {
+                                    if e.next_action.action_type == crate::cross_chain::CrossChainActionType::Revert {
                                         continue;
                                     }
                                     if e.action_hash == revert_continue_hash {

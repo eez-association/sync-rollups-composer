@@ -1052,37 +1052,44 @@ async fn simulate_l1_to_l2_call_on_l2(
                     return (data.clone(), false, retry_children);
                 }
             }
-            // Trace extraction didn't find the destination call (nested self-calls
-            // may strip children in callTracer). Fall back to direct eth_call on L2
-            // to capture the exact revert data from the destination contract.
+            // Trace extraction didn't find the destination call in the CCM trace
+            // (nested self-calls may not expose children). Use debug_traceCallMany
+            // with a direct call to the destination to capture revert data.
             let direct_req = serde_json::json!({
                 "jsonrpc": "2.0",
-                "method": "eth_call",
-                "params": [{
-                    "from": format!("{source_address}"),
-                    "to": format!("{destination}"),
-                    "data": format!("0x{}", hex::encode(data)),
-                    "gas": "0x2faf080"
-                }, "pending"],  // pending = latest including mempool state
+                "method": "debug_traceCallMany",
+                "params": [
+                    [{ "transactions": [{
+                        "from": format!("{source_address}"),
+                        "to": format!("{destination}"),
+                        "data": format!("0x{}", hex::encode(data)),
+                        "gas": "0x2faf080"
+                    }] }],
+                    null,
+                    { "tracer": "callTracer" }
+                ],
                 "id": 99959
             });
             if let Ok(resp) = client.post(l2_rpc_url).json(&direct_req).send().await {
                 if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(error) = body.get("error") {
-                        // eth_call returns error for reverting calls with data in error.data
-                        if let Some(data_hex) = error.get("data").and_then(|v| v.as_str()) {
-                            let clean = data_hex.strip_prefix("0x").unwrap_or(data_hex);
-                            if let Ok(data) = hex::decode(clean) {
-                                if !data.is_empty() {
-                                    tracing::info!(
-                                        target: "based_rollup::l1_proxy",
-                                        dest = %destination,
-                                        data_len = data.len(),
-                                        data_hex = %format!("0x{}", hex::encode(&data[..data.len().min(20)])),
-                                        "captured revert data from direct eth_call to destination"
-                                    );
-                                    return (data, false, retry_children);
-                                }
+                    if let Some(trace) = body.get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                        .and_then(|a| a.first())
+                    {
+                        let has_error = trace.get("error").is_some();
+                        let output = trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+                        let clean = output.strip_prefix("0x").unwrap_or(output);
+                        if let Ok(revert_data) = hex::decode(clean) {
+                            if has_error && !revert_data.is_empty() {
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    dest = %destination,
+                                    data_len = revert_data.len(),
+                                    data_hex = %format!("0x{}", hex::encode(&revert_data[..revert_data.len().min(20)])),
+                                    "captured revert data from direct debug_traceCallMany"
+                                );
+                                return (revert_data, false, retry_children);
                             }
                         }
                     }
