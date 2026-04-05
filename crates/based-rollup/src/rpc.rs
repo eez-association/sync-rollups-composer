@@ -194,10 +194,6 @@ pub struct QueuedCrossChainCall {
     pub l1_entries: Vec<CrossChainExecutionEntry>,
     /// Whether the L2 tx reverts after cross-chain calls (atomicity revert).
     pub tx_reverts: bool,
-    /// Terminal failure: the L2 delivery fails (RESULT(failed=true)).
-    /// When true, L2 entries are NOT loaded via loadExecutionTable (no L2 state change).
-    /// Only L1 entries are submitted via postBatch.
-    pub terminal_failure: bool,
 }
 
 /// A queued L2→L1 call with L2 table entries and L1 deferred entries.
@@ -675,7 +671,6 @@ where
                 extra_l2_entries: vec![],
                 l1_entries: vec![],
                 tx_reverts: false,
-                terminal_failure: false,
             });
         }
 
@@ -954,7 +949,6 @@ where
                 extra_l2_entries: continuation.l2_entries,
                 l1_entries: continuation.l1_entries,
                 tx_reverts: false, // TODO(revert-continue): wire from params in Step 5
-                terminal_failure: !call_success, // delivery fails → no L2 execution
             });
         }
 

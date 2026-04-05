@@ -1225,19 +1225,14 @@ where
                         had_continuation = true;
                     }
 
-                    // Terminal failure (delivery fails on L2): skip L2 entries entirely.
-                    // No loadExecutionTable needed — the protocol specifies no L2 state
-                    // change for terminal reverts (revertCounter E2E test).
-                    if !call.terminal_failure {
-                        rpc_entries.push(call.call_entry.clone());
-                        if call.extra_l2_entries.is_empty() {
-                            // Simple deposit: CALL trigger + RESULT table entry
-                            rpc_entries.push(call.result_entry.clone());
-                        } else {
-                            // Multi-call continuation: continuation entries provide their own RESULT entries.
-                            // Skip result_entry to avoid conflicting actionHash.
-                            rpc_entries.extend(call.extra_l2_entries.iter().cloned());
-                        }
+                    rpc_entries.push(call.call_entry.clone());
+                    if call.extra_l2_entries.is_empty() {
+                        // Simple deposit: CALL trigger + RESULT table entry
+                        rpc_entries.push(call.result_entry.clone());
+                    } else {
+                        // Multi-call continuation: continuation entries provide their own RESULT entries.
+                        // Skip result_entry to avoid conflicting actionHash.
+                        rpc_entries.extend(call.extra_l2_entries.iter().cloned());
                     }
                     if !call.raw_l1_tx.is_empty() {
                         queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
