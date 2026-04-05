@@ -253,6 +253,12 @@ async fn handle_request(
         for (method, params) in &methods {
             if method == "eth_sendRawTransaction" {
                 if let Some(raw_tx) = params.and_then(|p| p.first()).and_then(|v| v.as_str()) {
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        raw_tx_prefix = %&raw_tx[..raw_tx.len().min(42)],
+                        raw_tx_len = raw_tx.len(),
+                        "L1 compositor: intercepted eth_sendRawTransaction"
+                    );
                     match handle_cross_chain_tx(
                         &client,
                         &l1_rpc_url,
@@ -436,6 +442,10 @@ async fn queue_execution_table(
                 // Explicitly mark L2→L1 children (target=L1=0) so the RPC handler
                 // can distinguish them from L1→L2 calls.
                 call_json["targetRollupId"] = serde_json::json!(0u64);
+            }
+            // Propagate in_reverted_frame for partial revert patterns (revertContinue).
+            if c.in_reverted_frame {
+                call_json["inRevertedFrame"] = serde_json::json!(true);
             }
             // Propagate discovery iteration and L1 trace depth for reentrant detection.
             if c.discovery_iteration > 0 {
@@ -2426,8 +2436,10 @@ async fn trace_and_detect_internal_calls(
                     .await;
 
                     // Find truly new calls (not already in detected_calls).
+                    // Use iter().cloned() to preserve new_detected for in_reverted_frame update.
                     let truly_new: Vec<_> = new_detected
-                        .into_iter()
+                        .iter()
+                        .cloned()
                         .filter(|new_call| {
                             !detected_calls.iter().any(|existing| {
                                 existing.destination == new_call.destination
@@ -2439,6 +2451,32 @@ async fn trace_and_detect_internal_calls(
                         .collect();
 
                     if truly_new.is_empty() {
+                        // Update in_reverted_frame from the LAST retrace.
+                        // The initial trace runs without entries loaded, so ALL proxy calls
+                        // appear in reverted frames (ExecutionNotFound). After loading entries,
+                        // the retrace shows the correct revert frame status: only calls inside
+                        // try/catch that reverts for business logic have in_reverted_frame=true.
+                        for existing in detected_calls.iter_mut() {
+                            if let Some(retrace_call) = new_detected.iter().find(|r| {
+                                r.destination == existing.destination
+                                    && r.calldata == existing.calldata
+                                    && r.value == existing.value
+                                    && r.source_address == existing.source_address
+                                    && r.trace_depth == existing.trace_depth
+                            }) {
+                                if existing.in_reverted_frame != retrace_call.in_reverted_frame {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        dest = %existing.destination,
+                                        trace_depth = existing.trace_depth,
+                                        old = existing.in_reverted_frame,
+                                        new = retrace_call.in_reverted_frame,
+                                        "updated in_reverted_frame from L1 retrace"
+                                    );
+                                    existing.in_reverted_frame = retrace_call.in_reverted_frame;
+                                }
+                            }
+                        }
                         tracing::info!(
                             target: "based_rollup::l1_proxy",
                             iteration,
@@ -3843,6 +3881,20 @@ async fn trace_and_detect_internal_calls(
             "no internal cross-chain calls found in trace — forwarding tx directly"
         );
         return Ok(None);
+    }
+
+    for (i, c) in detected_calls.iter().enumerate() {
+        tracing::info!(
+            target: "based_rollup::composer_rpc::l1_to_l2",
+            idx = i,
+            dest = %c.destination,
+            source = %c.source_address,
+            in_reverted_frame = c.in_reverted_frame,
+            call_success = c.call_success,
+            return_data_len = c.return_data.len(),
+            trace_depth = c.trace_depth,
+            "FINAL detected_calls before queue_execution_table"
+        );
     }
 
     tracing::info!(

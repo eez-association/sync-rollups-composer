@@ -285,6 +285,18 @@ pub fn build_continuation_entries(
         .filter(|(_, c)| c.direction == CallDirection::L1ToL2)
         .collect();
 
+    for (i, c) in l1_to_l2_calls.iter() {
+        tracing::info!(
+            target: "based_rollup::table_builder",
+            idx = i,
+            direction = ?c.direction,
+            dest = %c.call_action.destination,
+            in_reverted_frame = c.in_reverted_frame,
+            depth = c.depth,
+            "build_continuation_entries: L1→L2 call"
+        );
+    }
+
     // ── Partial revert detection (L1→L2 direction) ──
     //
     // When some L1→L2 calls have `in_reverted_frame=true` and others don't, this is
