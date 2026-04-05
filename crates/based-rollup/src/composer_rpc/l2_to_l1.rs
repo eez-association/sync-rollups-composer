@@ -3761,6 +3761,8 @@ async fn trace_and_detect_l2_internal_calls(
         let mut all_calls = detected_calls.clone();
         let mut iteration = 0;
         const MAX_ITERATIONS: usize = 10;
+        // Track last retrace results for in_reverted_frame update after convergence.
+        let mut last_retrace_results: Vec<DetectedL2InternalCall> = Vec::new();
 
         loop {
             iteration += 1;
@@ -4136,6 +4138,9 @@ async fn trace_and_detect_l2_internal_calls(
             )
             .await;
 
+            // Save for in_reverted_frame update after convergence.
+            last_retrace_results = new_detected.clone();
+
             tracing::info!(
                 target: "based_rollup::proxy",
                 iteration,
@@ -4189,6 +4194,36 @@ async fn trace_and_detect_l2_internal_calls(
             all_calls.extend(new_calls);
         }
 
+        // Update in_reverted_frame from the LAST retrace results.
+        // The initial trace runs without entries loaded, so ALL calls appear reverted
+        // (proxy calls fail with ExecutionNotFound). After loading entries, the retrace
+        // shows the correct revert status: only calls inside try/catch blocks that
+        // actually revert have in_reverted_frame=true.
+        if !last_retrace_results.is_empty() {
+            for call in all_calls.iter_mut() {
+                // Find matching call in last retrace by (dest, calldata, value, source, trace_depth)
+                if let Some(retrace_call) = last_retrace_results.iter().find(|r| {
+                    r.destination == call.destination
+                        && r.calldata == call.calldata
+                        && r.value == call.value
+                        && r.source_address == call.source_address
+                        && r.trace_depth == call.trace_depth
+                }) {
+                    if call.in_reverted_frame != retrace_call.in_reverted_frame {
+                        tracing::info!(
+                            target: "based_rollup::proxy",
+                            dest = %call.destination,
+                            trace_depth = call.trace_depth,
+                            old = call.in_reverted_frame,
+                            new = retrace_call.in_reverted_frame,
+                            "updated in_reverted_frame from last retrace"
+                        );
+                        call.in_reverted_frame = retrace_call.in_reverted_frame;
+                    }
+                }
+            }
+        }
+
         // Update detected_calls with the full set from iterative discovery.
         detected_calls = all_calls;
 
@@ -4227,7 +4262,12 @@ async fn trace_and_detect_l2_internal_calls(
                 calldata_len = call.calldata.len(),
                 calldata_prefix = %format!("0x{}", hex::encode(&call.calldata[..call.calldata.len().min(8)])),
                 value = %call.value,
-                "iterative discovery final call"
+                trace_depth = call.trace_depth,
+                in_reverted_frame = call.in_reverted_frame,
+                delivery_failed = call.delivery_failed,
+                delivery_return_data_len = call.delivery_return_data.len(),
+                delivery_return_data_hex = %format!("0x{}", hex::encode(&call.delivery_return_data)),
+                "iterative discovery final call (with revert frame status)"
             );
         }
     }
@@ -4404,6 +4444,34 @@ async fn trace_and_detect_l2_internal_calls(
     }
 
     // Route through the appropriate queuing path based on call count.
+    //
+    // Partial revert pattern: when some calls have in_reverted_frame=true and others
+    // don't, ALL calls must go through the multi-call path (buildL2ToL1ExecutionTable)
+    // to generate a single L2TX trigger with REVERT/REVERT_CONTINUE entries. This takes
+    // priority over the duplicate-call independent routing.
+    let has_partial_revert = detected_calls.iter().any(|c| c.in_reverted_frame)
+        && detected_calls.iter().any(|c| !c.in_reverted_frame);
+
+    if has_partial_revert && detected_calls.len() >= 2 {
+        tracing::info!(
+            target: "based_rollup::proxy",
+            reverted = detected_calls.iter().filter(|c| c.in_reverted_frame).count(),
+            non_reverted = detected_calls.iter().filter(|c| !c.in_reverted_frame).count(),
+            "partial revert pattern: routing ALL calls through multi-call path for REVERT/REVERT_CONTINUE"
+        );
+        return queue_l2_to_l1_multi_call_entries(
+            client,
+            upstream_url,
+            raw_tx_hex,
+            &detected_calls,
+            &early_return_calls,
+            rollup_id,
+            tx_reverts,
+        )
+        .await
+        .is_some();
+    }
+
     // Check for duplicate calls (same action identity). Identical calls must
     // route independently — the continuation path produces chained RESULT→CALL
     // entries with return-data-dependent hashes that break for identical calls

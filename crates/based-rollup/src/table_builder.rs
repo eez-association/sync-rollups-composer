@@ -2144,7 +2144,25 @@ pub fn build_l2_to_l1_continuation_entries(
             .iter()
             .position(|(_, c)| !c.in_reverted_frame);
 
-        if let Some(_non_rev_pos) = first_non_reverted_root_pos {
+        if let Some(non_rev_pos) = first_non_reverted_root_pos {
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                non_rev_pos,
+                l1_entry_count = l1_entries.len(),
+                "partial revert: searching for boundary entry to insert REVERT"
+            );
+            for (i, e) in l1_entries.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::table_builder",
+                    idx = i,
+                    action_hash = %e.action_hash,
+                    next_action_type = ?e.next_action.action_type,
+                    next_action_dest = %e.next_action.destination,
+                    next_action_scope_len = e.next_action.scope.len(),
+                    next_action_data_len = e.next_action.data.len(),
+                    "partial revert: L1 entry before transformation"
+                );
+            }
             // Find the L1 entry whose nextAction chains to the first non-reverted call.
             // This is the entry whose nextAction.action_type == Call and whose
             // nextAction matches the non-reverted call's delivery (same destination,
@@ -2195,6 +2213,20 @@ pub fn build_l2_to_l1_continuation_entries(
                     l1_entry_count = l1_entries.len(),
                     "inserted REVERT/REVERT_CONTINUE for partial revert pattern"
                 );
+                for (i, e) in l1_entries.iter().enumerate() {
+                    tracing::info!(
+                        target: "based_rollup::table_builder",
+                        idx = i,
+                        action_hash = %e.action_hash,
+                        next_action_type = ?e.next_action.action_type,
+                        next_action_dest = %e.next_action.destination,
+                        next_action_rollup_id = %e.next_action.rollup_id,
+                        next_action_scope = ?e.next_action.scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                        next_action_failed = e.next_action.failed,
+                        next_action_data_hex = %format!("0x{}", hex::encode(&e.next_action.data)),
+                        "partial revert: L1 entry AFTER transformation"
+                    );
+                }
             } else {
                 tracing::warn!(
                     target: "based_rollup::table_builder",

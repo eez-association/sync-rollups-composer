@@ -439,6 +439,8 @@ async fn walk_trace_tree_inner(
         let info = resolve_proxy_info(parsed.to, lookup, proxy_cache, ephemeral_proxies).await;
 
         if let Some(proxy_info) = info {
+            // Check if this node itself has an error (node-level revert).
+            let node_has_error = node.get("error").and_then(|v| v.as_str()).is_some();
             tracing::info!(
                 target: "based_rollup::trace",
                 proxy = %parsed.to,
@@ -448,6 +450,8 @@ async fn walk_trace_tree_inner(
                 calldata_len = parsed.input.len(),
                 value = %parsed.value,
                 depth,
+                in_reverted_frame,
+                node_has_error,
                 "detected cross-chain proxy call via executeCrossChainCall child"
             );
 
