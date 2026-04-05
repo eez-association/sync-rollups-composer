@@ -2437,7 +2437,7 @@ async fn trace_and_detect_internal_calls(
 
                     // Find truly new calls (not already in detected_calls).
                     let truly_new: Vec<_> = new_detected
-                        .into_iter()
+                        .iter()
                         .filter(|new_call| {
                             !detected_calls.iter().any(|existing| {
                                 existing.destination == new_call.destination
@@ -2446,18 +2446,40 @@ async fn trace_and_detect_internal_calls(
                                     && existing.source_address == new_call.source_address
                             })
                         })
+                        .cloned()
                         .collect();
 
                     if truly_new.is_empty() {
-                        // NOTE: Do NOT update in_reverted_frame from the L1 retrace here.
-                        // Unlike L2→L1 (where the initial trace always errors), L1→L2 retrace
-                        // update is unreliable for duplicate-call patterns (CallTwice) because
-                        // the second call is discovered during retrace and the match-by-fields
-                        // is ambiguous for identical calls. The in_reverted_frame values from
-                        // the initial detection + truly_new additions are the correct source.
-                        // For revertContinue (L1→L2), the initial trace correctly detects the
-                        // try/catch revert frame for the first call (depth=2, in_reverted_frame=true)
-                        // and the second call is added from the retrace with correct frame status.
+                        // Update in_reverted_frame from retrace using POSITIONAL matching.
+                        // The initial trace (without entries) shows ALL calls as reverted
+                        // (ExecutionNotFound). The retrace (with entries loaded) shows the
+                        // correct revert frame: only calls inside try/catch that reverts for
+                        // business logic have in_reverted_frame=true.
+                        //
+                        // Positional (not field-based) matching avoids the CallTwice regression:
+                        // identical calls (same dest/calldata/value/source/depth) would match
+                        // ambiguously with field-based find(). Positional update only triggers
+                        // when counts match (same number of calls in initial and retrace),
+                        // which is safe because walk_trace_tree walks depth-first — call order
+                        // is determined by the call tree structure, consistent across retraces.
+                        //
+                        // CallTwice: initial=1, retrace=2 → no update (second added via truly_new)
+                        // revertContinue: initial=2, retrace=2 → positional update works
+                        if new_detected.len() == detected_calls.len() {
+                            for (i, existing) in detected_calls.iter_mut().enumerate() {
+                                if existing.in_reverted_frame != new_detected[i].in_reverted_frame {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        idx = i,
+                                        dest = %existing.destination,
+                                        old = existing.in_reverted_frame,
+                                        new = new_detected[i].in_reverted_frame,
+                                        "positional in_reverted_frame update from L1 retrace"
+                                    );
+                                    existing.in_reverted_frame = new_detected[i].in_reverted_frame;
+                                }
+                            }
+                        }
                         tracing::info!(
                             target: "based_rollup::l1_proxy",
                             iteration,
