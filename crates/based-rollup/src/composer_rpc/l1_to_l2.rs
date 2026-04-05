@@ -1026,10 +1026,72 @@ async fn simulate_l1_to_l2_call_on_l2(
             let retry_inner = extract_inner_destination_return_data(&retry_trace, destination)
                 .unwrap_or(retry_data);
             return (retry_inner, true, retry_children);
+        } else {
+            // Run 2 also failed — extract revert data from the retry trace.
+            // When the destination contract always reverts (e.g., RevertCounter),
+            // Run 2 (with RESULT entry loaded) actually reaches the destination,
+            // so the retry trace contains the real revert data. Run 1 may not
+            // reach the destination (ExecutionNotFound reverts first).
+            tracing::info!(
+                target: "based_rollup::l1_proxy",
+                dest = %destination,
+                retry_trace_has_calls = retry_trace.get("calls").and_then(|v| v.as_array()).map_or(0, |a| a.len()),
+                retry_trace_error = retry_trace.get("error").and_then(|v| v.as_str()).unwrap_or("none"),
+                "Run 2 failed — attempting to extract revert data from retry trace"
+            );
+            let retry_inner =
+                extract_inner_destination_return_data(&retry_trace, destination);
+            if let Some(ref data) = retry_inner {
+                if !data.is_empty() {
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        dest = %destination,
+                        retry_data_len = data.len(),
+                        "Run 2 failed but captured revert data from trace"
+                    );
+                    return (data.clone(), false, retry_children);
+                }
+            }
+            // Trace extraction didn't find the destination call (nested self-calls
+            // may strip children in callTracer). Fall back to direct eth_call on L2
+            // to capture the exact revert data from the destination contract.
+            let direct_req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{
+                    "from": format!("{source_address}"),
+                    "to": format!("{destination}"),
+                    "data": format!("0x{}", hex::encode(data)),
+                    "gas": "0x2faf080"
+                }, "latest"],
+                "id": 99959
+            });
+            if let Ok(resp) = client.post(l2_rpc_url).json(&direct_req).send().await {
+                if let Ok(body) = resp.json::<Value>().await {
+                    if let Some(error) = body.get("error") {
+                        // eth_call returns error for reverting calls with data in error.data
+                        if let Some(data_hex) = error.get("data").and_then(|v| v.as_str()) {
+                            let clean = data_hex.strip_prefix("0x").unwrap_or(data_hex);
+                            if let Ok(data) = hex::decode(clean) {
+                                if !data.is_empty() {
+                                    tracing::info!(
+                                        target: "based_rollup::l1_proxy",
+                                        dest = %destination,
+                                        data_len = data.len(),
+                                        data_hex = %format!("0x{}", hex::encode(&data[..data.len().min(20)])),
+                                        "captured revert data from direct eth_call to destination"
+                                    );
+                                    return (data, false, retry_children);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // Run 2 failed — use the inner return data from Run 1
+    // Both runs failed without capturing destination data
     (inner_return_data, inner_success, children)
 }
 

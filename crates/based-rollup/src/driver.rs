@@ -1225,14 +1225,34 @@ where
                         had_continuation = true;
                     }
 
-                    rpc_entries.push(call.call_entry.clone());
-                    if call.extra_l2_entries.is_empty() {
-                        // Simple deposit: CALL trigger + RESULT table entry
-                        rpc_entries.push(call.result_entry.clone());
+                    // Terminal failure: delivery ALWAYS fails (e.g., RevertCounter).
+                    // RESULT(failed=true) with non-empty revert data after enrichment
+                    // = true terminal failure. Skip L2 entries — protocol specifies no
+                    // loadExecutionTable for terminal reverts.
+                    // Terminal failure requires revert data > 4 bytes.
+                    // 4-byte data = error selector (e.g., ExecutionNotFound 0xed6bc750)
+                    // from simulation environment failures, NOT real terminal reverts.
+                    // Real Error(string) revert data is always >= 68 bytes (selector +
+                    // offset + length + padded string).
+                    let is_terminal_failure = call.result_entry.next_action.failed
+                        && call.result_entry.next_action.data.len() > 4;
+                    if !is_terminal_failure {
+                        rpc_entries.push(call.call_entry.clone());
+                        if call.extra_l2_entries.is_empty() {
+                            // Simple deposit: CALL trigger + RESULT table entry
+                            rpc_entries.push(call.result_entry.clone());
+                        } else {
+                            // Multi-call continuation: continuation entries provide their own RESULT entries.
+                            // Skip result_entry to avoid conflicting actionHash.
+                            rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                        }
                     } else {
-                        // Multi-call continuation: continuation entries provide their own RESULT entries.
-                        // Skip result_entry to avoid conflicting actionHash.
-                        rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                        tracing::info!(
+                            target: "based_rollup::driver",
+                            call_id = %call.call_entry.action_hash,
+                            data_len = call.result_entry.next_action.data.len(),
+                            "terminal failure: skipping L2 entries (delivery always reverts)"
+                        );
                     }
                     if !call.raw_l1_tx.is_empty() {
                         queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
