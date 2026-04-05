@@ -105,7 +105,7 @@ DEPLOYER_BAL=$(cast balance --rpc-url "$L1_RPC" "$DEPLOYER_ADDR" 2>/dev/null || 
 if [ "$(printf '%d' "$DEPLOYER_BAL" 2>/dev/null || echo 0)" -lt 1000000000000000000 ] 2>/dev/null; then
     echo "Funding aggregator deployer ($DEPLOYER_ADDR) from dev#9..."
     cast send --rpc-url "$L1_RPC" --private-key "$FUNDER_KEY" \
-        "$DEPLOYER_ADDR" --value 200ether --gas-limit 21000 > /dev/null 2>&1
+        "$DEPLOYER_ADDR" --value 500ether --gas-limit 21000 > /dev/null 2>&1
     sleep 2
     echo "  Funded: $(cast balance --rpc-url "$L1_RPC" "$DEPLOYER_ADDR") wei"
 fi
