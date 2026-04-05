@@ -405,44 +405,60 @@ impl DerivationPipeline {
             //
             // Detect REVERT batches FIRST — they need special handling for
             // effective_state_root (see below).
+            // Detect REVERT entries in the ORIGINAL batch (before consumed filtering).
+            // REVERT entries are L1-only (§D.12 atomicity) — consumed inside a
+            // reverted scope, no ExecutionConsumed events, filtered out of
+            // deferred_entries. Their state deltas should NOT advance effective_state_root
+            // (the on-chain stateRoot after ScopeReverted = batch_final_state_root).
             let batch_has_revert = entries.iter().any(|e| {
                 e.next_action.action_type == cross_chain::CrossChainActionType::Revert
                     || e.next_action.action_type == cross_chain::CrossChainActionType::RevertContinue
             });
 
+            // Collect action_hashes of entries that are part of REVERT groups.
+            // These entries' deltas should NOT be chained into effective_state_root.
+            // In deferred_entries, only Entry 0 (L2TX trigger, consumed outside scope)
+            // survives consumed-filtering. Its delta would incorrectly advance the root.
+            let revert_action_hashes: std::collections::HashSet<B256> = if batch_has_revert {
+                entries
+                    .iter()
+                    .filter(|e| e.action_hash != B256::ZERO) // skip immediate
+                    .filter(|e| {
+                        // Entry belongs to a REVERT group if it or any sibling has
+                        // nextAction=Revert/RevertContinue. For simplicity, mark ALL
+                        // deferred entries in a batch that has REVERT — this is correct
+                        // because REVERT groups are submitted in their own batch
+                        // (entry verification hold ensures no mixing with normal batches).
+                        true
+                    })
+                    .map(|e| e.action_hash)
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
             let mut effective_state_root = batch_final_state_root;
             let rollup_id_u256 = U256::from(self.config.rollup_id);
-            if batch_has_revert {
-                // REVERT batch: deferred entry deltas are consumed-and-reverted on L1
-                // (inside ScopeReverted scope). The on-chain stateRoot after executeL2TX
-                // is the CAPTURED value from _handleScopeRevert = Entry 1's newState =
-                // post_root = batch_final_state_root (because clean == speculative for
-                // reverted L2 txs). Skip delta chaining — effective_state_root stays
-                // at batch_final_state_root.
-                info!(
-                    target: "based_rollup::derivation",
-                    %l1_block,
-                    effective_state_root = %effective_state_root,
-                    "REVERT batch: skipping effective_state_root delta chaining \
-                     (deferred deltas consumed inside reverted scope)"
-                );
-            } else {
-                for entry in &deferred_entries {
-                    for delta in &entry.state_deltas {
-                        if delta.current_state == effective_state_root
-                            && delta.rollup_id == rollup_id_u256
-                        {
-                            effective_state_root = delta.new_state;
-                        }
+            for entry in &deferred_entries {
+                // Skip REVERT group entries — their deltas are consumed-and-reverted
+                // on L1, should not advance effective_state_root.
+                if revert_action_hashes.contains(&entry.action_hash) {
+                    continue;
+                }
+                for delta in &entry.state_deltas {
+                    if delta.current_state == effective_state_root
+                        && delta.rollup_id == rollup_id_u256
+                    {
+                        effective_state_root = delta.new_state;
                     }
                 }
             }
 
-            // batch_has_revert already computed above (before effective_state_root).
             if batch_has_revert {
                 info!(
                     target: "based_rollup::derivation",
                     %l1_block,
+                    %effective_state_root,
                     "REVERT batch detected — skipping L2 entry reconstruction \
                      (L2 entries already in block body loadExecutionTable)"
                 );

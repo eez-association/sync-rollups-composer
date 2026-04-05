@@ -2825,9 +2825,8 @@ fn test_attach_generic_state_deltas_revert_group() {
 
     let roots = vec![pre, post]; // 1 group → 2 roots
     let group_starts = vec![0usize];
-    let revert_flags = vec![true];
 
-    attach_generic_state_deltas(&mut entries, &roots, rollup_id, &group_starts, &revert_flags);
+    attach_generic_state_deltas(&mut entries, &roots, rollup_id, &group_starts);
 
     // Entry 0: pre → synthetic
     assert_eq!(entries[0].state_deltas[0].current_state, pre);
@@ -2853,7 +2852,7 @@ fn test_attach_generic_state_deltas_revert_group() {
     );
 }
 
-/// Verify non-REVERT groups are unaffected by the revert_group_flags parameter.
+/// Verify non-REVERT groups produce normal (non-identity) state delta chains.
 #[test]
 fn test_attach_generic_state_deltas_normal_group_with_flags() {
     let pre = B256::with_last_byte(0x01);
@@ -2907,9 +2906,8 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
 
     let roots = vec![pre, post];
     let group_starts = vec![0usize];
-    let revert_flags = vec![false]; // NOT a revert group
 
-    attach_generic_state_deltas(&mut entries, &roots, rollup_id, &group_starts, &revert_flags);
+    attach_generic_state_deltas(&mut entries, &roots, rollup_id, &group_starts);
 
     // Entry 0: pre → synthetic
     assert_eq!(entries[0].state_deltas[0].current_state, pre);

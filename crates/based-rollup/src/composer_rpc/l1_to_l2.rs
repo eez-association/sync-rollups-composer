@@ -1063,7 +1063,7 @@ async fn simulate_l1_to_l2_call_on_l2(
                     "to": format!("{destination}"),
                     "data": format!("0x{}", hex::encode(data)),
                     "gas": "0x2faf080"
-                }, "latest"],
+                }, "pending"],  // pending = latest including mempool state
                 "id": 99959
             });
             if let Ok(resp) = client.post(l2_rpc_url).json(&direct_req).send().await {

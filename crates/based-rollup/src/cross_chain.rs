@@ -92,6 +92,23 @@ sol! {
 }
 
 sol! {
+    /// Rollups.sol error selectors used for terminal failure detection.
+    interface IRollupsErrors {
+        error ExecutionNotFound();
+    }
+}
+
+/// Check if revert data is the `ExecutionNotFound()` error selector.
+///
+/// `ExecutionNotFound` (0xed6bc750) is thrown by `_findAndApplyExecution` when
+/// no matching entry exists. This happens during L2 simulation when entries
+/// aren't loaded — it's a simulation artifact, NOT a real terminal failure.
+pub fn is_execution_not_found_error(data: &[u8]) -> bool {
+    use alloy_sol_types::SolError;
+    data.len() >= 4 && data[..4] == IRollupsErrors::ExecutionNotFound::SELECTOR
+}
+
+sol! {
     /// Bridge contract ABI bindings (protocol transactions only).
     interface IBridge {
         function initialize(address _manager, uint256 _rollupId, address _admin) external;
@@ -1025,7 +1042,7 @@ pub fn build_l2_to_l1_call_entries(
             "build_l2_to_l1_call_entries: REVERT entries built"
         );
         for (i, entry) in l1_deferred_entries.iter().enumerate() {
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::cross_chain",
                 idx = i,
                 action_hash = %entry.action_hash,
@@ -1039,7 +1056,7 @@ pub fn build_l2_to_l1_call_entries(
             );
         }
         for (i, entry) in l2_table_entries.iter().enumerate() {
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::cross_chain",
                 idx = i,
                 action_hash = %entry.action_hash,
@@ -2254,7 +2271,6 @@ pub fn attach_generic_state_deltas(
     roots: &[B256],
     rollup_id: u64,
     group_starts: &[usize],
-    revert_group_flags: &[bool],
 ) {
     let rollup_id_u256 = U256::from(rollup_id);
     let num_groups = group_starts.len();
@@ -2281,7 +2297,11 @@ pub fn attach_generic_state_deltas(
         let pre_root = roots[k];
         let post_root = roots[k + 1];
         let group_size = end.saturating_sub(start);
-        let is_revert_group = revert_group_flags.get(k).copied().unwrap_or(false);
+        // Detect REVERT groups by inspecting entry action types directly —
+        // no external revert_group_flags parameter needed.
+        let is_revert_group = entries[start..end]
+            .iter()
+            .any(|e| e.next_action.action_type == CrossChainActionType::Revert);
 
         // Build the per-entry root chain: [r_0, r_1, ..., r_N]
         // r_0 = pre_root, r_N = post_root, intermediates are synthetic.

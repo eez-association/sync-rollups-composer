@@ -948,7 +948,7 @@ where
                 raw_l1_tx: params.raw_l1_tx.clone(),
                 extra_l2_entries: continuation.l2_entries,
                 l1_entries: continuation.l1_entries,
-                tx_reverts: false, // TODO(revert-continue): wire from params in Step 5
+                tx_reverts: false, // L1→L2 deposits don't use L2→L1 REVERT mechanism
             });
         }
 

@@ -132,9 +132,6 @@ pub struct Driver<P, Pool> {
     pending_l1_entries: Vec<CrossChainExecutionEntry>,
     /// Index of the first entry in each trigger group within `pending_l1_entries`.
     pending_l1_group_starts: Vec<usize>,
-    /// Whether each L1 entry group uses REVERT/REVERT_CONTINUE (atomicity revert).
-    /// Indexed by group, parallel to `pending_l1_group_starts`.
-    pending_l1_revert_flags: Vec<bool>,
     /// Trigger metadata for groups that need L1 trigger txs (`executeL2TX`).
     /// Indexed by group. `None` for protocol-triggered groups (deposits).
     pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>,
@@ -442,7 +439,6 @@ where
             queued_l2_to_l1_calls,
             pending_l1_entries: Vec::new(),
             pending_l1_group_starts: Vec::new(),
-            pending_l1_revert_flags: Vec::new(),
             pending_l1_trigger_metadata: Vec::new(),
             prev_health_l2_head: 0,
             last_l2_head_advance: std::time::Instant::now(),
@@ -1183,7 +1179,6 @@ where
         // during the Sync transition. See issue #237.
         let pre_drain_l1_len = self.pending_l1_entries.len();
         let pre_drain_l1_groups = self.pending_l1_group_starts.len();
-        let pre_drain_l1_revert = self.pending_l1_revert_flags.len();
         let pre_drain_l1_meta = self.pending_l1_trigger_metadata.len();
 
         let mut queued_l1_txs_for_block: Vec<Bytes> = Vec::new();
@@ -1230,12 +1225,16 @@ where
                     // = true terminal failure. Skip L2 entries — protocol specifies no
                     // loadExecutionTable for terminal reverts.
                     // Terminal failure requires revert data > 4 bytes.
-                    // 4-byte data = error selector (e.g., ExecutionNotFound 0xed6bc750)
-                    // from simulation environment failures, NOT real terminal reverts.
-                    // Real Error(string) revert data is always >= 68 bytes (selector +
-                    // offset + length + padded string).
+                    // Terminal failure: delivery ALWAYS fails (e.g., RevertCounter).
+                    // RESULT(failed=true) with revert data that is NOT ExecutionNotFound.
+                    // ExecutionNotFound (0xed6bc750) = simulation artifact (entries not
+                    // loaded yet). Any OTHER revert data = real terminal failure from
+                    // the destination contract.
                     let is_terminal_failure = call.result_entry.next_action.failed
-                        && call.result_entry.next_action.data.len() > 4;
+                        && !call.result_entry.next_action.data.is_empty()
+                        && !crate::cross_chain::is_execution_not_found_error(
+                            &call.result_entry.next_action.data,
+                        );
                     if !is_terminal_failure {
                         rpc_entries.push(call.call_entry.clone());
                         if call.extra_l2_entries.is_empty() {
@@ -1273,7 +1272,6 @@ where
                         self.pending_l1_entries.extend(l1_entry);
                     }
                     self.pending_l1_group_starts.push(group_start);
-                    self.pending_l1_revert_flags.push(false); // deposits never revert
                     self.pending_l1_trigger_metadata.push(None); // protocol trigger, no L1 executeL2TX needed
 
                     // Save for re-push on build failure (call is consumed by value)
@@ -1327,7 +1325,6 @@ where
                     self.pending_l1_entries
                         .extend(w.l1_deferred_entries.iter().cloned());
                     self.pending_l1_group_starts.push(group_start);
-                    self.pending_l1_revert_flags.push(w.tx_reverts);
                     self.pending_l1_trigger_metadata.push(Some(TriggerMetadata {
                         user: w.user,
                         amount: w.amount,
@@ -1450,7 +1447,6 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
-                    self.pending_l1_revert_flags.truncate(pre_drain_l1_revert);
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -1508,7 +1504,6 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
-                    self.pending_l1_revert_flags.truncate(pre_drain_l1_revert);
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -1647,7 +1642,6 @@ where
                         // Entries will be re-queued on the next builder cycle.
                         self.pending_l1_entries.clear();
                         self.pending_l1_group_starts.clear();
-                        self.pending_l1_revert_flags.clear();
                         self.pending_l1_trigger_metadata.clear();
                         built.state_root // No entries → speculative IS clean
                     }
@@ -1664,7 +1658,6 @@ where
                     &intermediate_roots,
                     self.config.rollup_id,
                     &self.pending_l1_group_starts,
-                    &self.pending_l1_revert_flags,
                 );
                 info!(
                     target: "based_rollup::driver",
@@ -1738,7 +1731,6 @@ where
             }
             self.pending_l1_entries.clear();
             self.pending_l1_group_starts.clear();
-            self.pending_l1_revert_flags.clear();
             self.pending_l1_trigger_metadata.clear();
             return Ok(());
         };
@@ -1993,7 +1985,6 @@ where
         // Drain L1 entry queues for submission.
         let l1_entries_owned = std::mem::take(&mut self.pending_l1_entries);
         let group_starts = std::mem::take(&mut self.pending_l1_group_starts);
-        let revert_flags = std::mem::take(&mut self.pending_l1_revert_flags);
         let trigger_metadata = std::mem::take(&mut self.pending_l1_trigger_metadata);
 
         info!(
@@ -2208,35 +2199,34 @@ where
 
                             if !consumed_hashes.is_empty() {
                                 // Count how many entries we need per hash.
-                                // REVERT groups: entries 1+ (RESULT→REVERT, REVERT_CONTINUE)
-                                // are consumed INSIDE the reverted scope — their ExecutionConsumed
-                                // events are reverted by ScopeReverted. Only Entry 0 (L2TX trigger,
-                                // consumed outside the scope) needs verification.
-                                let revert_internal: std::collections::HashSet<usize> = {
-                                    let mut set = std::collections::HashSet::new();
-                                    for (k, &is_revert) in revert_flags.iter().enumerate() {
-                                        if !is_revert {
-                                            continue;
-                                        }
-                                        let start = group_starts.get(k).copied().unwrap_or(0);
-                                        let end = group_starts.get(k + 1).copied().unwrap_or(l1_entries.len());
-                                        // Skip entry 0 of the group (L2TX trigger, consumed outside scope).
-                                        // Mark entries 1..N as revert-internal (expected-unconsumed).
-                                        for idx in (start + 1)..end {
-                                            set.insert(idx);
-                                        }
-                                    }
-                                    set
-                                };
+                                // REVERT-internal entries: entries whose nextAction is REVERT
+                                // or whose actionHash matches REVERT_CONTINUE are consumed
+                                // INSIDE the reverted scope on L1 — their ExecutionConsumed
+                                // events are reverted by ScopeReverted. Skip them in the
+                                // consumption check. Only Entry 0 (L2TX trigger, consumed
+                                // outside the scope) needs verification.
+                                let revert_continue_hash =
+                                    crate::cross_chain::compute_revert_continue_hash(
+                                        alloy_primitives::U256::from(self.config.rollup_id),
+                                    );
 
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
                                     std::collections::HashMap::new();
-                                for (idx, e) in l1_entries.iter().enumerate() {
+                                for e in l1_entries.iter() {
                                     if e.action_hash == B256::ZERO {
                                         continue; // immediate entry
                                     }
-                                    if revert_internal.contains(&idx) {
-                                        continue; // REVERT-internal: consumed inside reverted scope
+                                    // Skip entries consumed inside the REVERT scope:
+                                    // - Entry with nextAction=REVERT (scope resolution → revert)
+                                    // - Entry with actionHash=REVERT_CONTINUE (consumed by
+                                    //   _getRevertContinuation)
+                                    if e.next_action.action_type
+                                        == crate::cross_chain::CrossChainActionType::Revert
+                                    {
+                                        continue;
+                                    }
+                                    if e.action_hash == revert_continue_hash {
+                                        continue;
                                     }
                                     *entry_counts.entry(e.action_hash).or_default() += 1;
                                 }
@@ -2334,7 +2324,6 @@ where
                             }
                             self.pending_l1_entries = l1_entries_owned;
                             self.pending_l1_group_starts = group_starts;
-                            self.pending_l1_revert_flags = revert_flags;
                             self.pending_l1_trigger_metadata = trigger_metadata;
                         }
                         return Ok(());
@@ -2351,7 +2340,6 @@ where
                 // Put entries back
                 self.pending_l1_entries = l1_entries_owned;
                 self.pending_l1_group_starts = group_starts;
-                self.pending_l1_revert_flags = revert_flags;
                 self.pending_l1_trigger_metadata = trigger_metadata;
             }
         }
@@ -2809,7 +2797,6 @@ where
         self.pending_submissions.clear();
         self.pending_l1_entries.clear();
         self.pending_l1_group_starts.clear();
-        self.pending_l1_revert_flags.clear();
         self.pending_l1_trigger_metadata.clear();
         self.pending_entry_verification_block = None;
         self.entry_verify_deferrals = 0;
