@@ -1666,6 +1666,37 @@ where
                     roots = intermediate_roots.len(),
                     "attached generic state deltas to unified L1 entries"
                 );
+
+                // Log composite entry hashes (VerifyL1Batch format) for byte-level debugging.
+                // composite = keccak256(abi.encode(actionHash, keccak256(abi.encode(nextAction))))
+                for (i, e) in self.pending_l1_entries.iter().enumerate() {
+                    use alloy_sol_types::SolType as _;
+                    let next_action_encoded =
+                        crate::cross_chain::ICrossChainManagerL2::Action::abi_encode(
+                            &e.next_action.to_sol_action(),
+                        );
+                    let next_action_hash = alloy_primitives::keccak256(&next_action_encoded);
+                    // abi.encode(bytes32, bytes32) = 64 bytes concatenated
+                    let mut composite_input = Vec::with_capacity(64);
+                    composite_input.extend_from_slice(e.action_hash.as_slice());
+                    composite_input.extend_from_slice(next_action_hash.as_slice());
+                    let composite = alloy_primitives::keccak256(&composite_input);
+                    info!(
+                        target: "based_rollup::driver",
+                        idx = i,
+                        action_hash = %e.action_hash,
+                        next_action_type = ?e.next_action.action_type,
+                        next_action_rollup_id = %e.next_action.rollup_id,
+                        next_action_dest = %e.next_action.destination,
+                        next_action_scope = ?e.next_action.scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                        next_action_data_hex = %format!("0x{}", hex::encode(&e.next_action.data)),
+                        next_action_failed = e.next_action.failed,
+                        current_state = %e.state_deltas.first().map(|d| format!("{}", d.current_state)).unwrap_or_default(),
+                        new_state = %e.state_deltas.first().map(|d| format!("{}", d.new_state)).unwrap_or_default(),
+                        composite_verify_hash = %composite,
+                        "L1 entry [byte-level] for VerifyL1Batch comparison"
+                    );
+                }
             }
 
             // Queue ALL blocks for L1 submission (including empty ones).
