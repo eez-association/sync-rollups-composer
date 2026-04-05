@@ -92,23 +92,6 @@ sol! {
 }
 
 sol! {
-    /// Rollups.sol error selectors used for terminal failure detection.
-    interface IRollupsErrors {
-        error ExecutionNotFound();
-    }
-}
-
-/// Check if revert data is the `ExecutionNotFound()` error selector.
-///
-/// `ExecutionNotFound` (0xed6bc750) is thrown by `_findAndApplyExecution` when
-/// no matching entry exists. This happens during L2 simulation when entries
-/// aren't loaded — it's a simulation artifact, NOT a real terminal failure.
-pub fn is_execution_not_found_error(data: &[u8]) -> bool {
-    use alloy_sol_types::SolError;
-    data.len() >= 4 && data[..4] == IRollupsErrors::ExecutionNotFound::SELECTOR
-}
-
-sol! {
     /// Bridge contract ABI bindings (protocol transactions only).
     interface IBridge {
         function initialize(address _manager, uint256 _rollupId, address _admin) external;

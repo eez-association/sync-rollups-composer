@@ -1224,11 +1224,13 @@ where
                     // RESULT(failed=true) with non-empty revert data after enrichment
                     // = true terminal failure. Skip L2 entries — protocol specifies no
                     // loadExecutionTable for terminal reverts.
-                    // Terminal failure requires revert data > 4 bytes.
-                    // 4-byte data = error selector (e.g., ExecutionNotFound 0xed6bc750)
-                    // from simulation environment failures, NOT real terminal reverts.
-                    // Real Error(string) revert data is always >= 68 bytes (selector +
-                    // offset + length + padded string).
+                    // Terminal failure requires revert data > 4 bytes:
+                    // - Simulation artifacts: exactly 4 bytes (error selector only:
+                    //   ExecutionNotFound, CallExecutionFailed, ProxyCallFailed, etc.)
+                    // - Real contract reverts: > 4 bytes (Error(string) ≥ 68 bytes,
+                    //   Panic(uint256) = 36 bytes, custom errors with params > 4 bytes)
+                    // This reliably distinguishes "simulation failed because entries
+                    // aren't loaded" from "destination contract always reverts."
                     let is_terminal_failure = call.result_entry.next_action.failed
                         && call.result_entry.next_action.data.len() > 4;
                     if !is_terminal_failure {

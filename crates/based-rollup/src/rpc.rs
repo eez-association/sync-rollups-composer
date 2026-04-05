@@ -1076,7 +1076,7 @@ where
         // Build L2 table entries and L1 deferred entries for the continuation pattern.
         // Pass rlp_encoded_tx for the L2TX trigger entries on L1.
         let continuation =
-            build_l2_to_l1_continuation_entries(&detected, rollup_id, params.raw_l2_tx.as_ref(), false);
+            build_l2_to_l1_continuation_entries(&detected, rollup_id, params.raw_l2_tx.as_ref(), params.tx_reverts);
 
         let l2_count = continuation.l2_entries.len();
         let l1_count = continuation.l1_entries.len();

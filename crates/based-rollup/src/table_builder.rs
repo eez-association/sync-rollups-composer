@@ -2035,7 +2035,7 @@ pub fn build_l2_to_l1_continuation_entries(
             compute_revert_continue_hash, revert_action,
         };
 
-        let last = l1_entries.last_mut().unwrap();
+        let last = l1_entries.last_mut().expect("l1_entries non-empty (checked above)");
         // Verify the last entry has a terminal RESULT nextAction
         if last.next_action.action_type == CrossChainActionType::Result
             && last.next_action.rollup_id == our_rollup_id

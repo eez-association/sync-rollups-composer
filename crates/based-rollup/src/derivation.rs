@@ -419,18 +419,13 @@ impl DerivationPipeline {
             // These entries' deltas should NOT be chained into effective_state_root.
             // In deferred_entries, only Entry 0 (L2TX trigger, consumed outside scope)
             // survives consumed-filtering. Its delta would incorrectly advance the root.
+            // All deferred entries in a REVERT batch belong to the REVERT group.
+            // Entry verification hold ensures REVERT batches are not mixed with
+            // normal deposits — the builder submits them in their own postBatch.
             let revert_action_hashes: std::collections::HashSet<B256> = if batch_has_revert {
                 entries
                     .iter()
                     .filter(|e| e.action_hash != B256::ZERO) // skip immediate
-                    .filter(|e| {
-                        // Entry belongs to a REVERT group if it or any sibling has
-                        // nextAction=Revert/RevertContinue. For simplicity, mark ALL
-                        // deferred entries in a batch that has REVERT — this is correct
-                        // because REVERT groups are submitted in their own batch
-                        // (entry verification hold ensures no mixing with normal batches).
-                        true
-                    })
                     .map(|e| e.action_hash)
                     .collect()
             } else {
