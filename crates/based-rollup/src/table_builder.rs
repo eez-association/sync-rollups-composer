@@ -314,7 +314,13 @@ pub fn build_continuation_entries(
     //                 [REVERT_CONTINUE→CALL_B(scope=[1])],
     //                 [RESULT_B→RESULT(terminal)]
     //   - L1 entries remain simple: [CALL_A→RESULT_A], [CALL_B→RESULT_B]
-    let has_partial_revert = {
+    // DISABLED: L1→L2 partial revert detection is not yet reliable.
+    // The in_reverted_frame propagation through the L1→L2 iterative discovery
+    // pipeline has edge cases (CallTwice regression). The revertContinue (L1→L2)
+    // test needs a different approach — see project memory for details.
+    // TODO: Re-enable when in_reverted_frame is reliable for L1→L2 direction.
+    let has_partial_revert = false;
+    let _has_partial_revert_disabled = {
         let any_reverted = l1_to_l2_calls.iter().any(|(_, c)| c.in_reverted_frame);
         let any_non_reverted = l1_to_l2_calls.iter().any(|(_, c)| !c.in_reverted_frame);
         any_reverted && any_non_reverted
