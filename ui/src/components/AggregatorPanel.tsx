@@ -540,36 +540,57 @@ export function AggregatorPanel({
     <div className={styles.panel}>
       {/* Hero + Visualization — single card */}
       <div className={styles.vizContainer}>
-        {/* Inline hero strip above the SVG */}
-        <div className={styles.heroStrip}>
-          <span className={styles.heroBadge}><IconSplit size={11} /> Cross-Chain Aggregator</span>
-          <span className={styles.heroTitle}>Split. Swap. Atomic.</span>
-          <span className={styles.heroStatsInline}>
-            <span>3 Hops</span><span className={styles.dot}>·</span>
-            <span>2 AMMs</span><span className={styles.dot}>·</span>
-            <span>Depth 7</span><span className={styles.dot}>·</span>
-            <span>1 TX</span>
-          </span>
+        {/* Hero section — inside the card, above the SVG */}
+        <div className={styles.hero}>
+          <div className={styles.heroBadge}>
+            <IconSplit size={12} />
+            Cross-Chain Aggregator
+          </div>
+          <h2 className={styles.heroTitle}>Split. Swap. Atomic.</h2>
+          <div className={styles.heroStats}>
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>3</span>
+              <span className={styles.heroStatLabel}>Hops</span>
+            </div>
+            <div className={styles.heroStatDivider} />
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>2</span>
+              <span className={styles.heroStatLabel}>AMMs</span>
+            </div>
+            <div className={styles.heroStatDivider} />
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>7</span>
+              <span className={styles.heroStatLabel}>Depth</span>
+            </div>
+            <div className={styles.heroStatDivider} />
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>1</span>
+              <span className={styles.heroStatLabel}>Transaction</span>
+            </div>
+          </div>
         </div>
 
-        <button
-          className={styles.compareBtn}
-          data-active={showRouteDuel ? "true" : "false"}
-          onClick={() => setShowRouteDuel(!showRouteDuel)}
-          title="Toggle route comparison"
-        >
-          {showRouteDuel ? "Hide" : "Compare"}
-        </button>
-        <CrossChainFlowViz
-          vizPhase={state.vizPhase}
-          splitPercent={state.splitPercent}
-          l1ReserveA={state.l1ReserveA}
-          l1ReserveB={state.l1ReserveB}
-          l2ReserveA={state.l2ReserveA}
-          l2ReserveB={state.l2ReserveB}
-          showRouteDuel={showRouteDuel}
-          improvement={state.improvement}
-        />
+        {/* SVG visualization below hero */}
+        <div className={styles.vizInner}>
+          <button
+            className={styles.compareBtn}
+            data-active={showRouteDuel ? "true" : "false"}
+            onClick={() => setShowRouteDuel(!showRouteDuel)}
+            title="Toggle route comparison"
+          >
+            {showRouteDuel ? "Hide" : "Compare"}
+          </button>
+          <CrossChainFlowViz
+            vizPhase={state.vizPhase}
+            splitPercent={state.splitPercent}
+            l1ReserveA={state.l1ReserveA}
+            l1ReserveB={state.l1ReserveB}
+            l2ReserveA={state.l2ReserveA}
+            l2ReserveB={state.l2ReserveB}
+            showRouteDuel={showRouteDuel}
+            improvement={state.improvement}
+          />
+        </div>
       </div>
 
       {/* Contract Lanes */}

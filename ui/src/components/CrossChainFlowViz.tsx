@@ -134,6 +134,16 @@ function SvgDefs() {
         <stop offset="100%" stopColor="rgba(52,211,153,0.05)" />
       </linearGradient>
 
+      {/* Pool liquid gradients */}
+      <linearGradient id="liquidA" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor="#818cf8" stopOpacity={0.9} />
+        <stop offset="100%" stopColor="#6366f1" stopOpacity={0.7} />
+      </linearGradient>
+      <linearGradient id="liquidB" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor="#34d399" stopOpacity={0.8} />
+        <stop offset="100%" stopColor="#10b981" stopOpacity={0.6} />
+      </linearGradient>
+
       {/* Wave clip paths for pools */}
       <clipPath id="l1PoolClip">
         <rect x="0" y="0" width="120" height="50" rx="6" />
@@ -158,7 +168,15 @@ interface ParticleStreamProps {
   active: boolean;
   count?: number;
   speed?: number;
+  particleSize?: "small" | "normal" | "large";
 }
+
+/* Size presets: plasma radius, halo radius, core radius */
+const PARTICLE_SIZES = {
+  small:  { plasma: 5,  halo: 3, core: 1   },
+  normal: { plasma: 7,  halo: 4, core: 1.5 },
+  large:  { plasma: 10, halo: 6, core: 2.5 },
+} as const;
 
 function ParticleStream({
   pathData,
@@ -166,8 +184,10 @@ function ParticleStream({
   active,
   count = 5,
   speed = 1.0,
+  particleSize = "normal",
 }: ParticleStreamProps) {
   if (!active) return null;
+  const sz = PARTICLE_SIZES[particleSize];
   return (
     <g>
       {Array.from({ length: count }, (_, i) => {
@@ -176,7 +196,7 @@ function ParticleStream({
         return (
           <g key={i}>
             {/* Plasma tail — outermost, soft, displaced */}
-            <circle r={7} fill={color} opacity={0.12} filter="url(#plasma)">
+            <circle r={sz.plasma} fill={color} opacity={0.12} filter="url(#plasma)">
               <animateMotion
                 dur={dur}
                 begin={begin}
@@ -185,7 +205,7 @@ function ParticleStream({
               />
             </circle>
             {/* Color halo — mid-layer glow */}
-            <circle r={4} fill={color} opacity={0.35} filter="url(#glow)">
+            <circle r={sz.halo} fill={color} opacity={0.35} filter="url(#glow)">
               <animateMotion
                 dur={dur}
                 begin={begin}
@@ -194,7 +214,7 @@ function ParticleStream({
               />
             </circle>
             {/* White core — crisp center */}
-            <circle r={1.5} fill={COL.white} opacity={0.9}>
+            <circle r={sz.core} fill={COL.white} opacity={0.9}>
               <animateMotion
                 dur={dur}
                 begin={begin}
@@ -346,55 +366,70 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
   const liquidAHeight = ratioA * innerH;
   const liquidBHeight = (1 - ratioA) * innerH;
 
+  const poolX = x - 60;
+  const poolY = y - 25;
+  const poolW = 120;
+
   const borderColor = chain === "l1"
     ? (active ? "rgba(99,102,241,0.6)" : "rgba(99,102,241,0.25)")
     : (active ? "rgba(52,211,153,0.6)" : "rgba(52,211,153,0.25)");
 
   // Wave path for the liquid surface
-  const waveY = y - 25 + 2 + liquidBHeight;
+  const waveY = poolY + 2 + liquidBHeight;
 
   return (
     <g>
       {/* Glass container outer */}
       <rect
-        x={x - 60}
-        y={y - 25}
-        width={120}
+        x={poolX}
+        y={poolY}
+        width={poolW}
         height={50}
         rx={6}
         fill="rgba(18,18,28,0.6)"
         stroke={borderColor}
-        strokeWidth={active ? 1.2 : 0.6}
+        strokeWidth={active ? 1.4 : 0.8}
       />
 
-      {/* Token B fill (blue/USDC) — top portion */}
+      {/* Token B fill — top portion (gradient) */}
       <rect
-        x={x - 58}
-        y={y - 23}
-        width={116}
+        x={poolX + 2}
+        y={poolY + 2}
+        width={poolW - 4}
         height={liquidBHeight}
         rx={4}
-        fill={COL.blue}
-        opacity={0.15}
-      />
-
-      {/* Token A fill (gold/WETH) — bottom portion */}
-      <rect
-        x={x - 58}
-        y={y - 23 + liquidBHeight}
-        width={116}
-        height={liquidAHeight}
-        rx={4}
-        fill={COL.gold}
+        fill="url(#liquidB)"
         opacity={0.2}
       />
 
+      {/* Token A fill — bottom portion (gradient) */}
+      <rect
+        x={poolX + 2}
+        y={poolY + 2 + liquidBHeight}
+        width={poolW - 4}
+        height={liquidAHeight}
+        rx={4}
+        fill="url(#liquidA)"
+        opacity={0.25}
+      />
+
+      {/* Glass reflection — subtle white gradient at top */}
+      <rect
+        x={poolX}
+        y={poolY}
+        width={poolW}
+        height={4}
+        rx={2}
+        fill="white"
+        opacity={0.06}
+      />
+
       {/* Animated wave surface at the A/B boundary */}
-      <g opacity={0.4}>
+      <g opacity={0.5}>
         <path
-          d={`M${x - 58},${waveY} q15,-3 30,0 t30,0 t30,0 t30,0`}
+          d={`M${poolX + 2},${waveY} q15,-3 30,0 t30,0 t30,0 t30,0`}
           fill="none"
-          stroke={COL.gold}
+          stroke="#818cf8"
           strokeWidth={0.8}
           opacity={0.6}
         >
@@ -407,9 +442,9 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
           />
         </path>
         <path
-          d={`M${x - 58},${waveY + 1} q12,2 24,0 t24,0 t24,0 t24,0 t24,0`}
+          d={`M${poolX + 2},${waveY + 1} q12,2 24,0 t24,0 t24,0 t24,0 t24,0`}
           fill="none"
-          stroke={COL.blue}
+          stroke="#34d399"
           strokeWidth={0.5}
           opacity={0.4}
         >
@@ -426,9 +461,9 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
       {/* Reserve labels */}
       {reserveA !== null && (
         <text
-          x={x - 52}
+          x={poolX + 8}
           y={y + 18}
-          fill={COL.gold}
+          fill="#818cf8"
           fontSize={7}
           fontFamily="var(--mono)"
           opacity={0.7}
@@ -440,7 +475,7 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         <text
           x={x + 8}
           y={y + 18}
-          fill={COL.blue}
+          fill="#34d399"
           fontSize={7}
           fontFamily="var(--mono)"
           opacity={0.7}
@@ -452,9 +487,9 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
       {/* Shimmer overlay when active */}
       {active && (
         <rect
-          x={x - 58}
-          y={y - 23}
-          width={116}
+          x={poolX + 2}
+          y={poolY + 2}
+          width={poolW - 4}
           height={46}
           rx={4}
           fill="none"
@@ -783,57 +818,63 @@ export function CrossChainFlowViz({
 
         {/* ══════════════ Layer 5: Particles ══════════════ */}
 
-        {/* Phase 1: User -> Aggregator */}
+        {/* Pre-split: User -> Aggregator (large gold particles) */}
         <ParticleStream
           pathData={PATHS.userToAgg}
           color={COL.gold}
           active={vizPhase >= 1 && !isComplete}
           speed={0.6}
           count={3}
+          particleSize="large"
         />
 
-        {/* Phase 2: Aggregator -> L1 AMM (local split) */}
+        {/* Post-split LOCAL: Aggregator -> L1 AMM (smaller gold, proportional) */}
         <ParticleStream
           pathData={PATHS.aggToL1Amm}
           color={COL.gold}
           active={vizPhase >= 2 && !isComplete}
           speed={0.8}
-          count={Math.max(2, Math.round(splitPercent / 20))}
+          count={Math.max(2, Math.round(splitPercent / 25))}
+          particleSize="small"
         />
 
-        {/* Phase 3: Aggregator -> Portal (down) */}
+        {/* Post-split REMOTE: Aggregator -> Portal (smaller gold) */}
         <ParticleStream
           pathData={PATHS.aggToPortalDown}
           color={COL.gold}
           active={vizPhase >= 3 && !isComplete}
           speed={0.7}
-          count={3}
+          count={Math.max(2, Math.round((100 - splitPercent) / 25))}
+          particleSize="small"
         />
-        {/* Portal crossing particles -- cyan during bridge */}
+        {/* Portal crossing particles -- cyan during bridge (small) */}
         <ParticleStream
           pathData={PATHS.portalToL2Exec}
           color={portalDownActive ? COL.cyan : COL.gold}
           active={vizPhase >= 3 && !isComplete}
           speed={0.9}
           count={4}
+          particleSize="small"
         />
 
-        {/* Phase 4: L1 AMM -> Output */}
+        {/* L1 output: L1 AMM -> Output (small blue) */}
         <ParticleStream
           pathData={PATHS.l1AmmToOutput}
           color={COL.blue}
           active={vizPhase >= 4 && !isComplete}
           speed={0.8}
           count={3}
+          particleSize="small"
         />
 
-        {/* Phase 5: L2 Executor -> L2 AMM (color transition) */}
+        {/* Phase 5: L2 Executor -> L2 AMM (color transition, small) */}
         <ParticleStream
           pathData={PATHS.l2ExecToL2Amm}
           color={COL.gold}
           active={vizPhase >= 5 && !isComplete}
           speed={0.8}
           count={3}
+          particleSize="small"
         />
         {/* Overlaid blue particles for transition effect */}
         <ParticleStream
@@ -842,23 +883,40 @@ export function CrossChainFlowViz({
           active={vizPhase >= 5 && !isComplete}
           speed={1.1}
           count={2}
+          particleSize="small"
         />
 
-        {/* Phase 6: L2 AMM -> Portal (up) -> Output */}
+        {/* L2 output: L2 AMM -> Portal (up) (small blue) */}
         <ParticleStream
           pathData={PATHS.l2AmmToPortalUp}
           color={portalUpActive ? COL.cyan : COL.blue}
           active={vizPhase >= 6 && !isComplete}
           speed={1.0}
           count={4}
+          particleSize="small"
         />
+        {/* L2 output: Portal -> Output (small blue) */}
         <ParticleStream
           pathData={PATHS.portalToOutput}
           color={COL.blue}
           active={vizPhase >= 6 && !isComplete}
           speed={0.7}
           count={3}
+          particleSize="small"
         />
+
+        {/* Merge pulse at Output node when both streams converge */}
+        {vizPhase >= 6 && !isComplete && (
+          <g>
+            <circle cx={820} cy={80} r={8} fill={COL.blue} opacity={0.4} filter="url(#glow)">
+              <animate attributeName="r" values="6;12;6" dur="1.5s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.3;0.6;0.3" dur="1.5s" repeatCount="indefinite" />
+            </circle>
+            <circle cx={820} cy={80} r={3} fill={COL.white} opacity={0.8}>
+              <animate attributeName="r" values="2;4;2" dur="1.5s" repeatCount="indefinite" />
+            </circle>
+          </g>
+        )}
 
         {/* Ambient idle particles -- always visible regardless of phase */}
         <AmbientParticles />
