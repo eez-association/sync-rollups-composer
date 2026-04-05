@@ -2164,24 +2164,30 @@ pub fn build_l2_to_l1_continuation_entries(
                 );
             }
             // Find the L1 entry whose nextAction chains to the first non-reverted call.
-            // This is the entry whose nextAction.action_type == Call and whose
-            // nextAction matches the non-reverted call's delivery (same destination,
-            // data, source_address, scope).
-            //
-            // In the simple case (2 calls, no children):
-            //   Entry 1 has nextAction = CALL(destination=non_reverted.dest, scope=[1])
+            // The boundary is the entry whose nextAction.scope matches the first
+            // non-reverted call's expected scope. For same-target calls (e.g.,
+            // SelfCallerWithRevert: both calls target Counter.increment()), we can't
+            // distinguish by destination/data alone — use scope to disambiguate.
+            // The non-reverted call's scope is computed identically to the main loop's
+            // sibling scope logic: last element = root_pos.
+            let first_non_reverted = l2_to_l1_calls[non_rev_pos].1;
+            let expected_scope = if first_non_reverted.scope.is_empty() {
+                vec![U256::from(non_rev_pos)]
+            } else {
+                let mut s = first_non_reverted.scope
+                    [..first_non_reverted.scope.len().saturating_sub(1)]
+                    .to_vec();
+                s.push(U256::from(non_rev_pos));
+                s
+            };
+            tracing::info!(
+                target: "based_rollup::table_builder",
+                expected_scope = ?expected_scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                "partial revert: searching for entry with nextAction.scope matching non-reverted call"
+            );
             let boundary_idx = l1_entries.iter().position(|e| {
                 e.next_action.action_type == CrossChainActionType::Call
-                    && !l2_to_l1_calls.iter().any(|(_, c)| {
-                        c.in_reverted_frame
-                            && c.call_action.destination == e.next_action.destination
-                            && c.call_action.data == e.next_action.data
-                    })
-                    && l2_to_l1_calls.iter().any(|(_, c)| {
-                        !c.in_reverted_frame
-                            && c.call_action.destination == e.next_action.destination
-                            && c.call_action.data == e.next_action.data
-                    })
+                    && e.next_action.scope == expected_scope
             });
 
             if let Some(idx) = boundary_idx {
