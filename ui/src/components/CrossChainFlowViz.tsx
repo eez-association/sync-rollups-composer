@@ -468,7 +468,7 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
           fontFamily="var(--mono)"
           opacity={0.7}
         >
-          A: {formatReserve(reserveA)}
+          {chain === "l1" ? "WETH" : "wWETH"}: {formatReserve(reserveA)}
         </text>
       )}
       {reserveB !== null && (
@@ -480,7 +480,7 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
           fontFamily="var(--mono)"
           opacity={0.7}
         >
-          B: {formatReserve(reserveB)}
+          {chain === "l1" ? "USDC" : "wUSDC"}: {formatReserve(reserveB)}
         </text>
       )}
 

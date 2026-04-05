@@ -82,7 +82,8 @@ interface TxReceipt {
   gasUsed?: string;
 }
 
-const TOKEN_DECIMALS = 18;
+const WETH_DECIMALS = 18;
+const USDC_DECIMALS = 6;
 
 const INITIAL_STATE: AggregatorState = {
   phase: "idle",
@@ -214,7 +215,7 @@ export function useAggregator(
       const usdc = config.aggUsdc;
 
       const s = stateRef.current;
-      const totalWei = parseTokenAmount(s.totalAmount || "0", TOKEN_DECIMALS);
+      const totalWei = parseTokenAmount(s.totalAmount || "0", WETH_DECIMALS);
       const localWei = (totalWei * BigInt(s.splitPercent)) / 100n;
       const remoteWei = totalWei - localWei;
 
@@ -315,21 +316,21 @@ export function useAggregator(
 
         setState((prev) => ({
           ...prev,
-          l1ReserveA: l1ResA !== null ? formatTokenAmount(l1ResA, TOKEN_DECIMALS) : prev.l1ReserveA,
-          l1ReserveB: l1ResB !== null ? formatTokenAmount(l1ResB, TOKEN_DECIMALS) : prev.l1ReserveB,
-          l2ReserveA: l2ResA !== null ? formatTokenAmount(l2ResA, TOKEN_DECIMALS) : prev.l2ReserveA,
-          l2ReserveB: l2ResB !== null ? formatTokenAmount(l2ResB, TOKEN_DECIMALS) : prev.l2ReserveB,
-          l1Quote: l1QuoteRaw !== null ? formatTokenAmount(l1QuoteRaw, TOKEN_DECIMALS) : prev.l1Quote,
-          l2Quote: l2QuoteRaw !== null ? formatTokenAmount(l2QuoteRaw, TOKEN_DECIMALS) : prev.l2Quote,
+          l1ReserveA: l1ResA !== null ? formatTokenAmount(l1ResA, WETH_DECIMALS) : prev.l1ReserveA,
+          l1ReserveB: l1ResB !== null ? formatTokenAmount(l1ResB, USDC_DECIMALS) : prev.l1ReserveB,
+          l2ReserveA: l2ResA !== null ? formatTokenAmount(l2ResA, WETH_DECIMALS) : prev.l2ReserveA,
+          l2ReserveB: l2ResB !== null ? formatTokenAmount(l2ResB, USDC_DECIMALS) : prev.l2ReserveB,
+          l1Quote: l1QuoteRaw !== null ? formatTokenAmount(l1QuoteRaw, USDC_DECIMALS) : prev.l1Quote,
+          l2Quote: l2QuoteRaw !== null ? formatTokenAmount(l2QuoteRaw, USDC_DECIMALS) : prev.l2Quote,
           singlePoolQuote:
             singleQuoteRaw !== null
-              ? formatTokenAmount(singleQuoteRaw, TOKEN_DECIMALS)
+              ? formatTokenAmount(singleQuoteRaw, USDC_DECIMALS)
               : prev.singlePoolQuote,
-          ethBalance: ethRaw !== null ? formatTokenAmount(ethRaw, TOKEN_DECIMALS) : prev.ethBalance,
+          ethBalance: ethRaw !== null ? formatTokenAmount(ethRaw, WETH_DECIMALS) : prev.ethBalance,
           wethBalance:
-            wethRaw !== null ? formatTokenAmount(wethRaw, TOKEN_DECIMALS) : prev.wethBalance,
+            wethRaw !== null ? formatTokenAmount(wethRaw, WETH_DECIMALS) : prev.wethBalance,
           usdcBalance:
-            usdcRaw !== null ? formatTokenAmount(usdcRaw, TOKEN_DECIMALS) : prev.usdcBalance,
+            usdcRaw !== null ? formatTokenAmount(usdcRaw, USDC_DECIMALS) : prev.usdcBalance,
         }));
       } catch {
         /* poll failure -- skip this tick */
@@ -391,7 +392,7 @@ export function useAggregator(
         log("WETH address not configured", "err");
         return;
       }
-      const weiAmount = parseTokenAmount(amount, TOKEN_DECIMALS);
+      const weiAmount = parseTokenAmount(amount, WETH_DECIMALS);
       const valueHex = "0x" + weiAmount.toString(16);
       log(`Wrapping ${amount} ETH to WETH...`, "info");
       try {
@@ -423,7 +424,7 @@ export function useAggregator(
         log("WETH address not configured", "err");
         return;
       }
-      const weiAmount = parseTokenAmount(amount, TOKEN_DECIMALS);
+      const weiAmount = parseTokenAmount(amount, WETH_DECIMALS);
       log(`Unwrapping ${amount} WETH to ETH...`, "info");
       try {
         const txHash = await sendL1Tx({
@@ -462,7 +463,7 @@ export function useAggregator(
       }
 
       const startTime = Date.now();
-      const totalWei = parseTokenAmount(totalAmount, TOKEN_DECIMALS);
+      const totalWei = parseTokenAmount(totalAmount, WETH_DECIMALS);
       const localWei = (totalWei * BigInt(splitPercent)) / 100n;
 
       // Reset execution state
@@ -502,7 +503,7 @@ export function useAggregator(
         if (currentWeth < totalWei) {
           const diff = totalWei - currentWeth;
           const diffHex = "0x" + diff.toString(16);
-          log(`Wrapping ${formatTokenAmount(diff, TOKEN_DECIMALS)} ETH to WETH...`, "info");
+          log(`Wrapping ${formatTokenAmount(diff, WETH_DECIMALS)} ETH to WETH...`, "info");
           const wrapHash = await sendL1Tx({
             to: weth,
             data: encodeDeposit(),
@@ -574,7 +575,7 @@ export function useAggregator(
         usdcBefore = decodeUint256Result(usdcResult);
         setState((s) => ({
           ...s,
-          usdcBalanceBefore: formatTokenAmount(usdcBefore, TOKEN_DECIMALS),
+          usdcBalanceBefore: formatTokenAmount(usdcBefore, USDC_DECIMALS),
         }));
       } catch {
         /* non-critical */
@@ -709,15 +710,15 @@ export function useAggregator(
       }
 
       const totalOutput = usdcAfter - usdcBefore;
-      const totalOutputStr = formatTokenAmount(totalOutput > 0n ? totalOutput : 0n, TOKEN_DECIMALS);
-      const usdcAfterStr = formatTokenAmount(usdcAfter, TOKEN_DECIMALS);
+      const totalOutputStr = formatTokenAmount(totalOutput > 0n ? totalOutput : 0n, USDC_DECIMALS);
+      const usdcAfterStr = formatTokenAmount(usdcAfter, USDC_DECIMALS);
 
       // Compute improvement vs single pool
       const singleQuoteStr = stateRef.current.singlePoolQuote;
       let improvementStr: string | null = null;
       if (singleQuoteStr && totalOutput > 0n) {
         try {
-          const singleQuoteWei = parseTokenAmount(singleQuoteStr, TOKEN_DECIMALS);
+          const singleQuoteWei = parseTokenAmount(singleQuoteStr, USDC_DECIMALS);
           if (singleQuoteWei > 0n) {
             const diff = totalOutput - singleQuoteWei;
             // Multiply by 100_000 for 3 decimal places, then divide
