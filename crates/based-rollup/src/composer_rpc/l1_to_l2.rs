@@ -2452,10 +2452,16 @@ async fn trace_and_detect_internal_calls(
 
                     if truly_new.is_empty() {
                         // Update in_reverted_frame from the LAST retrace.
-                        // The initial trace runs without entries loaded, so ALL proxy calls
-                        // appear in reverted frames (ExecutionNotFound). After loading entries,
-                        // the retrace shows the correct revert frame status: only calls inside
-                        // try/catch that reverts for business logic have in_reverted_frame=true.
+                        for (ni, nd) in new_detected.iter().enumerate() {
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                ni,
+                                dest = %nd.destination,
+                                trace_depth = nd.trace_depth,
+                                in_reverted_frame = nd.in_reverted_frame,
+                                "L1 retrace new_detected for in_reverted_frame update"
+                            );
+                        }
                         for existing in detected_calls.iter_mut() {
                             if let Some(retrace_call) = new_detected.iter().find(|r| {
                                 r.destination == existing.destination
