@@ -1117,13 +1117,6 @@ pub fn convert_l1_entries_to_l2_pairs(
         .iter()
         .any(|e| e.next_action.action_type == CrossChainActionType::Call);
 
-    // Detect REVERT batches — any entry with nextAction=REVERT indicates the
-    // batch uses scope revert (§D.12 atomicity). REVERT entries are L1-only;
-    // L2 entries are already in the block body's loadExecutionTable calldata.
-    let has_revert = l1_entries
-        .iter()
-        .any(|e| e.next_action.action_type == CrossChainActionType::Revert);
-
     let mut result = Vec::with_capacity(l1_entries.len() * 2);
     for entry in l1_entries {
         // Skip continuation entries (nextAction is CALL, not RESULT).
