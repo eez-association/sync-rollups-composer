@@ -906,6 +906,12 @@ where
                 })
             };
 
+        // Detect terminal failure BEFORE consuming return_data.
+        // Terminal = delivery always fails with real revert data (not ExecutionNotFound).
+        let terminal_failure = !call_success
+            && !return_data.is_empty()
+            && !crate::cross_chain::is_execution_not_found_error(&return_data);
+
         let (call_entry, result_entry) = crate::cross_chain::build_cross_chain_call_entries(
             rollup_id,
             first_call.destination,
@@ -941,12 +947,24 @@ where
                     None::<()>,
                 ));
             }
+            // Terminal failure: when L2 delivery always fails (e.g., RevertCounter),
+            // don't load L2 entries — protocol specifies no loadExecutionTable.
+            let effective_l2_entries = if terminal_failure {
+                tracing::info!(
+                    target: "based_rollup::rpc",
+                    %call_id,
+                    "terminal failure: clearing L2 entries (delivery always reverts)"
+                );
+                vec![]
+            } else {
+                continuation.l2_entries
+            };
             queue.push(QueuedCrossChainCall {
                 call_entry,
                 result_entry,
                 effective_gas_price: params.gas_price,
                 raw_l1_tx: params.raw_l1_tx.clone(),
-                extra_l2_entries: continuation.l2_entries,
+                extra_l2_entries: effective_l2_entries,
                 l1_entries: continuation.l1_entries,
                 tx_reverts: false, // L1→L2 deposits don't use L2→L1 REVERT mechanism
             });
