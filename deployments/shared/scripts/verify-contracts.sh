@@ -37,6 +37,15 @@ if [ -f "$SHARED_DIR/rollup.env" ]; then
     FLASH_NFT_ADDRESS=$(grep "^FLASH_NFT_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
     FLASH_EXECUTOR_L2_PROXY_ADDRESS=$(grep "^FLASH_EXECUTOR_L2_PROXY_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
     FLASH_EXECUTOR_L1_ADDRESS=$(grep "^FLASH_EXECUTOR_L1_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_WETH_ADDRESS=$(grep "^AGG_WETH_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_USDC_ADDRESS=$(grep "^AGG_USDC_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_L1_AMM_ADDRESS=$(grep "^AGG_L1_AMM_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_AGGREGATOR_ADDRESS=$(grep "^AGG_AGGREGATOR_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_L2_EXECUTOR_ADDRESS=$(grep "^AGG_L2_EXECUTOR_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_L2_AMM_ADDRESS=$(grep "^AGG_L2_AMM_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_L2_EXECUTOR_PROXY_ADDRESS=$(grep "^AGG_L2_EXECUTOR_PROXY_ADDRESS=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_WRAPPED_WETH_L2=$(grep "^AGG_WRAPPED_WETH_L2=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
+    AGG_WRAPPED_USDC_L2=$(grep "^AGG_WRAPPED_USDC_L2=" "$SHARED_DIR/rollup.env" | cut -d= -f2 || echo "")
 else
     ROLLUPS_ADDRESS="${ROLLUPS_ADDRESS:-}"
     VERIFIER_ADDRESS="${VERIFIER_ADDRESS:-}"
@@ -52,6 +61,15 @@ else
     FLASH_NFT_ADDRESS="${FLASH_NFT_ADDRESS:-}"
     FLASH_EXECUTOR_L2_PROXY_ADDRESS="${FLASH_EXECUTOR_L2_PROXY_ADDRESS:-}"
     FLASH_EXECUTOR_L1_ADDRESS="${FLASH_EXECUTOR_L1_ADDRESS:-}"
+    AGG_WETH_ADDRESS="${AGG_WETH_ADDRESS:-}"
+    AGG_USDC_ADDRESS="${AGG_USDC_ADDRESS:-}"
+    AGG_L1_AMM_ADDRESS="${AGG_L1_AMM_ADDRESS:-}"
+    AGG_AGGREGATOR_ADDRESS="${AGG_AGGREGATOR_ADDRESS:-}"
+    AGG_L2_EXECUTOR_ADDRESS="${AGG_L2_EXECUTOR_ADDRESS:-}"
+    AGG_L2_AMM_ADDRESS="${AGG_L2_AMM_ADDRESS:-}"
+    AGG_L2_EXECUTOR_PROXY_ADDRESS="${AGG_L2_EXECUTOR_PROXY_ADDRESS:-}"
+    AGG_WRAPPED_WETH_L2="${AGG_WRAPPED_WETH_L2:-}"
+    AGG_WRAPPED_USDC_L2="${AGG_WRAPPED_USDC_L2:-}"
 fi
 
 log "Rollups: $ROLLUPS_ADDRESS"
@@ -316,6 +334,82 @@ if [ -n "$FLASH_EXECUTOR_L1_ADDRESS" ] && [ "$FLASH_EXECUTOR_L1_ADDRESS" != "0x0
         --constructor-args "$(cast abi-encode \
             'constructor(address)' \
             "0x0000000000000000000000000000000000000000")"
+fi
+
+# ─── Aggregator Contracts ─────────────────────────────────────────────────
+ZERO="0x0000000000000000000000000000000000000000"
+AGG_DIR="$CONTRACTS_DIR/test-multi-call"
+if [ -n "$AGG_AGGREGATOR_ADDRESS" ] && [ "$AGG_AGGREGATOR_ADDRESS" != "$ZERO" ]; then
+    log ""
+    log "═══ Aggregator Contracts (L1, chain $L1_CHAIN_ID) ═══"
+
+    cd "$AGG_DIR"
+
+    # WETH — no constructor args
+    verify_with_retry "WETH (L1)" \
+        forge verify-contract --chain-id "$L1_CHAIN_ID" --verifier blockscout \
+        --verifier-url "$L1_EXPLORER/api/" \
+        "$AGG_WETH_ADDRESS" src/WETH.sol:WETH
+
+    # MockERC20 (USDC) — constructor(string,string,uint8)
+    verify_with_retry "USDC MockERC20 (L1)" \
+        forge verify-contract --chain-id "$L1_CHAIN_ID" --verifier blockscout \
+        --verifier-url "$L1_EXPLORER/api/" \
+        "$AGG_USDC_ADDRESS" src/MockERC20.sol:MockERC20 \
+        --constructor-args "$(cast abi-encode 'constructor(string,string,uint8)' 'USD Coin' 'USDC' 6)"
+
+    # SimpleAMM (L1) — constructor(address,address)
+    verify_with_retry "SimpleAMM (L1)" \
+        forge verify-contract --chain-id "$L1_CHAIN_ID" --verifier blockscout \
+        --verifier-url "$L1_EXPLORER/api/" \
+        "$AGG_L1_AMM_ADDRESS" src/SimpleAMM.sol:SimpleAMM \
+        --constructor-args "$(cast abi-encode 'constructor(address,address)' "$AGG_WETH_ADDRESS" "$AGG_USDC_ADDRESS")"
+
+    # CrossChainAggregator — constructor(address,address,address,address,uint256)
+    verify_with_retry "CrossChainAggregator (L1)" \
+        forge verify-contract --chain-id "$L1_CHAIN_ID" --verifier blockscout \
+        --verifier-url "$L1_EXPLORER/api/" \
+        "$AGG_AGGREGATOR_ADDRESS" src/CrossChainAggregator.sol:CrossChainAggregator \
+        --constructor-args "$(cast abi-encode \
+            'constructor(address,address,address,address,uint256)' \
+            "$AGG_L1_AMM_ADDRESS" \
+            "$BRIDGE_ADDRESS" \
+            "$AGG_WETH_ADDRESS" \
+            "$AGG_USDC_ADDRESS" \
+            "$ROLLUP_ID")"
+
+    # CrossChainProxy for L2Executor — constructor(address,address,uint256)
+    verify_with_retry "CrossChainProxy for L2Executor (L1)" \
+        forge verify-contract --chain-id "$L1_CHAIN_ID" --verifier blockscout \
+        --verifier-url "$L1_EXPLORER/api/" \
+        "$AGG_L2_EXECUTOR_PROXY_ADDRESS" "$SYNC_DIR/src/CrossChainProxy.sol:CrossChainProxy" \
+        --constructor-args "$(cast abi-encode \
+            'constructor(address,address,uint256)' \
+            "$ROLLUPS_ADDRESS" \
+            "$AGG_L2_EXECUTOR_ADDRESS" \
+            "$ROLLUP_ID")"
+
+    log ""
+    log "═══ Aggregator Contracts (L2, chain 42069) ═══"
+
+    # SimpleAMM (L2) — constructor(address,address)
+    verify_with_retry "SimpleAMM (L2)" \
+        forge verify-contract --chain-id 42069 --verifier blockscout \
+        --verifier-url "$L2_EXPLORER/api/" \
+        "$AGG_L2_AMM_ADDRESS" src/SimpleAMM.sol:SimpleAMM \
+        --constructor-args "$(cast abi-encode 'constructor(address,address)' "$AGG_WRAPPED_WETH_L2" "$AGG_WRAPPED_USDC_L2")"
+
+    # L2Executor — constructor(address,address,address,address)
+    verify_with_retry "L2Executor (L2)" \
+        forge verify-contract --chain-id 42069 --verifier blockscout \
+        --verifier-url "$L2_EXPLORER/api/" \
+        "$AGG_L2_EXECUTOR_ADDRESS" src/L2Executor.sol:L2Executor \
+        --constructor-args "$(cast abi-encode \
+            'constructor(address,address,address,address)' \
+            "$AGG_L2_AMM_ADDRESS" \
+            "$BRIDGE_L2_ADDRESS" \
+            "$AGG_WRAPPED_WETH_L2" \
+            "$AGG_WRAPPED_USDC_L2")"
 fi
 
 log ""
