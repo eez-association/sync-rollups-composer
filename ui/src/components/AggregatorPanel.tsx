@@ -538,40 +538,38 @@ export function AggregatorPanel({
 
   return (
     <div className={styles.panel}>
-      {/* Hero section */}
-      <div className={styles.hero}>
-        <div className={styles.heroGlow} />
-        <div className={styles.heroBadge}>
-          <IconSplit size={12} />
-          Cross-Chain Aggregator
-        </div>
-        <h2 className={styles.heroTitle}>Split. Swap. Atomic.</h2>
-
-        <div className={styles.heroStats}>
-          <div className={styles.heroStat}>
-            <span className={styles.heroStatValue}>3</span>
-            <span className={styles.heroStatLabel}>Hops</span>
-          </div>
-          <div className={styles.heroStatDivider} />
-          <div className={styles.heroStat}>
-            <span className={styles.heroStatValue}>2</span>
-            <span className={styles.heroStatLabel}>AMMs</span>
-          </div>
-          <div className={styles.heroStatDivider} />
-          <div className={styles.heroStat}>
-            <span className={styles.heroStatValue}>7</span>
-            <span className={styles.heroStatLabel}>Depth</span>
-          </div>
-          <div className={styles.heroStatDivider} />
-          <div className={styles.heroStat}>
-            <span className={styles.heroStatValue}>1</span>
-            <span className={styles.heroStatLabel}>Transaction</span>
-          </div>
-        </div>
-      </div>
-
-      {/* CrossChainFlowViz */}
+      {/* Hero + Visualization — single card */}
       <div className={styles.vizContainer}>
+        {/* Hero overlay on top of SVG */}
+        <div className={styles.heroOverlay}>
+          <div className={styles.heroBadge}>
+            <IconSplit size={12} />
+            Cross-Chain Aggregator
+          </div>
+          <h2 className={styles.heroTitle}>Split. Swap. Atomic.</h2>
+          <div className={styles.heroStats}>
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>3</span>
+              <span className={styles.heroStatLabel}>Hops</span>
+            </div>
+            <div className={styles.heroStatDivider} />
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>2</span>
+              <span className={styles.heroStatLabel}>AMMs</span>
+            </div>
+            <div className={styles.heroStatDivider} />
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>7</span>
+              <span className={styles.heroStatLabel}>Depth</span>
+            </div>
+            <div className={styles.heroStatDivider} />
+            <div className={styles.heroStat}>
+              <span className={styles.heroStatValue}>1</span>
+              <span className={styles.heroStatLabel}>Transaction</span>
+            </div>
+          </div>
+        </div>
+
         <button
           className={styles.compareBtn}
           data-active={showRouteDuel ? "true" : "false"}

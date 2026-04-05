@@ -214,24 +214,24 @@ function ParticleStream({
 function AmbientParticles() {
   return (
     <g>
-      {/* Slow drifter along reversed L1 path */}
-      <circle r={2.5} fill={COL.cyan} opacity={0.2} filter="url(#glow)">
+      {/* Slow drifter along L1 path — left to right */}
+      <circle r={3.5} fill={COL.cyan} opacity={0.3} filter="url(#glow)">
         <animateMotion
           dur="6s"
           repeatCount="indefinite"
-          path="M660,70 L300,70"
+          path="M300,70 L660,70"
         />
       </circle>
-      {/* Slow drifter along reversed L2 path */}
-      <circle r={2} fill={COL.green} opacity={0.18} filter="url(#glow)">
+      {/* Slow drifter along L2 path — left to right */}
+      <circle r={3} fill={COL.green} opacity={0.25} filter="url(#glow)">
         <animateMotion
           dur="8s"
           repeatCount="indefinite"
-          path="M460,300 L360,300"
+          path="M360,300 L460,300"
         />
       </circle>
       {/* Floating bridge zone particle */}
-      <circle r={1.5} fill={COL.cyan} opacity={0.25} filter="url(#glow)">
+      <circle r={2.5} fill={COL.cyan} opacity={0.3} filter="url(#glow)">
         <animateMotion
           dur="10s"
           repeatCount="indefinite"
@@ -239,7 +239,7 @@ function AmbientParticles() {
         />
       </circle>
       {/* Extra drifter along portal-to-portal arc */}
-      <circle r={1.5} fill={COL.cyan} opacity={0.15} filter="url(#glow)">
+      <circle r={2.5} fill={COL.cyan} opacity={0.25} filter="url(#glow)">
         <animateMotion
           dur="9s"
           repeatCount="indefinite"
@@ -574,8 +574,8 @@ interface RoutePathProps {
 function RoutePath({ d, active, complete, width, dashed, color }: RoutePathProps) {
   const strokeColor = complete
     ? "var(--green)"
-    : color ?? (active ? "var(--cyan)" : "rgba(99,102,241,0.4)");
-  const effectiveWidth = Math.max(1.5, width);
+    : color ?? (active ? "var(--cyan)" : "rgba(99,102,241,0.6)");
+  const effectiveWidth = Math.max(2, width);
   return (
     <g>
       {/* Glow layer behind active paths */}
@@ -585,7 +585,7 @@ function RoutePath({ d, active, complete, width, dashed, color }: RoutePathProps
           fill="none"
           stroke={strokeColor}
           strokeWidth={effectiveWidth * 3}
-          opacity={0.15}
+          opacity={0.25}
           strokeLinecap="round"
           filter="url(#glow)"
         />
@@ -597,7 +597,7 @@ function RoutePath({ d, active, complete, width, dashed, color }: RoutePathProps
         strokeWidth={effectiveWidth}
         strokeDasharray={dashed ? "6 4" : undefined}
         strokeLinecap="round"
-        opacity={complete ? 0.8 : active ? 0.8 : 0.3}
+        opacity={complete ? 0.8 : active ? 0.8 : 0.5}
         className={complete ? styles.successPath : undefined}
       />
     </g>
@@ -640,7 +640,7 @@ export function CrossChainFlowViz({
     <div className={styles.container}>
       <svg
         className={styles.svg}
-        viewBox="0 0 960 380"
+        viewBox="0 0 960 360"
         xmlns="http://www.w3.org/2000/svg"
         preserveAspectRatio="xMidYMid meet"
       >

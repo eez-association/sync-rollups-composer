@@ -6,7 +6,7 @@
 
 .container {
   width: 100%;
-  aspect-ratio: 960 / 380;
+  aspect-ratio: 960 / 360;
   border-radius: var(--radius);
   background: var(--bg-card);
   border: 1px solid var(--border);
