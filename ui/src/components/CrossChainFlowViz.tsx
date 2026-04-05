@@ -213,9 +213,9 @@ function ParticleStream({
 
 function AmbientParticles() {
   return (
-    <g opacity={0.3}>
+    <g>
       {/* Slow drifter along reversed L1 path */}
-      <circle r={2} fill={COL.cyan} opacity={0.15} filter="url(#glow)">
+      <circle r={2.5} fill={COL.cyan} opacity={0.2} filter="url(#glow)">
         <animateMotion
           dur="6s"
           repeatCount="indefinite"
@@ -223,7 +223,7 @@ function AmbientParticles() {
         />
       </circle>
       {/* Slow drifter along reversed L2 path */}
-      <circle r={1.5} fill={COL.green} opacity={0.12} filter="url(#glow)">
+      <circle r={2} fill={COL.green} opacity={0.18} filter="url(#glow)">
         <animateMotion
           dur="8s"
           repeatCount="indefinite"
@@ -231,11 +231,19 @@ function AmbientParticles() {
         />
       </circle>
       {/* Floating bridge zone particle */}
-      <circle r={1} fill={COL.cyan} opacity={0.2} filter="url(#glow)">
+      <circle r={1.5} fill={COL.cyan} opacity={0.25} filter="url(#glow)">
         <animateMotion
           dur="10s"
           repeatCount="indefinite"
           path="M200,190 C400,180 600,200 760,190"
+        />
+      </circle>
+      {/* Extra drifter along portal-to-portal arc */}
+      <circle r={1.5} fill={COL.cyan} opacity={0.15} filter="url(#glow)">
+        <animateMotion
+          dur="9s"
+          repeatCount="indefinite"
+          path="M720,190 C600,160 400,200 240,190"
         />
       </circle>
     </g>
@@ -251,7 +259,7 @@ interface PortalProps {
 }
 
 function Portal({ x, y, active }: PortalProps) {
-  const baseOpacity = active ? 0.9 : 0.4;
+  const baseOpacity = active ? 0.9 : 0.5;
   const filterAttr = active ? "url(#portalGlow)" : undefined;
   return (
     <g filter={filterAttr}>
@@ -259,9 +267,9 @@ function Portal({ x, y, active }: PortalProps) {
       <circle
         cx={x}
         cy={y}
-        r={20}
+        r={32}
         stroke={COL.cyan}
-        strokeWidth={1}
+        strokeWidth={1.5}
         strokeDasharray="8 4"
         fill="none"
         opacity={baseOpacity}
@@ -279,9 +287,9 @@ function Portal({ x, y, active }: PortalProps) {
       <circle
         cx={x}
         cy={y}
-        r={14}
+        r={24}
         stroke={COL.cyan}
-        strokeWidth={0.8}
+        strokeWidth={1.2}
         strokeDasharray="5 3"
         fill="none"
         opacity={baseOpacity * 0.7}
@@ -299,9 +307,9 @@ function Portal({ x, y, active }: PortalProps) {
       <circle
         cx={x}
         cy={y}
-        r={8}
+        r={16}
         stroke={COL.cyan}
-        strokeWidth={0.6}
+        strokeWidth={1}
         strokeDasharray="3 2"
         fill="none"
         opacity={baseOpacity * 0.5}
@@ -319,7 +327,7 @@ function Portal({ x, y, active }: PortalProps) {
       <circle
         cx={x}
         cy={y}
-        r={6}
+        r={10}
         fill="url(#portalGrad)"
         opacity={active ? 0.8 : 0.3}
       />
@@ -327,7 +335,7 @@ function Portal({ x, y, active }: PortalProps) {
       <circle
         cx={x}
         cy={y}
-        r={2}
+        r={3}
         fill={COL.cyan}
         opacity={active ? 0.9 : 0.4}
         filter="url(#glow)"
@@ -566,18 +574,33 @@ interface RoutePathProps {
 function RoutePath({ d, active, complete, width, dashed, color }: RoutePathProps) {
   const strokeColor = complete
     ? "var(--green)"
-    : color ?? (active ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.08)");
+    : color ?? (active ? "var(--cyan)" : "rgba(99,102,241,0.4)");
+  const effectiveWidth = Math.max(1.5, width);
   return (
-    <path
-      d={d}
-      fill="none"
-      stroke={strokeColor}
-      strokeWidth={Math.max(0.5, width)}
-      strokeDasharray={dashed ? "6 4" : undefined}
-      strokeLinecap="round"
-      opacity={complete ? 0.8 : active ? 0.6 : 0.15}
-      className={complete ? styles.successPath : undefined}
-    />
+    <g>
+      {/* Glow layer behind active paths */}
+      {active && !complete && (
+        <path
+          d={d}
+          fill="none"
+          stroke={strokeColor}
+          strokeWidth={effectiveWidth * 3}
+          opacity={0.15}
+          strokeLinecap="round"
+          filter="url(#glow)"
+        />
+      )}
+      <path
+        d={d}
+        fill="none"
+        stroke={strokeColor}
+        strokeWidth={effectiveWidth}
+        strokeDasharray={dashed ? "6 4" : undefined}
+        strokeLinecap="round"
+        opacity={complete ? 0.8 : active ? 0.8 : 0.3}
+        className={complete ? styles.successPath : undefined}
+      />
+    </g>
   );
 }
 
@@ -870,8 +893,8 @@ export function CrossChainFlowViz({
           count={3}
         />
 
-        {/* Ambient idle particles (always visible when idle or complete) */}
-        {(vizPhase === 0 || isComplete) && <AmbientParticles />}
+        {/* Ambient idle particles — always visible regardless of phase */}
+        <AmbientParticles />
 
         {/* ══════════════ Layer 6: Nodes ══════════════ */}
 
