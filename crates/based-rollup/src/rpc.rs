@@ -288,6 +288,12 @@ pub struct BuildExecutionTableCall {
     /// Original L1 trace depth from walk_trace_tree.
     #[serde(default)]
     pub l1_trace_depth: usize,
+    /// Whether this call is inside a reverted frame on L1 (try/catch that reverts).
+    /// Used for partial revert patterns (revertContinue L1→L2): the reverted call
+    /// needs REVERT/REVERT_CONTINUE on L2, while calls outside the reverted frame
+    /// continue normally.
+    #[serde(default)]
+    pub in_reverted_frame: bool,
 }
 
 /// Result of building a multi-call execution table.
@@ -859,6 +865,7 @@ where
                 scope: c.scope.clone(),
                 discovery_iteration: c.discovery_iteration,
                 l1_trace_depth: c.l1_trace_depth,
+                in_reverted_frame: c.in_reverted_frame,
             })
             .collect();
 

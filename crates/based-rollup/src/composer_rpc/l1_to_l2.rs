@@ -537,6 +537,11 @@ struct DetectedInternalCall {
     /// iterations — each level triggers the next) from continuation patterns
     /// (all calls discovered in the same iteration — user tx calls them directly).
     discovery_iteration: usize,
+    /// Whether this call is inside a reverted frame (ancestor has "error" in trace).
+    /// Used for partial revert patterns (revertContinue L1→L2): calls inside a
+    /// try/catch that reverts need REVERT/REVERT_CONTINUE on L2, while calls
+    /// outside the reverted frame continue normally.
+    in_reverted_frame: bool,
 }
 
 /// Execute a `debug_traceCallMany` bundle on L2:
@@ -1848,6 +1853,7 @@ async fn walk_l1_trace_generic(
             parent_call_index: None, // root-level L1→L2 call
             trace_depth: c.trace_depth,
             discovery_iteration: 0, // initial detection from first trace
+            in_reverted_frame: c.in_reverted_frame,
         })
         .collect()
 }
@@ -1896,6 +1902,7 @@ async fn build_and_run_l1_postbatch_trace(
             },
             discovery_iteration: c.discovery_iteration,
             l1_trace_depth: c.trace_depth,
+            in_reverted_frame: c.in_reverted_frame,
         })
         .collect();
 
@@ -2577,38 +2584,56 @@ async fn trace_and_detect_internal_calls(
             // Build RESULT entry and exec calldata for this call (for future chaining).
             // Uses final_ret_data/final_success after Bug 2 override so the RESULT hash
             // is correct for the corrected return data.
-            let result_action = crate::cross_chain::CrossChainAction {
-                action_type: crate::cross_chain::CrossChainActionType::Result,
-                rollup_id: U256::from(rollup_id),
-                destination: Address::ZERO,
-                value: U256::ZERO,
-                data: final_ret_data,
-                failed: !final_success,
-                source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
-                scope: vec![],
-            };
-            let result_hash = crate::table_builder::compute_action_hash(&result_action);
-            prior_result_entries.push(crate::cross_chain::CrossChainExecutionEntry {
-                state_deltas: vec![],
-                action_hash: result_hash,
-                next_action: result_action,
-            });
+            //
+            // PARTIAL REVERT: skip adding reverted calls to prior_result_entries and
+            // prior_exec_calldatas. In the real execution, reverted calls are inside a
+            // try/catch scope — their state effects are rolled back by ScopeReverted.
+            // Including them in the chained simulation would let subsequent calls see
+            // state changes that won't persist, producing incorrect return data
+            // (e.g., Counter sees 1 instead of 0 for the non-reverted call).
+            if !detected_calls[call_idx].in_reverted_frame {
+                let result_action = crate::cross_chain::CrossChainAction {
+                    action_type: crate::cross_chain::CrossChainActionType::Result,
+                    rollup_id: U256::from(rollup_id),
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: final_ret_data,
+                    failed: !final_success,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                };
+                let result_hash = crate::table_builder::compute_action_hash(&result_action);
+                prior_result_entries.push(crate::cross_chain::CrossChainExecutionEntry {
+                    state_deltas: vec![],
+                    action_hash: result_hash,
+                    next_action: result_action,
+                });
 
-            // Build exec calldata for this call.
-            let sim_action = crate::cross_chain::CrossChainAction {
-                action_type: crate::cross_chain::CrossChainActionType::Call,
-                rollup_id: U256::from(rollup_id),
-                destination: call_destination,
-                value: call_value,
-                data: call_calldata,
-                failed: false,
-                source_address: call_source,
-                source_rollup: U256::ZERO,
-                scope: vec![],
-            };
-            let exec_cd = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
-            prior_exec_calldatas.push((exec_cd.to_vec(), call_value));
+                // Build exec calldata for this call.
+                let sim_action = crate::cross_chain::CrossChainAction {
+                    action_type: crate::cross_chain::CrossChainActionType::Call,
+                    rollup_id: U256::from(rollup_id),
+                    destination: call_destination,
+                    value: call_value,
+                    data: call_calldata,
+                    failed: false,
+                    source_address: call_source,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                };
+                let exec_cd =
+                    crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
+                prior_exec_calldatas.push((exec_cd.to_vec(), call_value));
+            } else {
+                tracing::info!(
+                    target: "based_rollup::l1_proxy",
+                    call_idx,
+                    dest = %call_destination,
+                    "skipping reverted call from chained L2 simulation prior entries \
+                     (state effects rolled back by scope revert in real execution)"
+                );
+            }
 
             // Convert child L2→L1 proxy calls to DetectedInternalCall and
             // accumulate them with parent index for correct L1→L2→L1 entry linking.
@@ -2636,6 +2661,7 @@ async fn trace_and_detect_internal_calls(
                         parent_call_index: Some(call_idx), // linked to parent L1→L2 call
                         trace_depth: 0,     // L2→L1 child: depth in L2 simulation
                         discovery_iteration: 0, // will be updated in iterative loop
+                        in_reverted_frame: false, // L2→L1 children: not in reverted frame
                     },
                 ));
             }
@@ -3215,6 +3241,7 @@ async fn trace_and_detect_internal_calls(
                                             parent_call_index: None,
                                             trace_depth: 0,
                                             discovery_iteration: iteration,
+                                            in_reverted_frame: false, // iterative child: not in reverted frame
                                         },
                                     ));
                                 }
@@ -3631,6 +3658,7 @@ async fn trace_and_detect_internal_calls(
                                         },
                                         discovery_iteration: c.discovery_iteration,
                                         l1_trace_depth: c.trace_depth,
+                                        in_reverted_frame: c.in_reverted_frame,
                                     })
                                     .collect();
                             let analyzed = crate::table_builder::analyze_continuation_calls(
