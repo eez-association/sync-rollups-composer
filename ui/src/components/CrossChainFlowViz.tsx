@@ -24,14 +24,14 @@ interface CrossChainFlowVizProps {
 /* ── Path data ── */
 
 const PATHS = {
-  userToAgg: "M140,70 L180,70",
-  aggToL1Amm: "M300,70 L420,70",
-  l1AmmToOutput: "M540,70 L660,70",
-  aggToPortalDown: "M240,95 C240,140 240,170 240,190",
-  portalToL2Exec: "M240,190 C240,230 270,280 300,300",
-  l2ExecToL2Amm: "M360,300 L460,300",
-  l2AmmToPortalUp: "M580,300 C600,270 680,230 720,190",
-  portalToOutput: "M720,190 C720,160 720,120 720,95",
+  userToAgg: "M160,80 L240,80",
+  aggToL1Amm: "M360,80 L500,80",
+  l1AmmToOutput: "M620,80 L760,80",
+  aggToPortalDown: "M300,105 C300,150 300,170 300,190",
+  portalToL2Exec: "M300,210 C300,240 320,270 340,290",
+  l2ExecToL2Amm: "M400,290 L540,290",
+  l2AmmToPortalUp: "M660,290 C700,260 760,230 790,210",
+  portalToOutput: "M790,190 C790,150 810,120 820,105",
 } as const;
 
 /* ── Colours ── */
@@ -55,12 +55,12 @@ interface NodeDef {
 }
 
 const NODES: NodeDef[] = [
-  { x: 80, y: 70, label: "User", sublabel: "Wallet", chain: "l1" },
-  { x: 240, y: 70, label: "Aggregator", sublabel: "Split Router", chain: "l1" },
-  { x: 480, y: 70, label: "L1 AMM", sublabel: "Uniswap V2", chain: "l1" },
-  { x: 720, y: 70, label: "Output", sublabel: "Best Price", chain: "l1" },
-  { x: 300, y: 300, label: "L2 Executor", sublabel: "Cross-Chain", chain: "l2" },
-  { x: 520, y: 300, label: "L2 AMM", sublabel: "Remote Pool", chain: "l2" },
+  { x: 100, y: 80, label: "User", sublabel: "Wallet", chain: "l1" },
+  { x: 300, y: 80, label: "Aggregator", sublabel: "Split Router", chain: "l1" },
+  { x: 560, y: 80, label: "L1 AMM", chain: "l1" },
+  { x: 820, y: 80, label: "Output", sublabel: "Best Price", chain: "l1" },
+  { x: 340, y: 290, label: "L2 Executor", sublabel: "Cross-Chain", chain: "l2" },
+  { x: 600, y: 290, label: "L2 AMM", chain: "l2" },
 ];
 
 /* ── Sub-components ── */
@@ -214,37 +214,17 @@ function ParticleStream({
 function AmbientParticles() {
   return (
     <g>
-      {/* Slow drifter along L1 path — left to right */}
-      <circle r={3.5} fill={COL.cyan} opacity={0.3} filter="url(#glow)">
-        <animateMotion
-          dur="6s"
-          repeatCount="indefinite"
-          path="M300,70 L660,70"
-        />
+      {/* Bright cyan dot drifting along L1 lane */}
+      <circle r={4} fill={COL.cyan} opacity={0.4} filter="url(#glow)">
+        <animateMotion dur="7s" repeatCount="indefinite" path="M100,80 L820,80" />
       </circle>
-      {/* Slow drifter along L2 path — left to right */}
-      <circle r={3} fill={COL.green} opacity={0.25} filter="url(#glow)">
-        <animateMotion
-          dur="8s"
-          repeatCount="indefinite"
-          path="M360,300 L460,300"
-        />
+      {/* Gold dot drifting along L2 lane */}
+      <circle r={3.5} fill={COL.gold} opacity={0.35} filter="url(#glow)">
+        <animateMotion dur="9s" repeatCount="indefinite" path="M340,290 L600,290" />
       </circle>
-      {/* Floating bridge zone particle */}
-      <circle r={2.5} fill={COL.cyan} opacity={0.3} filter="url(#glow)">
-        <animateMotion
-          dur="10s"
-          repeatCount="indefinite"
-          path="M200,190 C400,180 600,200 760,190"
-        />
-      </circle>
-      {/* Extra drifter along portal-to-portal arc */}
-      <circle r={2.5} fill={COL.cyan} opacity={0.25} filter="url(#glow)">
-        <animateMotion
-          dur="9s"
-          repeatCount="indefinite"
-          path="M720,190 C600,160 400,200 240,190"
-        />
+      {/* Cyan dot crossing bridge zone slowly */}
+      <circle r={3} fill={COL.cyan} opacity={0.3} filter="url(#glow)">
+        <animateMotion dur="12s" repeatCount="indefinite" path="M250,190 C450,185 650,195 800,190" />
       </circle>
     </g>
   );
@@ -572,35 +552,22 @@ interface RoutePathProps {
 }
 
 function RoutePath({ d, active, complete, width, dashed, color }: RoutePathProps) {
-  const strokeColor = complete
-    ? "var(--green)"
-    : color ?? (active ? "var(--cyan)" : "rgba(99,102,241,0.6)");
-  const effectiveWidth = Math.max(2, width);
+  const strokeColor = complete ? COL.green
+    : active ? (color ?? COL.cyan)
+    : "rgba(130, 140, 255, 0.7)";
+  const effectiveWidth = Math.max(2.5, width);
+  const op = complete ? 0.9 : active ? 1.0 : 0.6;
   return (
-    <g>
-      {/* Glow layer behind active paths */}
-      {active && !complete && (
-        <path
-          d={d}
-          fill="none"
-          stroke={strokeColor}
-          strokeWidth={effectiveWidth * 3}
-          opacity={0.25}
-          strokeLinecap="round"
-          filter="url(#glow)"
-        />
-      )}
-      <path
-        d={d}
-        fill="none"
-        stroke={strokeColor}
-        strokeWidth={effectiveWidth}
-        strokeDasharray={dashed ? "6 4" : undefined}
-        strokeLinecap="round"
-        opacity={complete ? 0.8 : active ? 0.8 : 0.5}
-        className={complete ? styles.successPath : undefined}
-      />
-    </g>
+    <path
+      d={d}
+      fill="none"
+      stroke={strokeColor}
+      strokeWidth={effectiveWidth}
+      strokeDasharray={dashed ? "6 4" : undefined}
+      strokeLinecap="round"
+      opacity={op}
+      className={complete ? styles.successPath : undefined}
+    />
   );
 }
 
@@ -640,7 +607,7 @@ export function CrossChainFlowViz({
     <div className={styles.container}>
       <svg
         className={styles.svg}
-        viewBox="0 0 960 360"
+        viewBox="0 0 960 370"
         xmlns="http://www.w3.org/2000/svg"
         preserveAspectRatio="xMidYMid meet"
       >
@@ -653,7 +620,7 @@ export function CrossChainFlowViz({
           x={0}
           y={0}
           width={960}
-          height={165}
+          height={155}
           fill="url(#l1LaneGrad)"
           rx={0}
         />
@@ -663,7 +630,7 @@ export function CrossChainFlowViz({
           x={0}
           y={215}
           width={960}
-          height={165}
+          height={155}
           fill="url(#l2LaneGrad)"
           rx={0}
         />
@@ -671,9 +638,9 @@ export function CrossChainFlowViz({
         {/* Bridge zone */}
         <rect
           x={0}
-          y={165}
+          y={155}
           width={960}
-          height={50}
+          height={60}
           fill="url(#scanlines)"
           opacity={0.8}
         />
@@ -681,13 +648,13 @@ export function CrossChainFlowViz({
         {/* Bridge zone dashed borders */}
         <line
           x1={40}
-          y1={165}
+          y1={155}
           x2={920}
-          y2={165}
+          y2={155}
           stroke={COL.cyan}
           strokeWidth={0.5}
           strokeDasharray="12 8"
-          opacity={0.15}
+          opacity={0.2}
         />
         <line
           x1={40}
@@ -697,28 +664,28 @@ export function CrossChainFlowViz({
           stroke={COL.cyan}
           strokeWidth={0.5}
           strokeDasharray="12 8"
-          opacity={0.15}
+          opacity={0.2}
         />
 
         {/* Lane labels */}
         <text
           x={22}
-          y={20}
-          fill="rgba(99,102,241,0.3)"
-          fontSize={9}
+          y={24}
+          fill="rgba(99,102,241,0.4)"
+          fontSize={10}
           fontFamily="var(--mono)"
-          fontWeight={600}
+          fontWeight={700}
           letterSpacing="0.12em"
         >
           L1
         </text>
         <text
           x={22}
-          y={240}
-          fill="rgba(52,211,153,0.3)"
-          fontSize={9}
+          y={242}
+          fill="rgba(52,211,153,0.4)"
+          fontSize={10}
           fontFamily="var(--mono)"
-          fontWeight={600}
+          fontWeight={700}
           letterSpacing="0.12em"
         >
           L2
@@ -731,7 +698,7 @@ export function CrossChainFlowViz({
           d={PATHS.userToAgg}
           active={vizPhase >= 1}
           complete={isComplete}
-          width={2}
+          width={2.5}
         />
         <RoutePath
           d={PATHS.aggToL1Amm}
@@ -778,31 +745,31 @@ export function CrossChainFlowViz({
           width={remoteWidth}
         />
 
-        {/* Route duel ghost path — direct L1-only route shown as red dashed */}
+        {/* Route duel ghost path -- direct L1-only route shown as red dashed */}
         {showRouteDuel && (
           <RoutePath
-            d="M140,55 L660,55"
+            d="M160,65 L760,65"
             active={true}
             complete={false}
             width={1.5}
             dashed={true}
-            color="var(--red)"
+            color="#f87171"
           />
         )}
 
         {/* ══════════════ Layer 3: Liquid Pools ══════════════ */}
 
         <LiquidPool
-          x={480}
-          y={70}
+          x={560}
+          y={80}
           reserveA={l1ReserveA}
           reserveB={l1ReserveB}
           chain="l1"
           active={vizPhase >= 2 && vizPhase <= 4}
         />
         <LiquidPool
-          x={520}
-          y={300}
+          x={600}
+          y={290}
           reserveA={l2ReserveA}
           reserveB={l2ReserveB}
           chain="l2"
@@ -811,8 +778,8 @@ export function CrossChainFlowViz({
 
         {/* ══════════════ Layer 4: Bridge Portals ══════════════ */}
 
-        <Portal x={240} y={190} active={portalDownActive} />
-        <Portal x={720} y={190} active={portalUpActive} />
+        <Portal x={300} y={190} active={portalDownActive} />
+        <Portal x={790} y={190} active={portalUpActive} />
 
         {/* ══════════════ Layer 5: Particles ══════════════ */}
 
@@ -842,7 +809,7 @@ export function CrossChainFlowViz({
           speed={0.7}
           count={3}
         />
-        {/* Portal crossing particles — cyan during bridge */}
+        {/* Portal crossing particles -- cyan during bridge */}
         <ParticleStream
           pathData={PATHS.portalToL2Exec}
           color={portalDownActive ? COL.cyan : COL.gold}
@@ -893,7 +860,7 @@ export function CrossChainFlowViz({
           count={3}
         />
 
-        {/* Ambient idle particles — always visible regardless of phase */}
+        {/* Ambient idle particles -- always visible regardless of phase */}
         <AmbientParticles />
 
         {/* ══════════════ Layer 6: Nodes ══════════════ */}
@@ -915,8 +882,8 @@ export function CrossChainFlowViz({
 
         {/* Pool labels on top of LiquidPool */}
         <text
-          x={480}
-          y={47}
+          x={560}
+          y={57}
           textAnchor="middle"
           fill="var(--text)"
           fontSize={11}
@@ -926,8 +893,8 @@ export function CrossChainFlowViz({
           L1 AMM
         </text>
         <text
-          x={520}
-          y={277}
+          x={600}
+          y={267}
           textAnchor="middle"
           fill="var(--text)"
           fontSize={11}
@@ -940,8 +907,8 @@ export function CrossChainFlowViz({
         {/* Aggregator breathing effect when idle */}
         {vizPhase === 0 && (
           <rect
-            x={180}
-            y={45}
+            x={240}
+            y={55}
             width={120}
             height={50}
             rx={8}
@@ -958,8 +925,8 @@ export function CrossChainFlowViz({
         {vizPhase === 2 && (
           <g>
             <circle
-              cx={240}
-              cy={70}
+              cx={300}
+              cy={80}
               r={10}
               fill="none"
               stroke={COL.cyan}
@@ -983,8 +950,8 @@ export function CrossChainFlowViz({
             </circle>
             {/* Second ring, delayed */}
             <circle
-              cx={240}
-              cy={70}
+              cx={300}
+              cy={80}
               r={10}
               fill="none"
               stroke={COL.cyan}
@@ -1015,31 +982,31 @@ export function CrossChainFlowViz({
         {vizPhase >= 3 && vizPhase < 8 && (
           <g>
             <text
-              x={480}
+              x={545}
               y={192}
               textAnchor="middle"
               fill={COL.cyan}
               fontSize={10}
               fontFamily="var(--mono)"
-              opacity={0.7}
-              fontWeight={500}
+              opacity={0.8}
+              fontWeight={600}
               letterSpacing="0.15em"
             >
               DEPTH: {Math.min(vizPhase + 1, 7)}
             </text>
             {/* Animated dots */}
-            <circle cx={430} cy={190} r={1.5} fill={COL.cyan} opacity={0.4}>
+            <circle cx={490} cy={190} r={1.5} fill={COL.cyan} opacity={0.5}>
               <animate
                 attributeName="opacity"
-                values="0.2;0.6;0.2"
+                values="0.3;0.7;0.3"
                 dur="1.5s"
                 repeatCount="indefinite"
               />
             </circle>
-            <circle cx={530} cy={190} r={1.5} fill={COL.cyan} opacity={0.4}>
+            <circle cx={600} cy={190} r={1.5} fill={COL.cyan} opacity={0.5}>
               <animate
                 attributeName="opacity"
-                values="0.2;0.6;0.2"
+                values="0.3;0.7;0.3"
                 dur="1.5s"
                 begin="0.5s"
                 repeatCount="indefinite"
@@ -1052,20 +1019,20 @@ export function CrossChainFlowViz({
         {showRouteDuel && improvement && (
           <g>
             <rect
-              x={680}
-              y={33}
+              x={770}
+              y={43}
               width={60}
               height={20}
               rx={4}
               fill="rgba(52,211,153,0.15)"
-              stroke="var(--green)"
+              stroke={COL.green}
               strokeWidth={0.8}
             />
             <text
-              x={710}
-              y={47}
+              x={800}
+              y={57}
               textAnchor="middle"
-              fill="var(--green)"
+              fill={COL.green}
               fontSize={10}
               fontWeight={700}
               fontFamily="var(--mono)"
@@ -1075,18 +1042,18 @@ export function CrossChainFlowViz({
           </g>
         )}
 
-        {/* Success state — ATOMIC badge */}
+        {/* Success state -- ATOMIC badge */}
         {isComplete && (
           <g>
             {/* Glowing success rectangle */}
             <rect
-              x={415}
-              y={157}
+              x={480}
+              y={167}
               width={130}
               height={32}
               rx={6}
               fill="rgba(52,211,153,0.08)"
-              stroke="var(--green)"
+              stroke={COL.green}
               strokeWidth={1.2}
               strokeDasharray="200"
               strokeDashoffset="200"
@@ -1094,10 +1061,10 @@ export function CrossChainFlowViz({
               className={styles.atomicBadge}
             />
             <text
-              x={480}
-              y={178}
+              x={545}
+              y={188}
               textAnchor="middle"
-              fill="var(--green)"
+              fill={COL.green}
               fontSize={12}
               fontWeight={700}
               fontFamily="var(--mono)"
@@ -1116,9 +1083,9 @@ export function CrossChainFlowViz({
             </text>
             {/* Checkmark */}
             <path
-              d="M516,172 L520,177 L527,168"
+              d="M581,182 L585,187 L592,178"
               fill="none"
-              stroke="var(--green)"
+              stroke={COL.green}
               strokeWidth={1.8}
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -1136,11 +1103,11 @@ export function CrossChainFlowViz({
 
             {/* Completion pulse rings emanating from center */}
             <circle
-              cx={480}
-              cy={190}
+              cx={545}
+              cy={185}
               r={5}
               fill="none"
-              stroke="var(--green)"
+              stroke={COL.green}
               strokeWidth={0.8}
               opacity={0}
             >
@@ -1159,11 +1126,11 @@ export function CrossChainFlowViz({
               />
             </circle>
             <circle
-              cx={480}
-              cy={190}
+              cx={545}
+              cy={185}
               r={5}
               fill="none"
-              stroke="var(--green)"
+              stroke={COL.green}
               strokeWidth={0.5}
               opacity={0}
             >
@@ -1191,40 +1158,52 @@ export function CrossChainFlowViz({
           <g>
             {/* Local percentage */}
             <text
-              x={340}
-              y={56}
+              x={430}
+              y={66}
               textAnchor="middle"
-              fill="rgba(99,102,241,0.6)"
-              fontSize={8}
+              fill="rgba(99,102,241,0.7)"
+              fontSize={9}
               fontFamily="var(--mono)"
-              fontWeight={600}
+              fontWeight={700}
             >
               {splitPercent}%
             </text>
             {/* Remote percentage */}
             <text
-              x={240}
-              y={128}
+              x={300}
+              y={138}
               textAnchor="middle"
-              fill="rgba(52,211,153,0.6)"
-              fontSize={8}
+              fill="rgba(52,211,153,0.7)"
+              fontSize={9}
               fontFamily="var(--mono)"
-              fontWeight={600}
+              fontWeight={700}
             >
               {100 - splitPercent}%
             </text>
           </g>
         )}
 
+        {/* Direction arrows on paths for flow clarity */}
+        {vizPhase >= 1 && (
+          <g opacity={0.5}>
+            {/* Arrow on user->agg path */}
+            <polygon points="230,76 224,80 230,84" fill={COL.cyan} opacity={vizPhase >= 1 ? 0.7 : 0.3} />
+            {/* Arrow on agg->L1AMM path */}
+            <polygon points="490,76 484,80 490,84" fill={COL.cyan} opacity={vizPhase >= 2 ? 0.7 : 0.3} />
+            {/* Arrow on L1AMM->output */}
+            <polygon points="750,76 744,80 750,84" fill={COL.cyan} opacity={vizPhase >= 4 ? 0.7 : 0.3} />
+          </g>
+        )}
+
         {/* Decorative grid dots in bridge zone */}
-        {Array.from({ length: 12 }, (_, i) => (
+        {Array.from({ length: 14 }, (_, i) => (
           <circle
             key={`grid-${i}`}
-            cx={120 + i * 65}
-            cy={190}
-            r={0.8}
+            cx={80 + i * 60}
+            cy={185}
+            r={1}
             fill={COL.cyan}
-            opacity={0.12}
+            opacity={0.15}
           />
         ))}
       </svg>

@@ -26,90 +26,49 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
-.heroOverlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 2;
-  padding: var(--sp-4) var(--sp-5);
-  text-align: center;
-  pointer-events: none;
-  background: linear-gradient(to bottom, rgba(15,15,25,0.85) 0%, rgba(15,15,25,0.4) 70%, transparent 100%);
+.heroStrip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.heroTitle {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: -0.02em;
 }
 
 .heroBadge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-family: var(--mono);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: rgba(99, 102, 241, 0.15);
   color: var(--accent-light);
-  background: var(--accent-dim);
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  border-radius: 100px;
-  padding: 3px 10px;
-  margin-bottom: var(--sp-2);
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.12),
-    0 0 12px rgba(99, 102, 241, 0.06);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
-.heroTitle {
-  font-family: var(--sans);
-  font-size: 20px;
-  font-weight: 800;
-  color: var(--text-bright);
-  letter-spacing: -0.03em;
-  line-height: 1.2;
-  margin: 0 0 var(--sp-2);
-}
-
-@media (max-width: 640px) {
-  .heroTitle { font-size: 16px; }
-}
-
-.heroStats {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: center;
-  font-size: 11px;
-}
-
-.heroStat {
+.heroStatsInline {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-}
-
-.heroStatValue {
-  font-family: var(--mono);
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--accent-light);
-  line-height: 1;
-  letter-spacing: -0.02em;
-}
-
-.heroStatLabel {
-  font-family: var(--sans);
-  font-size: 9px;
+  gap: 6px;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-size: 10px;
 }
 
-.heroStatDivider {
-  width: 1px;
-  height: 28px;
-  background: rgba(255,255,255,0.08);
-  flex-shrink: 0;
+.dot {
+  color: var(--border-bright);
 }
 
 .compareBtn {
@@ -1241,7 +1200,11 @@
   .wrapGroup {
     margin-left: 0;
   }
-  .heroStatValue {
-    font-size: 13px;
+  .heroStrip {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .heroTitle {
+    font-size: 12px;
   }
 }
