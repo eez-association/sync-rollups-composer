@@ -2436,10 +2436,8 @@ async fn trace_and_detect_internal_calls(
                     .await;
 
                     // Find truly new calls (not already in detected_calls).
-                    // Use iter().cloned() to preserve new_detected for in_reverted_frame update.
                     let truly_new: Vec<_> = new_detected
-                        .iter()
-                        .cloned()
+                        .into_iter()
                         .filter(|new_call| {
                             !detected_calls.iter().any(|existing| {
                                 existing.destination == new_call.destination
@@ -2451,38 +2449,15 @@ async fn trace_and_detect_internal_calls(
                         .collect();
 
                     if truly_new.is_empty() {
-                        // Update in_reverted_frame from the LAST retrace.
-                        for (ni, nd) in new_detected.iter().enumerate() {
-                            tracing::info!(
-                                target: "based_rollup::l1_proxy",
-                                ni,
-                                dest = %nd.destination,
-                                trace_depth = nd.trace_depth,
-                                in_reverted_frame = nd.in_reverted_frame,
-                                "L1 retrace new_detected for in_reverted_frame update"
-                            );
-                        }
-                        for existing in detected_calls.iter_mut() {
-                            if let Some(retrace_call) = new_detected.iter().find(|r| {
-                                r.destination == existing.destination
-                                    && r.calldata == existing.calldata
-                                    && r.value == existing.value
-                                    && r.source_address == existing.source_address
-                                    && r.trace_depth == existing.trace_depth
-                            }) {
-                                if existing.in_reverted_frame != retrace_call.in_reverted_frame {
-                                    tracing::info!(
-                                        target: "based_rollup::l1_proxy",
-                                        dest = %existing.destination,
-                                        trace_depth = existing.trace_depth,
-                                        old = existing.in_reverted_frame,
-                                        new = retrace_call.in_reverted_frame,
-                                        "updated in_reverted_frame from L1 retrace"
-                                    );
-                                    existing.in_reverted_frame = retrace_call.in_reverted_frame;
-                                }
-                            }
-                        }
+                        // NOTE: Do NOT update in_reverted_frame from the L1 retrace here.
+                        // Unlike L2→L1 (where the initial trace always errors), L1→L2 retrace
+                        // update is unreliable for duplicate-call patterns (CallTwice) because
+                        // the second call is discovered during retrace and the match-by-fields
+                        // is ambiguous for identical calls. The in_reverted_frame values from
+                        // the initial detection + truly_new additions are the correct source.
+                        // For revertContinue (L1→L2), the initial trace correctly detects the
+                        // try/catch revert frame for the first call (depth=2, in_reverted_frame=true)
+                        // and the second call is added from the retrace with correct frame status.
                         tracing::info!(
                             target: "based_rollup::l1_proxy",
                             iteration,
