@@ -77,6 +77,11 @@ pub struct DetectedCall {
     /// Used by post-convergence enrichment to extract delivery return data
     /// from intermediate hops without additional simulation.
     pub output: Vec<u8>,
+    /// Whether this proxy call is inside a reverted frame (ancestor has "error").
+    /// Used for partial revert patterns (revertContinueL2): calls inside a
+    /// try/catch that reverts need REVERT/REVERT_CONTINUE on L1, while calls
+    /// outside the reverted frame continue normally.
+    pub in_reverted_frame: bool,
 }
 
 /// Identity of a cross-chain proxy.
@@ -301,7 +306,8 @@ pub async fn walk_trace_tree(
         ephemeral_proxies,
         detected_calls,
         unresolved_proxies,
-        0, // root node is at depth 0
+        0,     // root node is at depth 0
+        false, // root is not inside a reverted frame
     )
     .await;
 }
@@ -354,6 +360,7 @@ async fn walk_trace_tree_inner(
     detected_calls: &mut Vec<DetectedCall>,
     unresolved_proxies: &mut HashSet<Address>,
     depth: usize,
+    in_reverted_frame: bool,
 ) {
     let parsed = match parse_trace_node(node) {
         Some(p) => p,
@@ -369,6 +376,7 @@ async fn walk_trace_tree_inner(
                 detected_calls,
                 unresolved_proxies,
                 depth,
+                in_reverted_frame,
             )
             .await;
             return;
@@ -391,6 +399,7 @@ async fn walk_trace_tree_inner(
             detected_calls,
             unresolved_proxies,
             depth,
+            in_reverted_frame,
         )
         .await;
         return;
@@ -416,6 +425,7 @@ async fn walk_trace_tree_inner(
             detected_calls,
             unresolved_proxies,
             depth,
+            in_reverted_frame,
         )
         .await;
         return;
@@ -457,6 +467,7 @@ async fn walk_trace_tree_inner(
                 source_address: parsed.from,
                 trace_depth: depth,
                 output: proxy_output,
+                in_reverted_frame,
             });
         } else {
             // Proxy identity not found — record as unresolved so callers can
@@ -486,6 +497,7 @@ async fn walk_trace_tree_inner(
             detected_calls,
             unresolved_proxies,
             depth,
+            in_reverted_frame,
         )
         .await;
         return;
@@ -501,6 +513,7 @@ async fn walk_trace_tree_inner(
         detected_calls,
         unresolved_proxies,
         depth,
+        in_reverted_frame,
     )
     .await;
 }
@@ -521,9 +534,15 @@ async fn recurse_children(
     detected_calls: &mut Vec<DetectedCall>,
     unresolved_proxies: &mut HashSet<Address>,
     depth: usize,
+    in_reverted_frame: bool,
 ) {
     if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
         for child in calls {
+            // A child is in a reverted frame if the parent already is,
+            // or if the CHILD ITSELF has an "error" field (meaning its
+            // descendants will be inside a reverted context).
+            let child_reverted =
+                in_reverted_frame || child.get("error").and_then(|v| v.as_str()).is_some();
             Box::pin(walk_trace_tree_inner(
                 child,
                 manager_addresses,
@@ -533,6 +552,7 @@ async fn recurse_children(
                 detected_calls,
                 unresolved_proxies,
                 depth + 1,
+                child_reverted,
             ))
             .await;
         }

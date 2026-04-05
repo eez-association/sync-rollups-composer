@@ -76,6 +76,12 @@ pub struct DetectedCall {
     /// later iteration (reentrant: child's L1 execution triggered this call).
     #[serde(default)]
     pub discovery_iteration: usize,
+    /// Whether this call is inside a reverted frame on L2 (try/catch that reverts).
+    /// Used for partial revert patterns (revertContinueL2): the reverted call
+    /// gets scope [0,0], REVERT(scope=[0]) undoes it, REVERT_CONTINUE continues
+    /// with the non-reverted call at scope [1].
+    #[serde(default)]
+    pub in_reverted_frame: bool,
 }
 
 /// Output of `build_continuation_entries`: L2 table entries and L1 deferred entries.
@@ -821,6 +827,7 @@ pub fn analyze_continuation_calls(
                     l2_delivery_failed: !call.call_success,
                     scope: call.scope.clone(),
                     discovery_iteration: call.discovery_iteration,
+                    in_reverted_frame: false, // L1→L2 children: not applicable
                 }
             } else {
                 // L1→L2 call (root-level or continuation)
@@ -851,6 +858,7 @@ pub fn analyze_continuation_calls(
                     l2_delivery_failed: !call.call_success,
                     scope: vec![], // L1→L2 root calls start with empty scope
                     discovery_iteration: call.discovery_iteration,
+                    in_reverted_frame: false, // L1→L2 calls: not applicable
                 }
             }
         })
@@ -882,6 +890,10 @@ pub struct L2DetectedCall {
     /// Includes accumulated prefix from parent hops + local trace depth.
     #[serde(default)]
     pub scope: Vec<U256>,
+    /// Whether this call is inside a reverted frame on L2 (try/catch that reverts).
+    /// Used for partial revert patterns where some calls need REVERT/REVERT_CONTINUE.
+    #[serde(default)]
+    pub in_reverted_frame: bool,
 }
 
 /// Parameters for an L1→L2 return call discovered during L1 delivery simulation.
@@ -983,6 +995,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
             l2_delivery_failed: call.delivery_failed,
             scope: call.scope.clone(),
             discovery_iteration: 0,
+            in_reverted_frame: call.in_reverted_frame,
         });
     }
 
@@ -1032,6 +1045,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
                 l2_delivery_failed: rc.l2_delivery_failed,
                 scope: rc.scope.clone(),
                 discovery_iteration: 0,
+                in_reverted_frame: false, // return calls: not in reverted frame
             });
         }
     } else if l2_calls.len() >= 2 {
@@ -1356,11 +1370,44 @@ pub fn build_l2_to_l1_continuation_entries(
         .filter(|(_, c)| c.parent_call_index.is_none())
         .collect();
 
+    // ── Partial revert detection ──
+    //
+    // When some root calls have `in_reverted_frame=true` and others don't, this is
+    // the partial revert pattern (revertContinueL2): a try/catch on L2 reverts some
+    // cross-chain calls but not all. On L1, the reverted group needs
+    // REVERT/REVERT_CONTINUE to undo their L1 state changes.
+    //
+    // Example: DualCallerWithRevert.execute() → try { targetA.increment() } catch {} → targetB.increment()
+    //   - Call 0 (targetA): in_reverted_frame=true, scope=[0,0]
+    //   - Call 1 (targetB): in_reverted_frame=false, scope=[1]
+    //   - L1 entries: [L2TX→CALL_A(scope=[0,0])], [RESULT_A→REVERT(scope=[0])],
+    //                 [REVERT_CONTINUE→CALL_B(scope=[1])], [RESULT_B→RESULT(terminal)]
+    let has_partial_revert = {
+        let any_reverted = l2_to_l1_calls.iter().any(|(_, c)| c.in_reverted_frame);
+        let any_non_reverted = l2_to_l1_calls.iter().any(|(_, c)| !c.in_reverted_frame);
+        any_reverted && any_non_reverted
+    };
+
+    if has_partial_revert {
+        tracing::info!(
+            target: "based_rollup::table_builder",
+            reverted = l2_to_l1_calls.iter().filter(|(_, c)| c.in_reverted_frame).count(),
+            non_reverted = l2_to_l1_calls.iter().filter(|(_, c)| !c.in_reverted_frame).count(),
+            "partial revert pattern detected — will insert REVERT/REVERT_CONTINUE between groups"
+        );
+    }
+
     // ── L2 table entries ──
     //
     // Mirror of the L1→L2 continuation's L1 entries (see build_continuation_entries).
     // ANY call with children gets scope navigation (callReturn{scope=[0]}), not just
     // the last call. Calls without children get simple CALL → RESULT(L1, void).
+    //
+    // For partial revert: only generate L2 entries for non-reverted calls.
+    // Reverted calls' entries are consumed then rolled back by EVM revert on L2.
+    // If a reverted call has the same actionHash as a non-reverted call (FIFO reuse),
+    // the single entry serves both. If different hashes, the reverted call fails with
+    // ExecutionNotFound (caught by try/catch).
     //
     // For a call with children, _processCallAtScope on L2 executes the return call
     // (e.g., receiveTokens) via proxy, which delivers assets back within the same tx.
@@ -1656,6 +1703,13 @@ pub fn build_l2_to_l1_continuation_entries(
     }
 
     for &(orig_idx, call) in &l2_to_l1_calls {
+        // For partial revert: skip L2 entries for reverted calls.
+        // Their entries are consumed→restored by EVM revert, or the call fails
+        // with ExecutionNotFound (caught by try/catch). Either way, the L2 effect
+        // is the same: the reverted call has no lasting impact.
+        if has_partial_revert && call.in_reverted_frame {
+            continue;
+        }
         generate_l2_entries_recursive(
             orig_idx,
             call,
@@ -2063,6 +2117,90 @@ pub fn build_l2_to_l1_continuation_entries(
                 l1_entry_count = l1_entries.len(),
                 "appended REVERT/REVERT_CONTINUE entries for tx_reverts"
             );
+        }
+    }
+
+    // When has_partial_revert=true, insert REVERT/REVERT_CONTINUE between the
+    // last reverted call and the first non-reverted call on L1.
+    //
+    // The normal multi-call loop builds entries like:
+    //   Entry 0: L2TX → CALL_reverted(scope=[0,0])
+    //   Entry 1: RESULT_reverted → CALL_nonreverted(scope=[1])
+    //   Entry 2: RESULT_nonreverted → RESULT(terminal)
+    //
+    // Partial revert transforms this to:
+    //   Entry 0: L2TX → CALL_reverted(scope=[0,0])
+    //   Entry 1: RESULT_reverted → REVERT(scope=[0])
+    //   Entry 2: REVERT_CONTINUE → CALL_nonreverted(scope=[1])
+    //   Entry 3: RESULT_nonreverted → RESULT(terminal)
+    //
+    // The transformation: find the entry whose nextAction is the first non-reverted
+    // call's CALL, replace it with REVERT, insert REVERT_CONTINUE → CALL.
+    if has_partial_revert && !l1_entries.is_empty() {
+        use crate::cross_chain::{compute_revert_continue_hash, revert_action};
+
+        // Find the first non-reverted root call's position in l2_to_l1_calls.
+        let first_non_reverted_root_pos = l2_to_l1_calls
+            .iter()
+            .position(|(_, c)| !c.in_reverted_frame);
+
+        if let Some(_non_rev_pos) = first_non_reverted_root_pos {
+            // Find the L1 entry whose nextAction chains to the first non-reverted call.
+            // This is the entry whose nextAction.action_type == Call and whose
+            // nextAction matches the non-reverted call's delivery (same destination,
+            // data, source_address, scope).
+            //
+            // In the simple case (2 calls, no children):
+            //   Entry 1 has nextAction = CALL(destination=non_reverted.dest, scope=[1])
+            let boundary_idx = l1_entries.iter().position(|e| {
+                e.next_action.action_type == CrossChainActionType::Call
+                    && !l2_to_l1_calls.iter().any(|(_, c)| {
+                        c.in_reverted_frame
+                            && c.call_action.destination == e.next_action.destination
+                            && c.call_action.data == e.next_action.data
+                    })
+                    && l2_to_l1_calls.iter().any(|(_, c)| {
+                        !c.in_reverted_frame
+                            && c.call_action.destination == e.next_action.destination
+                            && c.call_action.data == e.next_action.data
+                    })
+            });
+
+            if let Some(idx) = boundary_idx {
+                // Save the non-reverted CALL action
+                let continuation_call = l1_entries[idx].next_action.clone();
+
+                // Replace with REVERT(scope=[0])
+                l1_entries[idx].next_action =
+                    revert_action(our_rollup_id, vec![alloy_primitives::U256::ZERO]);
+
+                // Insert REVERT_CONTINUE → continuation_call
+                l1_entries.insert(
+                    idx + 1,
+                    CrossChainExecutionEntry {
+                        state_deltas: vec![CrossChainStateDelta {
+                            rollup_id: our_rollup_id,
+                            current_state: alloy_primitives::B256::ZERO,
+                            new_state: alloy_primitives::B256::ZERO,
+                            ether_delta: alloy_primitives::I256::ZERO,
+                        }],
+                        action_hash: compute_revert_continue_hash(our_rollup_id),
+                        next_action: continuation_call,
+                    },
+                );
+
+                tracing::info!(
+                    target: "based_rollup::table_builder",
+                    boundary_idx = idx,
+                    l1_entry_count = l1_entries.len(),
+                    "inserted REVERT/REVERT_CONTINUE for partial revert pattern"
+                );
+            } else {
+                tracing::warn!(
+                    target: "based_rollup::table_builder",
+                    "partial revert: could not find boundary entry to insert REVERT"
+                );
+            }
         }
     }
 

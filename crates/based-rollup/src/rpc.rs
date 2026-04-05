@@ -345,6 +345,10 @@ pub struct BuildL2ToL1Call {
     /// Accumulated scope for L1 delivery.
     #[serde(default)]
     pub scope: Vec<U256>,
+    /// Whether this call is inside a reverted frame on L2 (try/catch that reverts).
+    /// Used for partial revert patterns where some calls need REVERT/REVERT_CONTINUE.
+    #[serde(default)]
+    pub in_reverted_frame: bool,
 }
 
 /// A return call (L1→L2) for the reverse multi-call continuation execution table builder.
@@ -999,6 +1003,7 @@ where
                 delivery_return_data: c.delivery_return_data.to_vec(),
                 delivery_failed: c.delivery_failed,
                 scope: c.scope.clone(),
+                in_reverted_frame: c.in_reverted_frame,
             })
             .collect();
 

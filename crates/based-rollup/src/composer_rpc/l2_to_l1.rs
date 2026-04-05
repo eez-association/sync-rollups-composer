@@ -446,13 +446,18 @@ async fn queue_l2_to_l1_multi_call_entries(
     let l2_calls: Vec<serde_json::Value> = detected_l2_calls
         .iter()
         .map(|call| {
+            let scope_vals: Vec<String> = (0..call.trace_depth.max(1))
+                .map(|_| "0x0".to_string())
+                .collect();
             serde_json::json!({
                 "destination": format!("{}", call.destination),
                 "data": format!("0x{}", hex::encode(&call.calldata)),
                 "value": format!("{}", call.value),
                 "sourceAddress": format!("{}", call.source_address),
                 "deliveryReturnData": format!("0x{}", hex::encode(&call.delivery_return_data)),
-                "deliveryFailed": call.delivery_failed
+                "deliveryFailed": call.delivery_failed,
+                "inRevertedFrame": call.in_reverted_frame,
+                "scope": scope_vals
             })
         })
         .collect();
@@ -1759,6 +1764,7 @@ async fn simulate_l1_delivery(
                 delivery_return_data: final_return_data.clone(),
                 delivery_failed: final_delivery_failed,
                 scope: root_scope.to_vec(),
+                in_reverted_frame: false,
             };
 
             let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
@@ -2603,6 +2609,7 @@ async fn simulate_l1_combined_delivery(
                     delivery_return_data: per_call_return_data[i].clone(),
                     delivery_failed: per_call_delivery_failed[i],
                     scope: call_scope.clone(),
+                    in_reverted_frame: false,
                 };
 
                 let return_calls_for_builder: Vec<crate::table_builder::L2ReturnCall> =
@@ -3387,6 +3394,10 @@ struct DetectedL2InternalCall {
     /// Depth of the proxy call in the L2 trace tree (root = 0).
     /// Used to compute L1 delivery scope: scope = vec![0; trace_depth - 1] (direct caller excluded).
     trace_depth: usize,
+    /// Whether this call is inside a reverted frame (ancestor has "error" in trace).
+    /// For partial revert patterns (revertContinueL2): calls inside try/catch that
+    /// reverts need REVERT/REVERT_CONTINUE on L1 to undo their L1 effects.
+    in_reverted_frame: bool,
 }
 
 /// L2 proxy lookup: queries `authorizedProxies(address)` on the L2 CCM.
@@ -3460,6 +3471,7 @@ async fn walk_l2_trace_generic(
             delivery_return_data: vec![],
             delivery_failed: false,
             trace_depth: c.trace_depth,
+            in_reverted_frame: c.in_reverted_frame,
         })
         .collect()
 }
@@ -4270,6 +4282,7 @@ async fn trace_and_detect_l2_internal_calls(
                 delivery_return_data: c.delivery_return_data.clone(),
                 delivery_failed: c.delivery_failed,
                 scope: vec![U256::ZERO; c.trace_depth.max(1)],
+                in_reverted_frame: c.in_reverted_frame,
             })
             .collect();
         let tb_return_calls: Vec<crate::table_builder::L2ReturnCall> = early_return_calls
