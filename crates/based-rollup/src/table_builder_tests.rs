@@ -813,16 +813,24 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
     let d1_root = make_l2_to_l1_detected(dest_root, vec![0x11], src_root, l2_id, None, 0);
     let d1_child = make_l2_to_l1_detected(dest_child, vec![0x22], src_child, l2_id, Some(0), 1);
 
-    let depth1_result =
-        build_l2_to_l1_continuation_entries(&[d1_root.clone(), d1_child.clone()], l2_id, &[0xc0], false);
+    let depth1_result = build_l2_to_l1_continuation_entries(
+        &[d1_root.clone(), d1_child.clone()],
+        l2_id,
+        &[0xc0],
+        false,
+    );
 
     // depth-2 scenario (root + child + grandchild).
     let d2_root = make_l2_to_l1_detected(dest_root, vec![0x11], src_root, l2_id, None, 0);
     let d2_child = make_l2_to_l1_detected(dest_child, vec![0x22], src_child, l2_id, Some(0), 1);
     let d2_grand = make_l2_to_l1_detected(dest_grand, vec![0x33], src_grand, l2_id, Some(1), 2);
 
-    let depth2_result =
-        build_l2_to_l1_continuation_entries(&[d2_root, d2_child, d2_grand.clone()], l2_id, &[0xc0], false);
+    let depth2_result = build_l2_to_l1_continuation_entries(
+        &[d2_root, d2_child, d2_grand.clone()],
+        l2_id,
+        &[0xc0],
+        false,
+    );
 
     // depth-2 must produce strictly more entries than depth-1.
     assert!(

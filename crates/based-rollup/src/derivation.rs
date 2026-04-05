@@ -412,7 +412,8 @@ impl DerivationPipeline {
             // (the on-chain stateRoot after ScopeReverted = batch_final_state_root).
             let batch_has_revert = entries.iter().any(|e| {
                 e.next_action.action_type == cross_chain::CrossChainActionType::Revert
-                    || e.next_action.action_type == cross_chain::CrossChainActionType::RevertContinue
+                    || e.next_action.action_type
+                        == cross_chain::CrossChainActionType::RevertContinue
             });
 
             // Collect action_hashes of entries that are part of REVERT groups.

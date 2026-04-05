@@ -1039,8 +1039,7 @@ async fn simulate_l1_to_l2_call_on_l2(
                 retry_trace_error = retry_trace.get("error").and_then(|v| v.as_str()).unwrap_or("none"),
                 "Run 2 failed — attempting to extract revert data from retry trace"
             );
-            let retry_inner =
-                extract_inner_destination_return_data(&retry_trace, destination);
+            let retry_inner = extract_inner_destination_return_data(&retry_trace, destination);
             if let Some(ref data) = retry_inner {
                 if !data.is_empty() {
                     tracing::info!(
@@ -1072,7 +1071,8 @@ async fn simulate_l1_to_l2_call_on_l2(
             });
             if let Ok(resp) = client.post(l2_rpc_url).json(&direct_req).send().await {
                 if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(trace) = body.get("result")
+                    if let Some(trace) = body
+                        .get("result")
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
                         .and_then(|a| a.first())

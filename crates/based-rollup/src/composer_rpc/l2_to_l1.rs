@@ -1738,11 +1738,11 @@ async fn simulate_l1_delivery(
                 value,
                 _trigger_user,
                 rollup_id,
-                rlp_encoded_tx.to_vec(),        // RLP-encoded L2 tx for L2TX trigger
-                final_return_data.clone(),       // use known data (from iterative discovery or previous iteration)
-                final_delivery_failed,           // use known failed flag
-                root_scope.to_vec(),             // l1_delivery_scope from trace depth
-                false,                           // tx_reverts (simulation path, not real queueing)
+                rlp_encoded_tx.to_vec(), // RLP-encoded L2 tx for L2TX trigger
+                final_return_data.clone(), // use known data (from iterative discovery or previous iteration)
+                final_delivery_failed,     // use known failed flag
+                root_scope.to_vec(),       // l1_delivery_scope from trace depth
+                false,                     // tx_reverts (simulation path, not real queueing)
             );
             call_entries.l1_deferred_entries
         } else {

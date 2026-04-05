@@ -2625,7 +2625,11 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
     );
 
     // L2 entries: UNCHANGED — still 2 entries (CALL→RESULT pair)
-    assert_eq!(entries.l2_table_entries.len(), 2, "L2 entries must be 2 (unchanged)");
+    assert_eq!(
+        entries.l2_table_entries.len(),
+        2,
+        "L2 entries must be 2 (unchanged)"
+    );
     assert_eq!(
         entries.l2_table_entries[0].next_action.action_type,
         CrossChainActionType::Result,
@@ -2633,7 +2637,11 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
     );
 
     // L1 entries: 3 instead of 2
-    assert_eq!(entries.l1_deferred_entries.len(), 3, "L1 entries must be 3 for tx_reverts");
+    assert_eq!(
+        entries.l1_deferred_entries.len(),
+        3,
+        "L1 entries must be 3 for tx_reverts"
+    );
 
     // Entry 0: hash(L2TX) → CALL(delivery)
     let e0 = &entries.l1_deferred_entries[0];
@@ -2642,7 +2650,10 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
         CrossChainActionType::Call,
         "L1 Entry 0 nextAction must be CALL (delivery)"
     );
-    assert_eq!(e0.next_action.scope, delivery_scope, "delivery CALL scope must match");
+    assert_eq!(
+        e0.next_action.scope, delivery_scope,
+        "delivery CALL scope must match"
+    );
     assert_eq!(
         e0.state_deltas[0].ether_delta,
         I256::ZERO,
@@ -2661,7 +2672,8 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
         "REVERT rollupId must be our L2 rollup"
     );
     assert_eq!(
-        e1.next_action.scope, vec![U256::ZERO],
+        e1.next_action.scope,
+        vec![U256::ZERO],
         "REVERT scope must always be [0] (first child of _resolveScopes)"
     );
     assert!(
@@ -2721,7 +2733,9 @@ fn test_build_l2_to_l1_call_entries_no_revert_unchanged() {
         "tx_reverts=false must produce 2 L1 entries (unchanged)"
     );
     assert_eq!(
-        entries_normal.l1_deferred_entries[1].next_action.action_type,
+        entries_normal.l1_deferred_entries[1]
+            .next_action
+            .action_type,
         CrossChainActionType::Result,
         "tx_reverts=false Entry 1 must have terminal RESULT"
     );
@@ -2747,14 +2761,23 @@ fn test_build_l2_to_l1_call_entries_revert_with_eth_value() {
     assert_eq!(entries.l1_deferred_entries.len(), 3);
 
     // Entry 0: ether_delta = 0 (before ETH sent)
-    assert_eq!(entries.l1_deferred_entries[0].state_deltas[0].ether_delta, I256::ZERO);
+    assert_eq!(
+        entries.l1_deferred_entries[0].state_deltas[0].ether_delta,
+        I256::ZERO
+    );
 
     // Entry 1: ether_delta = -1 ETH (after ETH sent by proxy)
     let expected_delta = -I256::try_from(amount).unwrap();
-    assert_eq!(entries.l1_deferred_entries[1].state_deltas[0].ether_delta, expected_delta);
+    assert_eq!(
+        entries.l1_deferred_entries[1].state_deltas[0].ether_delta,
+        expected_delta
+    );
 
     // Entry 2: ether_delta = 0 (_etherDelta reset by _applyStateDeltas after Entry 1)
-    assert_eq!(entries.l1_deferred_entries[2].state_deltas[0].ether_delta, I256::ZERO);
+    assert_eq!(
+        entries.l1_deferred_entries[2].state_deltas[0].ether_delta,
+        I256::ZERO
+    );
 }
 
 /// Verify `attach_generic_state_deltas` for REVERT groups produces the correct
@@ -2917,5 +2940,8 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
     assert_eq!(entries[1].state_deltas[0].current_state, syn1);
     assert_eq!(entries[1].state_deltas[0].new_state, post);
     // Verify it's NOT identity (syn1 ≠ post for a 2-entry group)
-    assert_ne!(syn1, post, "normal group: intermediate must differ from post");
+    assert_ne!(
+        syn1, post,
+        "normal group: intermediate must differ from post"
+    );
 }

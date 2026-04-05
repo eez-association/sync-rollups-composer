@@ -2203,9 +2203,10 @@ where
                                 // reverted scopes so their ExecutionConsumed events are reverted
                                 // by ScopeReverted. We identify them by action_type (Revert) and
                                 // by matching the REVERT_CONTINUE action hash.
-                                let revert_continue_hash = crate::cross_chain::compute_revert_continue_hash(
-                                    alloy_primitives::U256::from(self.config.rollup_id)
-                                );
+                                let revert_continue_hash =
+                                    crate::cross_chain::compute_revert_continue_hash(
+                                        alloy_primitives::U256::from(self.config.rollup_id),
+                                    );
 
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
                                     std::collections::HashMap::new();
@@ -2213,7 +2214,9 @@ where
                                     if e.action_hash == alloy_primitives::B256::ZERO {
                                         continue;
                                     }
-                                    if e.next_action.action_type == crate::cross_chain::CrossChainActionType::Revert {
+                                    if e.next_action.action_type
+                                        == crate::cross_chain::CrossChainActionType::Revert
+                                    {
                                         continue;
                                     }
                                     if e.action_hash == revert_continue_hash {
