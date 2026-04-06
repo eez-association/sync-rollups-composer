@@ -395,11 +395,11 @@ jobs:
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
 
-      - name: "Protocol E2E: deepScope (L2→L1 deep nested scope)"
+      - name: "Protocol E2E: deepScopeL2 (L2→L1 deep nested scope)"
         timeout-minutes: 5
         run: |
           cd contracts/sync-rollups-protocol
-          bash script/e2e/shared/run-network.sh script/e2e/deepScope/E2E.s.sol \
+          bash script/e2e/shared/run-network.sh script/e2e/deepScopeL2/E2E.s.sol \
             --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
@@ -449,6 +449,51 @@ jobs:
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
 
+      - name: "Protocol E2E: revertCounter (L1→L2 revert simple)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertCounter/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: revertCounterL2 (L2→L1 revert simple)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertCounterL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: revertContinue (L1→L2 partial revert)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertContinue/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: revertContinueL2 (L2→L1 partial revert)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertContinueL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: nestedCallRevert (L1→L2 nested call with revert)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/nestedCallRevert/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
       # ── Bash E2E tests (longer, integration-level) ──────────────────
 
       - name: Run bridge E2E test
@@ -479,8 +524,7 @@ jobs:
         env:
           DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
-      - name: Run cross-chain atomicity E2E test (issue #272 — needs REVERT_CONTINUE)
-        continue-on-error: true  # Requires feature/reverts protocol support (not yet implemented)
+      - name: Run cross-chain atomicity E2E test (issue #272)
         run: bash scripts/e2e/test-cross-chain-atomicity.sh
         env:
           DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
