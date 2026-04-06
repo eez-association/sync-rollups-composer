@@ -704,95 +704,101 @@ pub fn build_continuation_entries(
     // Entry 3: RESULT(L2,void) hash → RESULT(L2,void)
 
     // ── L1 entries ──
-    // One entry per L1→L2 call, plus resolution entries for L2→L1 children.
-    for &(call_idx, detected) in &l1_to_l2_calls {
-        let call_action_hash = compute_action_hash(&detected.call_action);
-
-        // Build state delta placeholder with correct ether_delta from the call's value.
-        // The driver will replace currentState/newState with actual intermediate roots,
-        // but PRESERVES the ether_delta. This ensures the simulation and real postBatch
-        // both have correct ether accounting (required by Rollups.sol EtherDeltaMismatch check).
-        let call_value = detected.call_action.value;
-        let ether_delta = if call_value.is_zero() {
-            alloy_primitives::I256::ZERO
-        } else {
-            alloy_primitives::I256::try_from(call_value).unwrap_or(alloy_primitives::I256::ZERO)
-        };
-        tracing::debug!(
-            target: "based_rollup::table_builder",
-            call_idx,
-            dest = %detected.call_action.destination,
-            call_value = %call_value,
-            ether_delta = %ether_delta,
-            "L1 entry ether_delta computation"
-        );
-        let l1_entry_deltas = vec![CrossChainStateDelta {
-            rollup_id: our_rollup_id,
-            current_state: alloy_primitives::B256::ZERO, // placeholder — driver fills
-            new_state: alloy_primitives::B256::ZERO,     // placeholder — driver fills
-            ether_delta,
-        }];
-
-        // Find L2→L1 children of this call
-        let children: Vec<(usize, &DetectedCall)> = calls
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
-            })
-            .collect();
-
-        if children.is_empty() {
-            // Simple: CALL → RESULT(L2) terminal.
-            // The next_action RESULT data is what Rollups.sol returns to the L1 caller.
-            // Use l2_return_data when the L2 call returns data (future non-void L1→L2
-            // calls). Current continuation uses are void so result_void
-            // is correct.
-            let l1_terminal = if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed
-            {
-                CrossChainAction {
-                    action_type: CrossChainActionType::Result,
-                    rollup_id: our_rollup_id,
-                    destination: Address::ZERO,
-                    value: U256::ZERO,
-                    data: detected.l2_return_data.clone(),
-                    failed: detected.l2_delivery_failed,
-                    source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
-                    scope: vec![],
-                }
+    //
+    // For reentrant patterns, L1 entries must be ordered:
+    //   Phase 1: ALL CALL entries (consumed by executeCrossChainCall, top-down)
+    //   Phase 2: ALL RESULT resolution entries (consumed during scope unwind, bottom-up)
+    //
+    // This mirrors the L2 entry layout (Phase 1 children + Phase 2 results).
+    // Rollups.sol _findAndApplyExecution matches by (actionHash, currentState).
+    // State deltas are chained: entry[n].newState == entry[n+1].currentState.
+    // Interleaving CALL and RESULT entries breaks the chain because RESULT
+    // entries are consumed at different points in the scope navigation.
+    //
+    // For non-reentrant (continuation/flash-loan), the original interleaved
+    // layout is correct because there's only 1 executeCrossChainCall trigger
+    // and scope navigation consumes entries in order.
+    if is_reentrant {
+        // Phase 1: CALL entries (one per L1→L2 call)
+        for &(call_idx, detected) in &l1_to_l2_calls {
+            let call_action_hash = compute_action_hash(&detected.call_action);
+            let call_value = detected.call_action.value;
+            let ether_delta = if call_value.is_zero() {
+                alloy_primitives::I256::ZERO
             } else {
-                l2_result_void.clone()
+                alloy_primitives::I256::try_from(call_value)
+                    .unwrap_or(alloy_primitives::I256::ZERO)
             };
-            l1_entries.push(CrossChainExecutionEntry {
-                state_deltas: l1_entry_deltas.clone(),
-                action_hash: call_action_hash,
-                next_action: l1_terminal,
-            });
-        } else {
-            // Has children: CALL → first child CALL with accumulated scope.
-            // The child's scope is its pre-computed accumulated scope from detection.
-            let first_child = &children[0].1;
-            let mut scoped_child_action = first_child.call_action.clone();
-            scoped_child_action.scope = if first_child.scope.is_empty() {
-                vec![U256::ZERO] // fallback: depth 1 if no scope computed
+            let l1_entry_deltas = vec![CrossChainStateDelta {
+                rollup_id: our_rollup_id,
+                current_state: alloy_primitives::B256::ZERO,
+                new_state: alloy_primitives::B256::ZERO,
+                ether_delta,
+            }];
+
+            let children: Vec<(usize, &DetectedCall)> = calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.parent_call_index == Some(call_idx)
+                        && c.direction == CallDirection::L2ToL1
+                })
+                .collect();
+
+            if children.is_empty() {
+                // Terminal: CALL → RESULT(L2, data)
+                let l1_terminal =
+                    if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
+                        CrossChainAction {
+                            action_type: CrossChainActionType::Result,
+                            rollup_id: our_rollup_id,
+                            destination: Address::ZERO,
+                            value: U256::ZERO,
+                            data: detected.l2_return_data.clone(),
+                            failed: detected.l2_delivery_failed,
+                            source_address: Address::ZERO,
+                            source_rollup: U256::ZERO,
+                            scope: vec![],
+                        }
+                    } else {
+                        l2_result_void.clone()
+                    };
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: l1_entry_deltas,
+                    action_hash: call_action_hash,
+                    next_action: l1_terminal,
+                });
             } else {
-                first_child.scope.clone()
-            };
+                // Has children: CALL → first child CALL with scope
+                let first_child = &children[0].1;
+                let mut scoped_child_action = first_child.call_action.clone();
+                scoped_child_action.scope = if first_child.scope.is_empty() {
+                    vec![U256::ZERO]
+                } else {
+                    first_child.scope.clone()
+                };
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: l1_entry_deltas,
+                    action_hash: call_action_hash,
+                    next_action: scoped_child_action,
+                });
+            }
+        }
 
-            l1_entries.push(CrossChainExecutionEntry {
-                state_deltas: l1_entry_deltas.clone(),
-                action_hash: call_action_hash,
-                next_action: scoped_child_action,
-            });
+        // Phase 2: RESULT resolution entries (bottom-up, innermost first)
+        // As scopes unwind, _processCallAtScope builds RESULT(rollupId, returnData)
+        // and _findAndApplyExecution matches it against these entries.
+        for &(call_idx, detected) in l1_to_l2_calls.iter().rev() {
+            let children: Vec<(usize, &DetectedCall)> = calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.parent_call_index == Some(call_idx)
+                        && c.direction == CallDirection::L2ToL1
+                })
+                .collect();
 
-            // Resolution entries for each child.
-            // After child executes on L1, _processCallAtScope builds
-            // RESULT{rollupId=child_target_rollup, data=returnData, failed=!success}.
-            // The action_hash must match that RESULT hash. Use delivery_return_data
-            // when the child's L1 target returns data (e.g., non-void L1 contracts).
-            for (child_pos, child) in &children {
-                let _ = child_pos;
+            for (_child_pos, child) in &children {
                 let child_target_rollup = child.call_action.rollup_id;
                 let child_result =
                     if !child.delivery_return_data.is_empty() || child.l2_delivery_failed {
@@ -812,36 +818,6 @@ pub fn build_continuation_entries(
                     };
                 let child_result_hash = compute_action_hash(&child_result);
 
-                tracing::debug!(
-                    target: "based_rollup::table_builder",
-                    "L1 scope resolution FULL: child_pos={} hash={} type={:?} rollupId={} dest={} value={} data_hex=0x{} data_len={} failed={} sourceAddr={} sourceRollup={} scope_len={}",
-                    child_pos,
-                    child_result_hash,
-                    child_result.action_type,
-                    child_result.rollup_id,
-                    child_result.destination,
-                    child_result.value,
-                    hex::encode(&child_result.data),
-                    child_result.data.len(),
-                    child_result.failed,
-                    child_result.source_address,
-                    child_result.source_rollup,
-                    child_result.scope.len()
-                );
-
-                // Terminal next_action: the RESULT of the OUTER scope after
-                // the child's scope resolves. This is NOT the child's delivery
-                // return — it's the parent L1→L2 call's L2 delivery result.
-                //
-                // After newScope resolves the child CALL (scope=[0]),
-                // _findAndApplyExecution matches this entry and returns
-                // resolution_terminal as nextAction. This propagates back
-                // through newScope → executeCrossChainCall as the final
-                // RESULT of the entire scope chain.
-                //
-                // rollupId: our_rollup_id (L2), because the outer CALL targets L2.
-                // data: detected.l2_return_data (what the L2 delivery returned),
-                //       typically void for incrementProxy-style functions.
                 let resolution_terminal =
                     if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
                         CrossChainAction {
@@ -863,6 +839,113 @@ pub fn build_continuation_entries(
                     action_hash: child_result_hash,
                     next_action: resolution_terminal,
                 });
+            }
+        }
+    } else {
+        // ── Non-reentrant (continuation/flash-loan): interleaved layout ──
+        for &(call_idx, detected) in &l1_to_l2_calls {
+            let call_action_hash = compute_action_hash(&detected.call_action);
+            let call_value = detected.call_action.value;
+            let ether_delta = if call_value.is_zero() {
+                alloy_primitives::I256::ZERO
+            } else {
+                alloy_primitives::I256::try_from(call_value)
+                    .unwrap_or(alloy_primitives::I256::ZERO)
+            };
+            let l1_entry_deltas = vec![CrossChainStateDelta {
+                rollup_id: our_rollup_id,
+                current_state: alloy_primitives::B256::ZERO,
+                new_state: alloy_primitives::B256::ZERO,
+                ether_delta,
+            }];
+
+            let children: Vec<(usize, &DetectedCall)> = calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.parent_call_index == Some(call_idx)
+                        && c.direction == CallDirection::L2ToL1
+                })
+                .collect();
+
+            if children.is_empty() {
+                let l1_terminal =
+                    if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
+                        CrossChainAction {
+                            action_type: CrossChainActionType::Result,
+                            rollup_id: our_rollup_id,
+                            destination: Address::ZERO,
+                            value: U256::ZERO,
+                            data: detected.l2_return_data.clone(),
+                            failed: detected.l2_delivery_failed,
+                            source_address: Address::ZERO,
+                            source_rollup: U256::ZERO,
+                            scope: vec![],
+                        }
+                    } else {
+                        l2_result_void.clone()
+                    };
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: l1_entry_deltas,
+                    action_hash: call_action_hash,
+                    next_action: l1_terminal,
+                });
+            } else {
+                let first_child = &children[0].1;
+                let mut scoped_child_action = first_child.call_action.clone();
+                scoped_child_action.scope = if first_child.scope.is_empty() {
+                    vec![U256::ZERO]
+                } else {
+                    first_child.scope.clone()
+                };
+                l1_entries.push(CrossChainExecutionEntry {
+                    state_deltas: l1_entry_deltas,
+                    action_hash: call_action_hash,
+                    next_action: scoped_child_action,
+                });
+
+                for (_child_pos, child) in &children {
+                    let child_target_rollup = child.call_action.rollup_id;
+                    let child_result =
+                        if !child.delivery_return_data.is_empty() || child.l2_delivery_failed {
+                            CrossChainAction {
+                                action_type: CrossChainActionType::Result,
+                                rollup_id: child_target_rollup,
+                                destination: Address::ZERO,
+                                value: U256::ZERO,
+                                data: child.delivery_return_data.clone(),
+                                failed: child.l2_delivery_failed,
+                                source_address: Address::ZERO,
+                                source_rollup: U256::ZERO,
+                                scope: vec![],
+                            }
+                        } else {
+                            result_void(child_target_rollup)
+                        };
+                    let child_result_hash = compute_action_hash(&child_result);
+
+                    let resolution_terminal =
+                        if !detected.l2_return_data.is_empty() || detected.l2_delivery_failed {
+                            CrossChainAction {
+                                action_type: CrossChainActionType::Result,
+                                rollup_id: our_rollup_id,
+                                destination: Address::ZERO,
+                                value: U256::ZERO,
+                                data: detected.l2_return_data.clone(),
+                                failed: detected.l2_delivery_failed,
+                                source_address: Address::ZERO,
+                                source_rollup: U256::ZERO,
+                                scope: vec![],
+                            }
+                        } else {
+                            l2_result_void.clone()
+                        };
+                    l1_entries.push(CrossChainExecutionEntry {
+                        state_deltas: empty_deltas.clone(),
+                        action_hash: child_result_hash,
+                        next_action: resolution_terminal,
+                    });
+                }
             }
         }
     }

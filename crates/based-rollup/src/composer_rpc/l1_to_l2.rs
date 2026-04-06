@@ -3929,7 +3929,10 @@ async fn trace_and_detect_internal_calls(
 
     // Final in_reverted_frame correction from the last converged retrace.
     // Uses property-based matching with count pairing (same as early correction).
-    if !last_converged_walk.is_empty() && last_converged_walk.len() == detected_calls.len() {
+    // No length guard — walk only contains L1→L2 calls while detected_calls may
+    // also include L2→L1 children from enrichment. Property matching by
+    // (dest, calldata, value, source, depth) ensures only identical calls update.
+    if !last_converged_walk.is_empty() {
         let mut consumed: std::collections::HashMap<
             (Address, Vec<u8>, U256, Address, usize),
             usize,
