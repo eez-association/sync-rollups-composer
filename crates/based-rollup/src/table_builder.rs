@@ -624,9 +624,15 @@ pub fn build_continuation_entries(
                 // Save the non-reverted CALL action
                 let continuation_call = l2_entries[idx].next_action.clone();
 
-                // Replace with REVERT(scope=[0])
+                // REVERT scope = position of the first reverted call in the sibling
+                // scope tree. E.g., if the first call (pos=0) reverts → scope=[0].
+                // If the second call (pos=1) reverts → scope=[1].
+                let first_reverted_pos = l1_to_l2_calls
+                    .iter()
+                    .position(|(_, c)| c.in_reverted_frame)
+                    .unwrap_or(0);
                 l2_entries[idx].next_action =
-                    revert_action(our_rollup_id, vec![alloy_primitives::U256::ZERO]);
+                    revert_action(our_rollup_id, vec![U256::from(first_reverted_pos)]);
 
                 // Build the continuation CALL with scope=[non_rev_pos] so _resolveScopes
                 // navigates to the correct sibling scope after the revert.
