@@ -226,11 +226,11 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Start Docker stack (core services only — no explorers, no crosschain-tx-sender)
+      - name: Start Docker stack (core services only — no explorers, no tx-senders)
         run: |
           docker compose -f deployments/testnet-eez/docker-compose.yml \
             up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender \
-            complex-tx-sender
+            deploy-flash-loan
         env:
           COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
@@ -494,6 +494,8 @@ jobs:
           docker compose -f deployments/testnet-eez/docker-compose.yml logs fullnode1 --tail 50
           echo "=== Deploy logs ==="
           docker compose -f deployments/testnet-eez/docker-compose.yml logs deploy --tail 50
+          echo "=== Deploy-flash-loan logs ==="
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs deploy-flash-loan --tail 50
           echo "=== Health ==="
           curl -s http://localhost:9560/health || echo "unreachable"
         env:
