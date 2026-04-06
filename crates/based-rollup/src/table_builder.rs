@@ -88,11 +88,13 @@ pub struct DetectedCall {
 #[derive(Debug, Clone)]
 pub struct ContinuationEntries {
     /// Entries loaded into L2 execution table via `loadExecutionTable`.
-    /// These have empty state deltas (filled later by attach_*_state_deltas).
     pub l2_entries: Vec<CrossChainExecutionEntry>,
     /// Entries posted to L1 via `postBatch`.
-    /// These have empty state deltas (filled later by the driver).
     pub l1_entries: Vec<CrossChainExecutionEntry>,
+    /// When true, L1 entries are independent (not chained). The reverted call's
+    /// state change is rolled back by try/catch, so subsequent entries see the
+    /// PRE-revert state. Used by the driver to override state deltas.
+    pub l1_independent_entries: bool,
 }
 
 /// Compute the action hash for a `CrossChainAction` using Solidity ABI encoding.
@@ -267,6 +269,7 @@ pub fn build_continuation_entries(
         return ContinuationEntries {
             l2_entries: vec![],
             l1_entries: vec![],
+            l1_independent_entries: false,
         };
     }
 
@@ -314,13 +317,7 @@ pub fn build_continuation_entries(
     //                 [REVERT_CONTINUE→CALL_B(scope=[1])],
     //                 [RESULT_B→RESULT(terminal)]
     //   - L1 entries remain simple: [CALL_A→RESULT_A], [CALL_B→RESULT_B]
-    // DISABLED: L1→L2 partial revert detection is not yet reliable.
-    // The in_reverted_frame propagation through the L1→L2 iterative discovery
-    // pipeline has edge cases (CallTwice regression). The revertContinue (L1→L2)
-    // test needs a different approach — see project memory for details.
-    // TODO: Re-enable when in_reverted_frame is reliable for L1→L2 direction.
-    let has_partial_revert = false;
-    let _has_partial_revert_disabled = {
+    let has_partial_revert = {
         let any_reverted = l1_to_l2_calls.iter().any(|(_, c)| c.in_reverted_frame);
         let any_non_reverted = l1_to_l2_calls.iter().any(|(_, c)| !c.in_reverted_frame);
         any_reverted && any_non_reverted
@@ -646,6 +643,16 @@ pub fn build_continuation_entries(
                     },
                 );
 
+                // Fix terminal: the last L2 entry's nextAction should be void
+                // RESULT{rollupId=our_rollup_id, data=""}. The normal continuation
+                // model may set data=l2_return_data, but for executeIncomingCrossChainCall
+                // the terminal RESULT is always void.
+                if let Some(last) = l2_entries.last_mut() {
+                    if last.next_action.action_type == CrossChainActionType::Result {
+                        last.next_action.data = vec![];
+                    }
+                }
+
                 tracing::info!(
                     target: "based_rollup::table_builder",
                     boundary_idx = idx,
@@ -860,6 +867,7 @@ pub fn build_continuation_entries(
     ContinuationEntries {
         l2_entries,
         l1_entries,
+        l1_independent_entries: has_partial_revert,
     }
 }
 

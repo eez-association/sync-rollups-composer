@@ -114,6 +114,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
             extra_l2_entries: vec![],
             l1_entries: vec![],
             tx_reverts: false,
+            l1_independent_entries: false,
         });
         q.push(QueuedCrossChainCall {
             call_entry: make_entry(0x03),
@@ -123,6 +124,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
             extra_l2_entries: vec![],
             l1_entries: vec![],
             tx_reverts: false,
+            l1_independent_entries: false,
         });
         q.push(QueuedCrossChainCall {
             call_entry: make_entry(0x05),
@@ -132,6 +134,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
             extra_l2_entries: vec![],
             l1_entries: vec![],
             tx_reverts: false,
+            l1_independent_entries: false,
         });
     }
 

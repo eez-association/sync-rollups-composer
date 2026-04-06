@@ -322,6 +322,19 @@ pub fn filter_new_by_count<T>(
     result
 }
 
+/// Try to decode `loadExecutionTable(entries)` calldata into Rust entry types.
+/// Returns `None` if the selector doesn't match or decoding fails.
+pub fn try_decode_load_execution_table(calldata: &[u8]) -> Option<Vec<CrossChainExecutionEntry>> {
+    use alloy_sol_types::SolCall;
+    let decoded = ICrossChainManagerL2::loadExecutionTableCall::abi_decode(calldata).ok()?;
+    let entries: Vec<CrossChainExecutionEntry> = decoded
+        .entries
+        .iter()
+        .filter_map(|e| CrossChainExecutionEntry::from_sol(e).ok())
+        .collect();
+    Some(entries)
+}
+
 /// Encode the calldata for `CrossChainManagerL2.loadExecutionTable(entries)`.
 pub fn encode_load_execution_table_calldata(entries: &[CrossChainExecutionEntry]) -> Bytes {
     let sol_entries: Vec<ICrossChainManagerL2::ExecutionEntry> =

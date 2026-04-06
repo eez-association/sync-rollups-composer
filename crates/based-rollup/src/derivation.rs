@@ -410,11 +410,40 @@ impl DerivationPipeline {
             // reverted scope, no ExecutionConsumed events, filtered out of
             // deferred_entries. Their state deltas should NOT advance effective_state_root
             // (the on-chain stateRoot after ScopeReverted = batch_final_state_root).
-            let batch_has_revert = entries.iter().any(|e| {
+            let l1_has_revert = entries.iter().any(|e| {
                 e.next_action.action_type == cross_chain::CrossChainActionType::Revert
                     || e.next_action.action_type
                         == cross_chain::CrossChainActionType::RevertContinue
             });
+
+            // Also detect REVERT in the L2 block body (L1→L2 partial revert).
+            // For L1→L2 direction, REVERT/REVERT_CONTINUE entries appear in
+            // loadExecutionTable calldata in the block body, not in L1 entries.
+            let l2_has_revert = block_txs.iter().any(|tx_bytes| {
+                if tx_bytes.is_empty() || tx_bytes.as_ref() == [0xc0] {
+                    return false;
+                }
+                let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
+                    match alloy_rlp::Decodable::decode(&mut tx_bytes.as_ref()) {
+                        Ok(t) => t,
+                        Err(_) => return false,
+                    };
+                use alloy_consensus::Transaction as _;
+                txs.iter().any(|tx| {
+                    if let Some(entries) = cross_chain::try_decode_load_execution_table(tx.input())
+                    {
+                        entries.iter().any(|e| {
+                            e.next_action.action_type == cross_chain::CrossChainActionType::Revert
+                                || e.next_action.action_type
+                                    == cross_chain::CrossChainActionType::RevertContinue
+                        })
+                    } else {
+                        false
+                    }
+                })
+            });
+
+            let batch_has_revert = l1_has_revert || l2_has_revert;
 
             // Collect action_hashes of entries that are part of REVERT groups.
             // These entries' deltas should NOT be chained into effective_state_root.
@@ -636,7 +665,7 @@ impl DerivationPipeline {
                 // snapshot to the driver. The driver handles ALL filtering
                 // generically via trial-execution + ExecutionConsumed events +
                 // prefix counting. No type-specific counting is needed here.
-                let filtering = if has_unconsumed_entries && i == 0 {
+                let filtering = if has_unconsumed_entries && !batch_has_revert && i == 0 {
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,

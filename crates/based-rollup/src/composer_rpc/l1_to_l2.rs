@@ -454,6 +454,14 @@ async fn queue_execution_table(
             if c.trace_depth > 0 {
                 call_json["l1TraceDepth"] = serde_json::json!(c.trace_depth);
             }
+            // Propagate scope for nested calls so the RPC handler can set the
+            // correct BuildExecutionTableCall.scope field (distinct from the
+            // call_action.scope which must stay empty for L1 actionHash identity).
+            if c.trace_depth > 1 {
+                let scope_vals: Vec<String> =
+                    (0..c.trace_depth).map(|_| "0x0".to_string()).collect();
+                call_json["scope"] = serde_json::json!(scope_vals);
+            }
             call_json
         })
         .collect();
@@ -2372,15 +2380,17 @@ async fn trace_and_detect_internal_calls(
     )
     .await;
 
+    // Track the last converged retrace walk for in_reverted_frame correction.
+    // The initial trace (without entries) sets ALL calls to in_reverted_frame=true
+    // (whole tx reverts). The converged retrace (entries loaded) reflects the REAL
+    // trace behavior: only calls inside try/catch that reverts for business logic
+    // have in_reverted_frame=true. We save at the SECOND loop convergence and apply
+    // as a final positional override before queue_execution_table.
+    let mut last_converged_walk: Vec<DetectedInternalCall> = Vec::new();
+
     // Iterative L1 discovery: if the initial trace found cross-chain calls but the
     // user tx reverted, retrace with entries loaded to discover calls hidden behind
-    // the revert. Example: Aggregator calls Bridge.bridgeEther (reverts without
-    // entries) then proxy.incrementProxy (never reached). Loading entries for the
-    // bridge deposit allows the retrace to reach incrementProxy.
-    //
-    // This mirrors trace_and_detect_l2_internal_calls in l2_to_l1.rs (Problem 1).
-    // Uses build_and_run_l1_postbatch_trace which already handles entry construction,
-    // proof signing, and traceCallMany execution.
+    // the revert.
     if top_level_error && !detected_calls.is_empty() {
         if let Some(builder_key_hex) = &builder_private_key {
             let key_clean = builder_key_hex
@@ -2917,13 +2927,10 @@ async fn trace_and_detect_internal_calls(
                         "walked user tx trace for cross-chain calls"
                     );
 
+                    // Save retrace walk for final in_reverted_frame correction.
+                    last_converged_walk = new_detected.clone();
+
                     // Find truly new calls using count-based comparison.
-                    // A call is "new" only if new_detected has MORE of that
-                    // (dest, calldata, value, source_address) tuple than all_calls —
-                    // supports legitimate duplicate calls (e.g., CallTwice calling
-                    // increment() twice). The CALL action hash includes value and
-                    // sourceAddress, so two calls to the same proxy with different
-                    // ETH values or from different sources are distinct.
                     let new_calls = filter_new_by_count(new_detected, &all_calls, |a, b| {
                         a.destination == b.destination
                             && a.calldata == b.calldata
@@ -3855,6 +3862,27 @@ async fn trace_and_detect_internal_calls(
         return Ok(None);
     }
 
+    // Final in_reverted_frame correction from the last converged retrace.
+    // The initial trace (without entries) marks ALL calls as in_reverted_frame=true.
+    // The converged retrace (with entries loaded) has correct values.
+    // Apply positional update ONLY when counts match — this ensures calls
+    // discovered after the retrace (e.g., CallTwice second call) are not affected.
+    if !last_converged_walk.is_empty() && last_converged_walk.len() == detected_calls.len() {
+        for (i, existing) in detected_calls.iter_mut().enumerate() {
+            if existing.in_reverted_frame != last_converged_walk[i].in_reverted_frame {
+                tracing::info!(
+                    target: "based_rollup::l1_proxy",
+                    idx = i,
+                    dest = %existing.destination,
+                    old = existing.in_reverted_frame,
+                    new = last_converged_walk[i].in_reverted_frame,
+                    "final in_reverted_frame correction from converged retrace"
+                );
+                existing.in_reverted_frame = last_converged_walk[i].in_reverted_frame;
+            }
+        }
+    }
+
     for (i, c) in detected_calls.iter().enumerate() {
         tracing::info!(
             target: "based_rollup::composer_rpc::l1_to_l2",
@@ -3865,7 +3893,7 @@ async fn trace_and_detect_internal_calls(
             call_success = c.call_success,
             return_data_len = c.return_data.len(),
             trace_depth = c.trace_depth,
-            "FINAL detected_calls before queue_execution_table"
+            "FINAL detected_calls after in_reverted_frame correction"
         );
     }
 
