@@ -289,7 +289,7 @@ pub fn build_continuation_entries(
         .collect();
 
     for (i, c) in l1_to_l2_calls.iter() {
-        tracing::info!(
+        tracing::debug!(
             target: "based_rollup::table_builder",
             idx = i,
             direction = ?c.direction,
@@ -487,7 +487,7 @@ pub fn build_continuation_entries(
                 }
             };
 
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 "L2 result propagation: pos={} is_last={} is_first={} trigger_hash={} next_type={:?} next_rollup={} next_data_len={}",
                 pos, is_last, is_first, result_hash,
@@ -602,7 +602,7 @@ pub fn build_continuation_entries(
         if let Some(non_rev_pos) = first_non_reverted_pos {
             let first_non_reverted = l1_to_l2_calls[non_rev_pos].1;
 
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 non_rev_pos,
                 l2_entry_count = l2_entries.len(),
@@ -666,7 +666,7 @@ pub fn build_continuation_entries(
                     "inserted REVERT/REVERT_CONTINUE in L2 entries for L1→L2 partial revert"
                 );
                 for (i, e) in l2_entries.iter().enumerate() {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "based_rollup::table_builder",
                         idx = i,
                         action_hash = %e.action_hash,
@@ -718,7 +718,7 @@ pub fn build_continuation_entries(
         } else {
             alloy_primitives::I256::try_from(call_value).unwrap_or(alloy_primitives::I256::ZERO)
         };
-        tracing::info!(
+        tracing::debug!(
             target: "based_rollup::table_builder",
             call_idx,
             dest = %detected.call_action.destination,
@@ -812,7 +812,7 @@ pub fn build_continuation_entries(
                     };
                 let child_result_hash = compute_action_hash(&child_result);
 
-                tracing::info!(
+                tracing::debug!(
                     target: "based_rollup::table_builder",
                     "L1 scope resolution FULL: child_pos={} hash={} type={:?} rollupId={} dest={} value={} data_hex=0x{} data_len={} failed={} sourceAddr={} sourceRollup={} scope_len={}",
                     child_pos,
@@ -1349,7 +1349,7 @@ fn push_reentrant_child_entries(
                     scope: vec![],
                 }
             };
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 "L1 Entry {}b[{}] (reentrant child, leaf): hash={} dest={} source={} data_len={} is_return={} return_data_len={}",
                 parent_idx, child_pos, child_trigger_hash, child_trigger.destination,
@@ -1382,7 +1382,7 @@ fn push_reentrant_child_entries(
                 scope: child_scope,
             };
 
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 "L1 Entry {}b[{}] (reentrant child, internal→execution): hash={} exec_dest={} \
                  grandchildren={} depth={}",
@@ -1598,7 +1598,7 @@ pub fn build_l2_to_l1_continuation_entries(
         let call_hash = compute_action_hash(&call.call_action);
         let this_call_children = find_children(detected, call_orig_idx);
 
-        tracing::info!(
+        tracing::debug!(
             target: "based_rollup::table_builder",
             l2_entry_idx = l2_entries.len(),
             call_orig_idx,
@@ -1664,7 +1664,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 scope: first_child_scope,
             };
 
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 dest = %call_return.destination,
                 source = %call_return.source_address,
@@ -1716,7 +1716,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     scope: sibling_scope,
                 };
 
-                tracing::info!(
+                tracing::debug!(
                     target: "based_rollup::table_builder",
                     l2_entry_idx = l2_entries.len(),
                     child_pos,
@@ -1788,7 +1788,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 }
             };
             let l2_result_hash = compute_action_hash(&l2_scope_result);
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 l2_entry_idx = l2_entries.len(),
                 result_hash = %l2_result_hash,
@@ -2010,7 +2010,7 @@ pub fn build_l2_to_l1_continuation_entries(
             };
             let trigger_hash = compute_action_hash(&trigger);
 
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 "L1 Entry {} (L2TX trigger→delivery): hash={} dest={} scope_len={} ether_delta={}",
                 root_pos, trigger_hash, delivery.destination, delivery.scope.len(), delivery_ether_delta
@@ -2124,7 +2124,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 };
             let scope_result_hash = compute_action_hash(&scope_result);
 
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 "L1 Entry {} (scope resolution): hash={} child_count={} return_data_len={}",
                 root_pos, scope_result_hash, this_call_children.len(),
@@ -2214,7 +2214,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 }
             };
 
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 "L1 Entry {} (sibling RESULT→next): hash={} next_type={:?} next_dest={}",
                 root_pos, delivery_result_hash, next_action.action_type,
@@ -2309,14 +2309,14 @@ pub fn build_l2_to_l1_continuation_entries(
             .position(|(_, c)| !c.in_reverted_frame);
 
         if let Some(non_rev_pos) = first_non_reverted_root_pos {
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 non_rev_pos,
                 l1_entry_count = l1_entries.len(),
                 "partial revert: searching for boundary entry to insert REVERT"
             );
             for (i, e) in l1_entries.iter().enumerate() {
-                tracing::info!(
+                tracing::debug!(
                     target: "based_rollup::table_builder",
                     idx = i,
                     action_hash = %e.action_hash,
@@ -2344,7 +2344,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 s.push(U256::from(non_rev_pos));
                 s
             };
-            tracing::info!(
+            tracing::debug!(
                 target: "based_rollup::table_builder",
                 expected_scope = ?expected_scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
                 "partial revert: searching for entry with nextAction.scope matching non-reverted call"
@@ -2384,7 +2384,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     "inserted REVERT/REVERT_CONTINUE for partial revert pattern"
                 );
                 for (i, e) in l1_entries.iter().enumerate() {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "based_rollup::table_builder",
                         idx = i,
                         action_hash = %e.action_hash,

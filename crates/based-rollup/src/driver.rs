@@ -1248,7 +1248,7 @@ where
                             rpc_entries.extend(call.extra_l2_entries.iter().cloned());
                         }
                     } else {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "based_rollup::driver",
                             call_id = %call.call_entry.action_hash,
                             data_len = call.result_entry.next_action.data.len(),
@@ -1701,7 +1701,7 @@ where
                             delta.current_state = pre_root;
                         }
                     }
-                    info!(
+                    debug!(
                         target: "based_rollup::driver",
                         group = k,
                         entries = end - start,
@@ -1724,7 +1724,7 @@ where
                     composite_input.extend_from_slice(e.action_hash.as_slice());
                     composite_input.extend_from_slice(next_action_hash.as_slice());
                     let composite = alloy_primitives::keccak256(&composite_input);
-                    info!(
+                    debug!(
                         target: "based_rollup::driver",
                         idx = i,
                         action_hash = %e.action_hash,
