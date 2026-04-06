@@ -229,8 +229,7 @@ jobs:
       - name: Start Docker stack (core services only — no explorers, no tx-senders)
         run: |
           docker compose -f deployments/testnet-eez/docker-compose.yml \
-            up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender \
-            deploy-flash-loan
+            up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender
         env:
           COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
