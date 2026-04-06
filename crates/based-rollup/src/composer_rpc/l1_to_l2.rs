@@ -2446,8 +2446,9 @@ async fn trace_and_detect_internal_calls(
                     .await;
 
                     // Find truly new calls (not already in detected_calls).
+                    // Use iter().cloned() to preserve new_detected for saving.
                     let truly_new: Vec<_> = new_detected
-                        .into_iter()
+                        .iter()
                         .filter(|new_call| {
                             !detected_calls.iter().any(|existing| {
                                 existing.destination == new_call.destination
@@ -2456,9 +2457,12 @@ async fn trace_and_detect_internal_calls(
                                     && existing.source_address == new_call.source_address
                             })
                         })
+                        .cloned()
                         .collect();
 
                     if truly_new.is_empty() {
+                        // Save first loop retrace for early in_reverted_frame correction.
+                        last_converged_walk = new_detected;
                         tracing::info!(
                             target: "based_rollup::l1_proxy",
                             iteration,
@@ -2480,9 +2484,27 @@ async fn trace_and_detect_internal_calls(
         }
     }
 
+    // Early in_reverted_frame correction from the first loop's converged retrace.
+    // Must happen BEFORE enrichment because the enrichment skip (partial revert)
+    // needs correct in_reverted_frame values.
+    if !last_converged_walk.is_empty() && last_converged_walk.len() == detected_calls.len() {
+        for (i, existing) in detected_calls.iter_mut().enumerate() {
+            if existing.in_reverted_frame != last_converged_walk[i].in_reverted_frame {
+                tracing::info!(
+                    target: "based_rollup::l1_proxy",
+                    idx = i,
+                    dest = %existing.destination,
+                    old = existing.in_reverted_frame,
+                    new = last_converged_walk[i].in_reverted_frame,
+                    "early in_reverted_frame correction (before enrichment)"
+                );
+                existing.in_reverted_frame = last_converged_walk[i].in_reverted_frame;
+            }
+        }
+    }
+
     // Enrich detected calls with L2 return data by simulating each L1→L2 call
-    // on L2. The RESULT action hash includes the exact return bytes from the
-    // target contract (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
+    // on L2.
     //
     // CHAINED simulation: when multiple calls are detected (e.g., CallTwice calling
     // Counter.increment() twice), each call must see the state effects of previous
@@ -2511,6 +2533,17 @@ async fn trace_and_detect_internal_calls(
             )
             .await;
             sys_result.and_then(|s| super::common::parse_address_from_abi_return(&s))
+        };
+
+        // Pre-compute partial revert: only skip reverted calls when there's a MIX
+        // of reverted and non-reverted calls (actual try/catch pattern). When ALL
+        // calls are in_reverted_frame=true (e.g., flash-loan where the whole trace
+        // reverts in simulation), this is NOT a partial revert — all calls need
+        // chained state effects for correct simulation.
+        let enrichment_has_partial_revert = {
+            let any_rev = detected_calls.iter().any(|c| c.in_reverted_frame);
+            let any_non_rev = detected_calls.iter().any(|c| !c.in_reverted_frame);
+            any_rev && any_non_rev
         };
 
         #[allow(clippy::needless_range_loop)]
@@ -2611,7 +2644,7 @@ async fn trace_and_detect_internal_calls(
             // Including them in the chained simulation would let subsequent calls see
             // state changes that won't persist, producing incorrect return data
             // (e.g., Counter sees 1 instead of 0 for the non-reverted call).
-            if !detected_calls[call_idx].in_reverted_frame {
+            if !enrichment_has_partial_revert || !detected_calls[call_idx].in_reverted_frame {
                 let result_action = crate::cross_chain::CrossChainAction {
                     action_type: crate::cross_chain::CrossChainActionType::Result,
                     rollup_id: U256::from(rollup_id),
