@@ -282,6 +282,7 @@ jobs:
           cd contracts/sync-rollups-protocol
           rm -rf lib/openzeppelin-contracts/fv/harnesses
           sudo rm -rf cache out  # Docker deploy container leaves root-owned files
+          sudo chown -R "$(id -u):$(id -g)" .  # Fix ownership after Docker mounts
           forge build --skip "fv/*"
 
       - name: Prepare protocol E2E environment
