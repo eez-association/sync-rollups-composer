@@ -88,7 +88,29 @@ sol! {
             bytes callData,
             bytes proof
         );
+
+        /// Protocol errors that occur when entries aren't loaded (simulation artifacts).
+        /// These are NOT terminal failures — the delivery will succeed once entries are posted.
+        error ExecutionNotFound();
+        error ExecutionNotInCurrentBlock();
+        error CallExecutionFailed();
+        error InvalidRevertData();
     }
+}
+
+/// Check if revert data is a protocol simulation artifact (entry not loaded yet).
+/// Returns true if the data matches a known protocol error selector that only occurs
+/// when execution entries aren't available. These are NOT terminal failures.
+pub fn is_simulation_artifact(data: &[u8]) -> bool {
+    use alloy_sol_types::SolError;
+    if data.len() < 4 {
+        return true; // empty or too short = simulation artifact
+    }
+    let sel = &data[..4];
+    sel == ICrossChainManagerL2::ExecutionNotFound::SELECTOR
+        || sel == ICrossChainManagerL2::ExecutionNotInCurrentBlock::SELECTOR
+        || sel == ICrossChainManagerL2::CallExecutionFailed::SELECTOR
+        || sel == ICrossChainManagerL2::InvalidRevertData::SELECTOR
 }
 
 sol! {

@@ -1229,15 +1229,14 @@ where
                     // RESULT(failed=true) with non-empty revert data after enrichment
                     // = true terminal failure. Skip L2 entries — protocol specifies no
                     // loadExecutionTable for terminal reverts.
-                    // Terminal failure requires revert data > 4 bytes:
-                    // - Simulation artifacts: exactly 4 bytes (error selector only:
-                    //   ExecutionNotFound, CallExecutionFailed, ProxyCallFailed, etc.)
-                    // - Real contract reverts: > 4 bytes (Error(string) ≥ 68 bytes,
-                    //   Panic(uint256) = 36 bytes, custom errors with params > 4 bytes)
-                    // This reliably distinguishes "simulation failed because entries
-                    // aren't loaded" from "destination contract always reverts."
+                    // Terminal failure: the L2 delivery ALWAYS reverts (destination
+                    // contract error, not a missing-entry simulation artifact).
+                    // Simulation artifacts are protocol errors (ExecutionNotFound, etc.)
+                    // that only occur when entries aren't loaded yet.
                     let is_terminal_failure = call.result_entry.next_action.failed
-                        && call.result_entry.next_action.data.len() > 4;
+                        && !crate::cross_chain::is_simulation_artifact(
+                            &call.result_entry.next_action.data,
+                        );
                     if !is_terminal_failure {
                         rpc_entries.push(call.call_entry.clone());
                         if call.extra_l2_entries.is_empty() {
