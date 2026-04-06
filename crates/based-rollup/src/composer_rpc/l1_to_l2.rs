@@ -2488,18 +2488,50 @@ async fn trace_and_detect_internal_calls(
     // Must happen BEFORE enrichment because the enrichment skip (partial revert)
     // needs correct in_reverted_frame values.
     if !last_converged_walk.is_empty() && last_converged_walk.len() == detected_calls.len() {
-        for (i, existing) in detected_calls.iter_mut().enumerate() {
-            if existing.in_reverted_frame != last_converged_walk[i].in_reverted_frame {
-                tracing::info!(
-                    target: "based_rollup::l1_proxy",
-                    idx = i,
-                    dest = %existing.destination,
-                    old = existing.in_reverted_frame,
-                    new = last_converged_walk[i].in_reverted_frame,
-                    "early in_reverted_frame correction (before enrichment)"
-                );
-                existing.in_reverted_frame = last_converged_walk[i].in_reverted_frame;
+        // Property-based matching with count pairing: for each unique
+        // (dest, calldata, value, source, depth) tuple, match the Nth occurrence
+        // in detected_calls with the Nth occurrence in last_converged_walk.
+        // This is safe even when identical calls exist (e.g., CallTwice) because
+        // the count-based pairing preserves occurrence order.
+        let mut consumed: std::collections::HashMap<
+            (Address, Vec<u8>, U256, Address, usize),
+            usize,
+        > = std::collections::HashMap::new();
+        for existing in detected_calls.iter_mut() {
+            let key = (
+                existing.destination,
+                existing.calldata.clone(),
+                existing.value,
+                existing.source_address,
+                existing.trace_depth,
+            );
+            let idx = consumed.entry(key.clone()).or_insert(0);
+            // Find the Nth matching call in last_converged_walk
+            let mut count = 0usize;
+            for retrace in &last_converged_walk {
+                if retrace.destination == key.0
+                    && retrace.calldata == key.1
+                    && retrace.value == key.2
+                    && retrace.source_address == key.3
+                    && retrace.trace_depth == key.4
+                {
+                    if count == *idx {
+                        if existing.in_reverted_frame != retrace.in_reverted_frame {
+                            tracing::debug!(
+                                target: "based_rollup::l1_proxy",
+                                dest = %existing.destination,
+                                old = existing.in_reverted_frame,
+                                new = retrace.in_reverted_frame,
+                                "early in_reverted_frame correction (before enrichment)"
+                            );
+                            existing.in_reverted_frame = retrace.in_reverted_frame;
+                        }
+                        break;
+                    }
+                    count += 1;
+                }
             }
+            *idx += 1;
         }
     }
 
@@ -3896,35 +3928,56 @@ async fn trace_and_detect_internal_calls(
     }
 
     // Final in_reverted_frame correction from the last converged retrace.
-    // The initial trace (without entries) marks ALL calls as in_reverted_frame=true.
-    // The converged retrace (with entries loaded) has correct values.
-    // Apply positional update ONLY when counts match — this ensures calls
-    // discovered after the retrace (e.g., CallTwice second call) are not affected.
+    // Uses property-based matching with count pairing (same as early correction).
     if !last_converged_walk.is_empty() && last_converged_walk.len() == detected_calls.len() {
-        for (i, existing) in detected_calls.iter_mut().enumerate() {
-            if existing.in_reverted_frame != last_converged_walk[i].in_reverted_frame {
-                tracing::info!(
-                    target: "based_rollup::l1_proxy",
-                    idx = i,
-                    dest = %existing.destination,
-                    old = existing.in_reverted_frame,
-                    new = last_converged_walk[i].in_reverted_frame,
-                    "final in_reverted_frame correction from converged retrace"
-                );
-                existing.in_reverted_frame = last_converged_walk[i].in_reverted_frame;
+        let mut consumed: std::collections::HashMap<
+            (Address, Vec<u8>, U256, Address, usize),
+            usize,
+        > = std::collections::HashMap::new();
+        for existing in detected_calls.iter_mut() {
+            let key = (
+                existing.destination,
+                existing.calldata.clone(),
+                existing.value,
+                existing.source_address,
+                existing.trace_depth,
+            );
+            let idx = consumed.entry(key.clone()).or_insert(0);
+            let mut count = 0usize;
+            for retrace in &last_converged_walk {
+                if retrace.destination == key.0
+                    && retrace.calldata == key.1
+                    && retrace.value == key.2
+                    && retrace.source_address == key.3
+                    && retrace.trace_depth == key.4
+                {
+                    if count == *idx {
+                        if existing.in_reverted_frame != retrace.in_reverted_frame {
+                            tracing::debug!(
+                                target: "based_rollup::l1_proxy",
+                                dest = %existing.destination,
+                                old = existing.in_reverted_frame,
+                                new = retrace.in_reverted_frame,
+                                "final in_reverted_frame correction from converged retrace"
+                            );
+                            existing.in_reverted_frame = retrace.in_reverted_frame;
+                        }
+                        break;
+                    }
+                    count += 1;
+                }
             }
+            *idx += 1;
         }
     }
 
     for (i, c) in detected_calls.iter().enumerate() {
-        tracing::info!(
+        tracing::debug!(
             target: "based_rollup::composer_rpc::l1_to_l2",
             idx = i,
             dest = %c.destination,
-            source = %c.source_address,
             in_reverted_frame = c.in_reverted_frame,
             call_success = c.call_success,
-            return_data_len = c.return_data.len(),
             trace_depth = c.trace_depth,
             "FINAL detected_calls after in_reverted_frame correction"
         );
