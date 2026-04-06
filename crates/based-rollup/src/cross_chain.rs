@@ -99,18 +99,54 @@ sol! {
 }
 
 /// Check if revert data is a protocol simulation artifact (entry not loaded yet).
-/// Returns true if the data matches a known protocol error selector that only occurs
-/// when execution entries aren't available. These are NOT terminal failures.
+///
+/// Simulation artifacts are reverts that only occur because entries aren't loaded
+/// during delivery simulation. They disappear once entries are posted. Two patterns:
+///
+/// 1. **Selector-only reverts** (≤4 bytes): any parameterless error like
+///    `ExecutionNotFound()`, `UnauthorizedCaller()`, etc. Real terminal failures
+///    always carry ABI-encoded params (Error(string) ≥ 68 bytes, Panic(uint256) = 36
+///    bytes, custom errors with data > 4 bytes).
+///
+/// 2. **Known protocol errors** with params: `ExecutionNotInCurrentBlock`,
+///    `CallExecutionFailed`, `InvalidRevertData` — identified by typed selectors.
+///
+/// 3. **Wrapped errors**: any `error Xyz(bytes)` wrapper (e.g., proxy contracts wrap
+///    inner revert data). Detected generically by attempting ABI decode of `(bytes)`,
+///    then checking the inner data recursively. No contract-specific selectors needed.
 pub fn is_simulation_artifact(data: &[u8]) -> bool {
     use alloy_sol_types::SolError;
-    if data.len() < 4 {
-        return true; // empty or too short = simulation artifact
+    // Pattern 1: empty or selector-only (no ABI params)
+    if data.len() <= 4 {
+        return true;
     }
+    // Pattern 2: known protocol errors (may have params in future versions)
     let sel = &data[..4];
-    sel == ICrossChainManagerL2::ExecutionNotFound::SELECTOR
+    if sel == ICrossChainManagerL2::ExecutionNotFound::SELECTOR
         || sel == ICrossChainManagerL2::ExecutionNotInCurrentBlock::SELECTOR
         || sel == ICrossChainManagerL2::CallExecutionFailed::SELECTOR
         || sel == ICrossChainManagerL2::InvalidRevertData::SELECTOR
+    {
+        return true;
+    }
+    // Pattern 3: generic wrapper unwrap — try to ABI-decode as (bytes) and recurse.
+    // Catches any error that wraps inner revert data, regardless of the wrapper's
+    // selector (e.g., Bridge's ProxyCallFailed, or any future wrapper contract).
+    // ABI layout: 4-byte selector + abi.encode(bytes) = offset(32) + length(32) + data
+    if data.len() > 68 {
+        // Try to decode the params after the 4-byte selector as a single `bytes` field.
+        // ABI: [selector(4)][offset(32)][length(32)][data(length)]
+        let params = &data[4..];
+        if let Some(len_bytes) = params.get(32..64) {
+            let inner_len =
+                alloy_primitives::U256::from_be_slice(len_bytes).saturating_to::<usize>();
+            if inner_len > 0 && params.len() >= 64 + inner_len {
+                let inner = &params[64..64 + inner_len];
+                return is_simulation_artifact(inner);
+            }
+        }
+    }
+    false
 }
 
 sol! {
