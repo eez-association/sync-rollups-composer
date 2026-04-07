@@ -211,6 +211,16 @@ interface JourneyParticleProps {
   labelDy?: number;
 }
 
+// Cycle period in seconds — ALL particles loop in lock-step at this interval
+const CYCLE_PERIOD = 5;
+
+// Build a 5-cycle list of begin times so SMIL re-fires reliably even when
+// the browser throttles the cycleClock animation. Indefinite repetition is
+// then driven by the explicit list, not by referencing a single sync source.
+function buildBeginTimes(offset: number, count = 50): string {
+  return Array.from({ length: count }, (_, i) => `${offset + i * CYCLE_PERIOD}s`).join(";");
+}
+
 function JourneyParticle({
   path,
   duration,
@@ -222,50 +232,50 @@ function JourneyParticle({
   labelDy = -12,
 }: JourneyParticleProps) {
   const sz = PARTICLE_SIZES[size];
-  // Animations are tied to the master cycle (#cycleClock). Each cycle the particle
-  // spawns at its beginOffset, animates for `duration`, then disappears.
-  const startEvent = `cycleClock.begin+${beginOffset}s`;
-  const endEvent = `cycleClock.begin+${beginOffset + duration}s`;
+  // Each segment fires at offset, offset+CYCLE, offset+2*CYCLE, ... for many cycles.
+  // No reliance on cycleClock — direct begin times survive tab throttling.
+  const beginList = buildBeginTimes(beginOffset);
+  const endList = buildBeginTimes(beginOffset + duration);
   const dur = `${duration}s`;
 
   return (
     <g opacity={0}>
       {/* Master visibility — show during the segment, hide at the end */}
-      <set attributeName="opacity" to="1" begin={startEvent} />
-      <set attributeName="opacity" to="0" begin={endEvent} />
+      <set attributeName="opacity" to="1" begin={beginList} />
+      <set attributeName="opacity" to="0" begin={endList} />
 
       {/* Plasma tail */}
       <circle r={sz.plasma} fill={color} opacity={0.18} filter="url(#plasma)">
-        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
       </circle>
       {/* Color halo */}
       <circle r={sz.halo} fill={color} opacity={0.45} filter="url(#glow)">
-        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
       </circle>
       {/* White core */}
       <circle r={sz.core} fill={COL.white} opacity={0.95}>
-        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
       </circle>
 
-      {/* Label — follows the particle on the same path with the same timing.
-          The text uses y={labelDy} so it sits offset above/below the moving origin.
-          NOTE: no `filter` on text — glow blurs glyphs and ruins legibility. */}
+      {/* Label — follows the particle. Thin & elegant: no filter, light weight,
+          subtle dark stroke for contrast on any background. */}
       <text
         x={0}
         y={labelDy}
-        fontSize={12}
-        fontWeight={800}
+        fontSize={10}
+        fontWeight={500}
         fill={labelColor}
         textAnchor="middle"
         fontFamily="var(--sans)"
+        letterSpacing="0.03em"
         style={{ paintOrder: "stroke fill" }}
-        stroke="#000"
-        strokeWidth={3}
+        stroke="#0b0d18"
+        strokeWidth={2.2}
         strokeLinejoin="round"
-        strokeOpacity={0.9}
+        strokeOpacity={0.85}
       >
         {label}
-        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
       </text>
     </g>
   );
@@ -303,26 +313,19 @@ const JOURNEY_PATHS = {
  * into local and remote branches that arrive at Output simultaneously. Loops forever.
  */
 function CoordinatedJourney() {
+  // 5-second cycle (CYCLE_PERIOD). Layout:
+  //   t=0   → 1.2  Pre-split: User → Aggregator
+  //   t=1.2 → 5.0  Local:  Agg → L1 AMM (1.9s WETH) → Output (1.9s USDC)
+  //   t=1.2 → 5.0  Remote: Agg → Portal Down → L2 Exec → L2 AMM → Portal Up → Output
+  //
+  // No master cycleClock — each segment has its own explicit list of begin times
+  // (built by buildBeginTimes), so the loop survives browser tab throttling.
   return (
     <g>
-      {/* Master cycle clock — drives the begin events of every segment.
-          An 8s repeating animation; each cycleClock.begin event restarts the chain. */}
-      <rect x={-10} y={-10} width={1} height={1} fill="none" opacity={0}>
-        <animate
-          id="cycleClock"
-          attributeName="opacity"
-          from="0"
-          to="0"
-          dur="8s"
-          begin="0s"
-          repeatCount="indefinite"
-        />
-      </rect>
-
-      {/* ── Phase A: Pre-split (t=0 → t=2) ── */}
+      {/* ── Phase A: Pre-split (t=0 → 1.2) ── */}
       <JourneyParticle
         path={JOURNEY_PATHS.preSplit}
-        duration={2.0}
+        duration={1.2}
         beginOffset={0}
         color={COL.gold}
         label="WETH"
@@ -331,11 +334,11 @@ function CoordinatedJourney() {
         labelDy={-15}
       />
 
-      {/* ── Phase B Local: Aggregator → L1 AMM → Output (t=2 → t=8) ── */}
+      {/* ── Phase B Local: Agg → L1 AMM → Output (t=1.2 → 5.0) ── */}
       <JourneyParticle
         path={JOURNEY_PATHS.localToL1Amm}
-        duration={3.0}
-        beginOffset={2.0}
+        duration={1.9}
+        beginOffset={1.2}
         color={COL.gold}
         label="WETH"
         labelColor={COL.gold}
@@ -343,21 +346,20 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.localToOutput}
-        duration={3.0}
-        beginOffset={5.0}
+        duration={1.9}
+        beginOffset={3.1}
         color={COL.blue}
         label="USDC"
         labelColor={COL.blue}
         labelDy={-14}
       />
 
-      {/* ── Phase B Remote: Aggregator → Portal → L2 Exec → L2 AMM → Portal → Output (t=2 → t=8) ──
-          Five segments totaling 6s — same total wall-clock time as the local branch
-          even though the path is much longer. The remote particle moves visually faster. */}
+      {/* ── Phase B Remote: Agg → Portal → L2 Exec → L2 AMM → Portal → Output ──
+          5 segments totaling 3.8s, same wall-clock as local branch. */}
       <JourneyParticle
         path={JOURNEY_PATHS.remoteAggToPortalDown}
-        duration={1.0}
-        beginOffset={2.0}
+        duration={0.65}
+        beginOffset={1.2}
         color={COL.gold}
         label="WETH"
         labelColor={COL.gold}
@@ -365,8 +367,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remotePortalToL2Exec}
-        duration={1.0}
-        beginOffset={3.0}
+        duration={0.65}
+        beginOffset={1.85}
         color={COL.cyan}
         label="wWETH"
         labelColor={COL.cyan}
@@ -374,8 +376,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remoteL2ExecToL2Amm}
-        duration={1.2}
-        beginOffset={4.0}
+        duration={0.8}
+        beginOffset={2.5}
         color={COL.cyan}
         label="wWETH"
         labelColor={COL.cyan}
@@ -383,8 +385,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remoteL2AmmToPortalUp}
-        duration={1.4}
-        beginOffset={5.2}
+        duration={0.85}
+        beginOffset={3.3}
         color={COL.cyan}
         label="wUSDC"
         labelColor={COL.cyan}
@@ -392,8 +394,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remotePortalToOutput}
-        duration={1.4}
-        beginOffset={6.6}
+        duration={0.85}
+        beginOffset={4.15}
         color={COL.blue}
         label="USDC"
         labelColor={COL.blue}

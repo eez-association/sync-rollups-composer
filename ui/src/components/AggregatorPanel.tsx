@@ -82,15 +82,6 @@ function IconX({ size = 16 }: { size?: number }) {
   );
 }
 
-function IconArrowRight({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <line x1="5" y1="12" x2="19" y2="12" />
-      <polyline points="12 5 19 12 12 19" />
-    </svg>
-  );
-}
-
 function IconSplit({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -579,6 +570,7 @@ export function AggregatorPanel({
 }: AggregatorPanelProps) {
   const [wrapAmount, setWrapAmount] = useState("0.1");
   const [unwrapAmount, setUnwrapAmount] = useState("0.1");
+  const [wrapOpen, setWrapOpen] = useState(false);
 
   const busy =
     state.phase !== "idle" &&
@@ -652,80 +644,119 @@ export function AggregatorPanel({
         </div>
       </div>
 
-      {/* Swap Section */}
+      {/* Swap Section — compact Uniswap-style card */}
       <div className={styles.swapSection}>
-        <div className={styles.sectionTitle}>Aggregated Swap</div>
-        <div className={styles.sectionDesc}>
-          Split your WETH across L1 and L2 AMMs for better execution. Adjust the split ratio to optimize output.
-        </div>
-
-        {/* Balance row */}
-        <div className={styles.balanceRow}>
-          <div className={styles.balanceItem}>
-            <span className={styles.balanceLabel}>ETH</span>
-            <span className={styles.balanceValue}>
-              {state.ethBalance !== null ? parseFloat(state.ethBalance).toFixed(4) : "--"}
-            </span>
+        {/* Header: title + balances + wrap toggle */}
+        <div className={styles.swapHeader}>
+          <div className={styles.swapTitle}>
+            <IconSplit size={14} />
+            Aggregated Swap
           </div>
-          <div className={styles.balanceSep} />
-          <div className={styles.balanceItem}>
-            <span className={styles.balanceLabel}>WETH</span>
-            <span className={styles.balanceValue}>
-              {state.wethBalance !== null ? parseFloat(state.wethBalance).toFixed(4) : "--"}
+          <div className={styles.swapHeaderBalances}>
+            <span className={styles.headerBalance}>
+              <span className={styles.headerBalanceLabel}>ETH</span>
+              <span className={styles.headerBalanceValue}>
+                {state.ethBalance !== null ? parseFloat(state.ethBalance).toFixed(2) : "—"}
+              </span>
             </span>
-          </div>
-          <div className={styles.balanceSep} />
-          <div className={styles.balanceItem}>
-            <span className={styles.balanceLabel}>USDC</span>
-            <span className={styles.balanceValue}>
-              {state.usdcBalance !== null ? parseFloat(state.usdcBalance).toFixed(4) : "--"}
+            <span className={styles.headerBalance}>
+              <span className={styles.headerBalanceLabel}>WETH</span>
+              <span className={styles.headerBalanceValue}>
+                {state.wethBalance !== null ? parseFloat(state.wethBalance).toFixed(2) : "—"}
+              </span>
             </span>
-          </div>
-          <div className={styles.wrapGroup}>
-            <input
-              type="text"
-              className={styles.wrapInput}
-              value={wrapAmount}
-              onChange={(e) => setWrapAmount(e.target.value)}
-              placeholder="0.1"
-            />
-            <button className={styles.wrapBtn} onClick={() => onWrapEth(wrapAmount)}>
-              Wrap <IconArrowRight size={10} />
-            </button>
-            <input
-              type="text"
-              className={styles.wrapInput}
-              value={unwrapAmount}
-              onChange={(e) => setUnwrapAmount(e.target.value)}
-              placeholder="0.1"
-            />
-            <button className={styles.wrapBtn} onClick={() => onUnwrapWeth(unwrapAmount)}>
-              <IconArrowRight size={10} /> Unwrap
+            <span className={styles.headerBalance}>
+              <span className={styles.headerBalanceLabel}>USDC</span>
+              <span className={styles.headerBalanceValue}>
+                {state.usdcBalance !== null ? parseFloat(state.usdcBalance).toFixed(2) : "—"}
+              </span>
+            </span>
+            <button
+              className={styles.wrapToggleBtn}
+              onClick={() => setWrapOpen(!wrapOpen)}
+              title="Wrap / Unwrap ETH"
+              aria-expanded={wrapOpen}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M7 16V4M7 4L3 8M7 4l4 4M17 8v12M17 20l4-4M17 20l-4-4" />
+              </svg>
+              Wrap
             </button>
           </div>
         </div>
 
-        {/* Amount input */}
-        <div className={styles.inputGroup}>
-          <label className={styles.inputLabel} htmlFor="agg-amount">Amount (WETH)</label>
-          <input
-            id="agg-amount"
-            type="text"
-            className={styles.amountInput}
-            value={state.totalAmount}
-            onChange={(e) => onSetAmount(e.target.value)}
-            placeholder="1.0"
-          />
+        {/* Wrap/Unwrap drawer (collapsed by default) */}
+        {wrapOpen && (
+          <div className={styles.wrapDrawer}>
+            <div className={styles.wrapField}>
+              <input
+                type="text"
+                className={styles.wrapInput}
+                value={wrapAmount}
+                onChange={(e) => setWrapAmount(e.target.value)}
+                placeholder="0.1"
+              />
+              <span className={styles.wrapFieldLabel}>ETH</span>
+              <button className={styles.wrapBtn} onClick={() => onWrapEth(wrapAmount)}>
+                Wrap → WETH
+              </button>
+            </div>
+            <div className={styles.wrapField}>
+              <input
+                type="text"
+                className={styles.wrapInput}
+                value={unwrapAmount}
+                onChange={(e) => setUnwrapAmount(e.target.value)}
+                placeholder="0.1"
+              />
+              <span className={styles.wrapFieldLabel}>WETH</span>
+              <button className={styles.wrapBtn} onClick={() => onUnwrapWeth(unwrapAmount)}>
+                Unwrap → ETH
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* FROM box (Uniswap-style) */}
+        <div className={styles.swapBox}>
+          <div className={styles.swapBoxHeader}>
+            <span className={styles.swapBoxLabel}>You pay</span>
+            <span className={styles.swapBoxBalance}>
+              Balance: {state.wethBalance !== null ? parseFloat(state.wethBalance).toFixed(4) : "—"}
+              {state.wethBalance !== null && parseFloat(state.wethBalance) > 0 && (
+                <button
+                  className={styles.maxBtn}
+                  onClick={() => onSetAmount(state.wethBalance!)}
+                >
+                  MAX
+                </button>
+              )}
+            </span>
+          </div>
+          <div className={styles.swapBoxRow}>
+            <input
+              type="text"
+              className={styles.swapAmountInput}
+              value={state.totalAmount}
+              onChange={(e) => onSetAmount(e.target.value)}
+              placeholder="0.0"
+            />
+            <span className={styles.swapTokenChip}>
+              <span className={styles.swapTokenDot} data-token="weth" />
+              WETH
+            </span>
+          </div>
         </div>
 
-        {/* Split slider */}
+        {/* Split slider — compact */}
         <div className={styles.splitGroup}>
           <div className={styles.splitLabels}>
             <span className={styles.splitLabel} data-net="L1">
-              L1 Local: {state.splitPercent}%
+              L1 {state.splitPercent}%
             </span>
+            <span className={styles.splitLabelMid}>Route split</span>
             <span className={styles.splitLabel} data-net="L2">
-              L2 Remote: {100 - state.splitPercent}%
+              L2 {100 - state.splitPercent}%
             </span>
           </div>
           <input
@@ -738,43 +769,41 @@ export function AggregatorPanel({
           />
         </div>
 
-        {/* Quote preview */}
-        <div className={styles.quotePreview}>
-          <div className={styles.quoteRow}>
-            <span className={styles.quoteLabel}>L1 AMM</span>
-            <span className={styles.quoteValue}>
-              {state.l1Quote !== null ? `${state.l1Quote} USDC` : "--"}
+        {/* TO box — receive */}
+        <div className={styles.swapBox} data-receive="true">
+          <div className={styles.swapBoxHeader}>
+            <span className={styles.swapBoxLabel}>You receive</span>
+            <span className={styles.swapBoxRoute}>
+              {state.l1Quote !== null && (
+                <span className={styles.routeChip} data-net="L1">
+                  L1 {parseFloat(state.l1Quote).toFixed(2)}
+                </span>
+              )}
+              {state.l2Quote !== null && (
+                <span className={styles.routeChip} data-net="L2">
+                  L2 {parseFloat(state.l2Quote).toFixed(2)}
+                </span>
+              )}
             </span>
           </div>
-          <div className={styles.quoteRow}>
-            <span className={styles.quoteLabel}>L2 AMM</span>
-            <span className={styles.quoteValue}>
-              {state.l2Quote !== null ? `${state.l2Quote} USDC` : "--"}
-            </span>
-          </div>
-          <div className={styles.quoteDivider} />
-          <div className={styles.quoteRow}>
-            <span className={styles.quoteLabel}>Total</span>
-            <span className={styles.quoteValue}>
+          <div className={styles.swapBoxRow}>
+            <span className={styles.swapAmountOutput}>
               {state.l1Quote !== null && state.l2Quote !== null
-                ? `${(parseFloat(state.l1Quote) + parseFloat(state.l2Quote)).toFixed(4)} USDC`
-                : "--"}
+                ? (parseFloat(state.l1Quote) + parseFloat(state.l2Quote)).toFixed(4)
+                : "—"}
+            </span>
+            <span className={styles.swapTokenChip}>
+              <span className={styles.swapTokenDot} data-token="usdc" />
+              USDC
             </span>
           </div>
           {state.singlePoolQuote !== null && state.improvement !== null && (
-            <>
-              <div className={styles.quoteDivider} />
-              <div className={styles.quoteRow}>
-                <span className={styles.quoteLabel}>vs Single Pool</span>
-                <span className={styles.quoteValue}>
-                  {state.singlePoolQuote} USDC
-                  <span className={styles.quoteImprovement} style={{ marginLeft: 8 }}>+{state.improvement}%</span>
-                </span>
-              </div>
-            </>
+            <div className={styles.improvementRow}>
+              vs single pool ({parseFloat(state.singlePoolQuote).toFixed(2)} USDC):
+              <span className={styles.quoteImprovement}>+{state.improvement}%</span>
+            </div>
           )}
         </div>
-
         {/* Execute button */}
         <button
           className={styles.executeBtn}
