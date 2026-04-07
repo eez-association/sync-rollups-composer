@@ -212,7 +212,7 @@ interface JourneyParticleProps {
 }
 
 // Cycle period in seconds — ALL particles loop in lock-step at this interval
-const CYCLE_PERIOD = 5;
+const CYCLE_PERIOD = 10;
 
 // Build a 5-cycle list of begin times so SMIL re-fires reliably even when
 // the browser throttles the cycleClock animation. Indefinite repetition is
@@ -257,22 +257,19 @@ function JourneyParticle({
         <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
       </circle>
 
-      {/* Label — follows the particle. Thin & elegant: no filter, light weight,
-          subtle dark stroke for contrast on any background. */}
+      {/* Label — follows the particle. Thin & elegant: no stroke, no filter.
+          Plain colored text relies on its own brightness against the dark
+          lane backgrounds. */}
       <text
         x={0}
         y={labelDy}
-        fontSize={10}
+        fontSize={9}
         fontWeight={500}
         fill={labelColor}
         textAnchor="middle"
         fontFamily="var(--sans)"
-        letterSpacing="0.03em"
-        style={{ paintOrder: "stroke fill" }}
-        stroke="#0b0d18"
-        strokeWidth={2.2}
-        strokeLinejoin="round"
-        strokeOpacity={0.85}
+        letterSpacing="0.05em"
+        opacity={0.95}
       >
         {label}
         <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
@@ -313,19 +310,19 @@ const JOURNEY_PATHS = {
  * into local and remote branches that arrive at Output simultaneously. Loops forever.
  */
 function CoordinatedJourney() {
-  // 5-second cycle (CYCLE_PERIOD). Layout:
-  //   t=0   → 1.2  Pre-split: User → Aggregator
-  //   t=1.2 → 5.0  Local:  Agg → L1 AMM (1.9s WETH) → Output (1.9s USDC)
-  //   t=1.2 → 5.0  Remote: Agg → Portal Down → L2 Exec → L2 AMM → Portal Up → Output
+  // 10-second cycle (CYCLE_PERIOD). Layout:
+  //   t=0   → 2.4   Pre-split: User → Aggregator
+  //   t=2.4 → 10.0  Local:  Agg → L1 AMM (3.8s WETH) → Output (3.8s USDC)
+  //   t=2.4 → 10.0  Remote: Agg → Portal Down → L2 Exec → L2 AMM → Portal Up → Output
   //
   // No master cycleClock — each segment has its own explicit list of begin times
   // (built by buildBeginTimes), so the loop survives browser tab throttling.
   return (
     <g>
-      {/* ── Phase A: Pre-split (t=0 → 1.2) ── */}
+      {/* ── Phase A: Pre-split (t=0 → 2.4) ── */}
       <JourneyParticle
         path={JOURNEY_PATHS.preSplit}
-        duration={1.2}
+        duration={2.4}
         beginOffset={0}
         color={COL.gold}
         label="WETH"
@@ -334,11 +331,11 @@ function CoordinatedJourney() {
         labelDy={-15}
       />
 
-      {/* ── Phase B Local: Agg → L1 AMM → Output (t=1.2 → 5.0) ── */}
+      {/* ── Phase B Local: Agg → L1 AMM → Output (t=2.4 → 10.0) ── */}
       <JourneyParticle
         path={JOURNEY_PATHS.localToL1Amm}
-        duration={1.9}
-        beginOffset={1.2}
+        duration={3.8}
+        beginOffset={2.4}
         color={COL.gold}
         label="WETH"
         labelColor={COL.gold}
@@ -346,8 +343,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.localToOutput}
-        duration={1.9}
-        beginOffset={3.1}
+        duration={3.8}
+        beginOffset={6.2}
         color={COL.blue}
         label="USDC"
         labelColor={COL.blue}
@@ -355,11 +352,11 @@ function CoordinatedJourney() {
       />
 
       {/* ── Phase B Remote: Agg → Portal → L2 Exec → L2 AMM → Portal → Output ──
-          5 segments totaling 3.8s, same wall-clock as local branch. */}
+          5 segments totaling 7.6s, same wall-clock as local branch. */}
       <JourneyParticle
         path={JOURNEY_PATHS.remoteAggToPortalDown}
-        duration={0.65}
-        beginOffset={1.2}
+        duration={1.3}
+        beginOffset={2.4}
         color={COL.gold}
         label="WETH"
         labelColor={COL.gold}
@@ -367,8 +364,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remotePortalToL2Exec}
-        duration={0.65}
-        beginOffset={1.85}
+        duration={1.3}
+        beginOffset={3.7}
         color={COL.cyan}
         label="wWETH"
         labelColor={COL.cyan}
@@ -376,8 +373,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remoteL2ExecToL2Amm}
-        duration={0.8}
-        beginOffset={2.5}
+        duration={1.6}
+        beginOffset={5.0}
         color={COL.cyan}
         label="wWETH"
         labelColor={COL.cyan}
@@ -385,8 +382,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remoteL2AmmToPortalUp}
-        duration={0.85}
-        beginOffset={3.3}
+        duration={1.7}
+        beginOffset={6.6}
         color={COL.cyan}
         label="wUSDC"
         labelColor={COL.cyan}
@@ -394,8 +391,8 @@ function CoordinatedJourney() {
       />
       <JourneyParticle
         path={JOURNEY_PATHS.remotePortalToOutput}
-        duration={0.85}
-        beginOffset={4.15}
+        duration={1.7}
+        beginOffset={8.3}
         color={COL.blue}
         label="USDC"
         labelColor={COL.blue}
@@ -511,14 +508,10 @@ interface LiquidPoolProps {
 }
 
 function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps) {
-  const a = reserveA ? parseFloat(reserveA) : 0;
-  const b = reserveB ? parseFloat(reserveB) : 0;
-  const total = a + b;
-  // Vertical split: left = token A, right = token B. Width proportional to raw token COUNT.
-  // Clamp ratio so neither side disappears entirely (5% min for each).
-  const rawRatioA = total > 0 ? a / total : 0.5;
-  const ratioA = Math.min(0.95, Math.max(0.05, rawRatioA));
-
+  // In a Uniswap V2 AMM, both sides always have equal VALUE (that's the
+  // invariant). So the visual split is always 50/50 — the actual reserve
+  // amounts are shown as labels inside each half. Liquidity is conveyed
+  // through the labels, not the bar widths.
   const poolX = x - 60;
   const poolY = y - 25;
   const poolW = 120;
@@ -527,9 +520,10 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
   const innerW = poolW - padding * 2;
   const innerH = poolH - padding * 2;
 
-  const leftWidth = innerW * ratioA;
-  const rightWidth = innerW * (1 - ratioA);
-  const dividerX = poolX + padding + leftWidth;
+  const halfW = innerW / 2;
+  const leftWidth = halfW;
+  const rightWidth = halfW;
+  const dividerX = poolX + padding + halfW;
 
   const borderColor = chain === "l1"
     ? (active ? "rgba(99,102,241,0.6)" : "rgba(99,102,241,0.25)")
