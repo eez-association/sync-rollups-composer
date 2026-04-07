@@ -10,7 +10,9 @@ participants:
   # Two Lighthouse nodes with 256 validators each (512 total).
   # Large validator set ensures committees have enough members for 2/3 supermajority.
   - el_type: reth
-    el_image: ghcr.io/paradigmxyz/reth:latest
+    # Pinned to v1.11.3 (matches Cargo.toml reth crate pin on the 1.11.x line).
+    # NEVER use :latest — reth 2.0.0 (2026-04-07) breaks withdrawal trigger flow.
+    el_image: ghcr.io/paradigmxyz/reth:v1.11.3
     cl_type: lighthouse
     cl_image: sigp/lighthouse:latest
     cl_extra_params:
