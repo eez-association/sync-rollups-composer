@@ -3710,10 +3710,56 @@ async fn trace_and_detect_internal_calls(
 
                             // STEP B: Rebuild L2 entries with updated child delivery return,
                             // then run L2 sim for the parent.
+                            //
+                            // The `sim_action` is what gets passed as the entry-point call
+                            // to `executeIncomingCrossChainCall`. On L2, this call triggers
+                            // the ENTIRE entry chain via newScope / _resolveScopes, so the
+                            // correct entry point depends on how the chain is structured:
+                            //
+                            // * REENTRANT (each L1→L2 call nested deeper via strictly
+                            //   increasing trace depth, e.g. PingPong depth 5): each level's
+                            //   parent is reached via its own scope navigation leg from the
+                            //   previous level. Simulating any specific level's parent
+                            //   directly works because each level's execution is a pure
+                            //   function of its input — no cross-level state dependency.
+                            //   → use detected_calls[idx] as the sim entry point.
+                            //
+                            // * NON-REENTRANT SIBLINGS (multiple L1→L2 calls at the same
+                            //   trace depth, e.g. multi-directional aggregator: Bridge.bridgeTokens
+                            //   followed by L2Executor.swapAndBridgeBack): call[N] depends
+                            //   on state effects from call[0..N-1] (e.g. swapAndBridgeBack
+                            //   needs wrapped tokens minted by receiveTokens). If we run
+                            //   `executeIncomingCrossChainCall(call[N])` directly, the L2
+                            //   runtime starts scope navigation from call[N] and never
+                            //   executes the earlier siblings — so the dependent state is
+                            //   missing and the simulation reverts.
+                            //   → use the FIRST root L1→L2 call as the sim entry point. The
+                            //   L2 runtime will execute call[0] → entry chain → call[1] →
+                            //   ... → call[N] in sequence, building state cumulatively.
+                            //   BFS still extracts the return data for call[N]'s destination.
+                            let sim_entry_idx = if is_reentrant_pattern {
+                                idx
+                            } else {
+                                // First root in trace order. `root_indices` is reversed
+                                // (innermost first), so the first root in trace order is
+                                // the LAST element.
+                                *root_indices.last().unwrap_or(&idx)
+                            };
                             let call_destination = detected_calls[idx].destination;
-                            let call_calldata = detected_calls[idx].calldata.clone();
-                            let call_value = detected_calls[idx].value;
-                            let call_source = detected_calls[idx].source_address;
+                            let call_calldata = detected_calls[sim_entry_idx].calldata.clone();
+                            let call_value = detected_calls[sim_entry_idx].value;
+                            let call_source = detected_calls[sim_entry_idx].source_address;
+                            let entry_destination = detected_calls[sim_entry_idx].destination;
+
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                idx,
+                                sim_entry_idx,
+                                is_reentrant_pattern,
+                                entry_dest = %entry_destination,
+                                bfs_target = %call_destination,
+                                "post-convergence: selected L2 sim entry point"
+                            );
 
                             let l1_detected: Vec<crate::table_builder::L1DetectedCall> =
                                 detected_calls
@@ -3808,7 +3854,12 @@ async fn trace_and_detect_internal_calls(
                             let sim_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Call,
                                 rollup_id: U256::from(rollup_id),
-                                destination: call_destination,
+                                // Entry point for `executeIncomingCrossChainCall` — the
+                                // FIRST root call in non-reentrant patterns so the entry
+                                // chain executes cumulatively. BFS still extracts the
+                                // return data for `call_destination` (the current level's
+                                // parent destination).
+                                destination: entry_destination,
                                 value: call_value,
                                 data: call_calldata,
                                 failed: false,
@@ -3833,18 +3884,28 @@ async fn trace_and_detect_internal_calls(
                             .await;
 
                             if let Some((trace, success)) = sim_result {
-                                // BFS extraction
+                                // BFS extraction — finds the direct call node matching
+                                // `call_destination` and returns its return data. When BFS
+                                // hits, that IS the parent's own return value (not a scope-
+                                // chain-resolved propagation), so it is always safe to capture.
                                 let inner =
                                     extract_inner_destination_return_data(&trace, call_destination)
                                         .unwrap_or_default();
-                                let inner_success = !inner.is_empty()
+                                let bfs_hit = !inner.is_empty();
+                                let inner_success = bfs_hit
                                     || destination_call_succeeded_in_trace(
                                         &trace,
                                         call_destination,
                                     );
 
-                                // Fallback to top-level if BFS empty
-                                let (ret_data, inner_success) = if inner.is_empty() && success {
+                                // Fallback to top-level if BFS empty. The top-level
+                                // return reflects the FINAL scope resolution, which may
+                                // not equal the parent's own return for continuation
+                                // patterns whose parent returns void but whose child
+                                // chain propagates data back through newScope.
+                                let (ret_data, inner_success, used_fallback) = if inner.is_empty()
+                                    && success
+                                {
                                     let raw = extract_return_data_from_trace(&trace);
                                     let decoded = if raw.len() >= 64 {
                                         let dlen = U256::from_be_slice(&raw[32..64]).to::<usize>();
@@ -3852,9 +3913,9 @@ async fn trace_and_detect_internal_calls(
                                     } else {
                                         raw
                                     };
-                                    (decoded, true)
+                                    (decoded, true, true)
                                 } else {
-                                    (inner, inner_success)
+                                    (inner, inner_success, false)
                                 };
 
                                 tracing::info!(
@@ -3864,6 +3925,8 @@ async fn trace_and_detect_internal_calls(
                                     ret_data_len = ret_data.len(),
                                     inner_success,
                                     sim_success = success,
+                                    bfs_hit,
+                                    used_fallback,
                                     ret_data_hex = %if ret_data.is_empty() {
                                         "0x".to_string()
                                     } else {
@@ -3872,26 +3935,44 @@ async fn trace_and_detect_internal_calls(
                                     "post-convergence: L2 sim result for parent"
                                 );
 
-                                // For reentrant patterns: update return data (deepCall returns
-                                // incrementing values needed for result propagation entries).
-                                // For continuation patterns with children: DON'T update.
-                                // The L2 sim returns scope-chain-resolved data (e.g., CounterL1's
-                                // return propagated back) but the parent (CAP2) returns void.
-                                // Overwriting with sim data corrupts the resolution_terminal entry.
+                                // Update policy (distinguishes BFS hit from top-level fallback):
+                                //
+                                // * BFS hit → always update. The return data is the parent's
+                                //   OWN return (e.g., swapAndBridgeBack returning uint256
+                                //   USDC amount in the multi-directional aggregator pattern).
+                                //   This is the parent function's direct return value, not a
+                                //   scope-chain propagation, so it is ALWAYS the correct data
+                                //   to store on the L2 RESULT entry that _processCallAtScope
+                                //   will consume after this call executes.
+                                //
+                                // * Top-level fallback → risky for continuation parents with
+                                //   children: the fallback extracts the scope-chain-resolved
+                                //   return (e.g., CounterL1's return propagated through
+                                //   newScope). For the CAP2 pattern, the parent returns void
+                                //   but the fallback would capture CounterL1's propagated
+                                //   return, corrupting the L2 RESULT entry. Skip in that case.
+                                //
+                                // * Reentrant pattern (depth-chain of L1→L2 calls) → always
+                                //   safe: the scope chain resolution is the intended return
+                                //   semantics for deepCall-style reentrant patterns.
+                                //
+                                // * No children → always safe: no scope chain propagation
+                                //   could possibly have happened.
                                 let has_children = detected_calls
                                     .iter()
                                     .any(|c| c.parent_call_index == Some(idx));
-                                if is_reentrant_pattern || !has_children {
-                                    if inner_success || !ret_data.is_empty() {
-                                        detected_calls[idx].return_data = ret_data;
-                                        detected_calls[idx].call_success = inner_success;
-                                    }
-                                } else {
+                                let skip_update =
+                                    used_fallback && has_children && !is_reentrant_pattern;
+
+                                if skip_update {
                                     tracing::info!(
                                         target: "based_rollup::l1_proxy",
                                         idx,
-                                        "post-convergence: skipping L2 return update for continuation parent with children (returns void)"
+                                        "post-convergence: skipping L2 return update (top-level fallback for continuation parent with children — scope-chain data may not equal parent's own return)"
                                     );
+                                } else if inner_success || !ret_data.is_empty() {
+                                    detected_calls[idx].return_data = ret_data;
+                                    detected_calls[idx].call_success = inner_success;
                                 }
                             }
                         }

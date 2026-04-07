@@ -342,8 +342,7 @@ pub fn build_continuation_entries(
         let any_non_reverted = l1_to_l2_calls.iter().any(|(_, c)| !c.in_reverted_frame);
         let has_l2_to_l1_children = l1_to_l2_calls.iter().any(|(parent_idx, _)| {
             calls.iter().any(|c| {
-                c.parent_call_index == Some(*parent_idx)
-                    && c.direction == CallDirection::L2ToL1
+                c.parent_call_index == Some(*parent_idx) && c.direction == CallDirection::L2ToL1
             })
         });
         any_reverted && any_non_reverted && !has_l2_to_l1_children
@@ -752,8 +751,7 @@ pub fn build_continuation_entries(
             let ether_delta = if call_value.is_zero() {
                 alloy_primitives::I256::ZERO
             } else {
-                alloy_primitives::I256::try_from(call_value)
-                    .unwrap_or(alloy_primitives::I256::ZERO)
+                alloy_primitives::I256::try_from(call_value).unwrap_or(alloy_primitives::I256::ZERO)
             };
             let l1_entry_deltas = vec![CrossChainStateDelta {
                 rollup_id: our_rollup_id,
@@ -766,8 +764,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx)
-                        && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -819,8 +816,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx)
-                        && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -875,8 +871,7 @@ pub fn build_continuation_entries(
             let ether_delta = if call_value.is_zero() {
                 alloy_primitives::I256::ZERO
             } else {
-                alloy_primitives::I256::try_from(call_value)
-                    .unwrap_or(alloy_primitives::I256::ZERO)
+                alloy_primitives::I256::try_from(call_value).unwrap_or(alloy_primitives::I256::ZERO)
             };
             let l1_entry_deltas = vec![CrossChainStateDelta {
                 rollup_id: our_rollup_id,
@@ -889,8 +884,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx)
-                        && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 

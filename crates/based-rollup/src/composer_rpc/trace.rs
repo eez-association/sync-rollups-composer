@@ -551,14 +551,8 @@ async fn recurse_children(
             // error (not just inherited), log the to/from/error so we can tell
             // which call is poisoning the descendants.
             if !in_reverted_frame && child_self_error.is_some() {
-                let child_to = child
-                    .get("to")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let child_from = child
-                    .get("from")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let child_to = child.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+                let child_from = child.get("from").and_then(|v| v.as_str()).unwrap_or("?");
                 let child_input = child
                     .get("input")
                     .and_then(|v| v.as_str())
