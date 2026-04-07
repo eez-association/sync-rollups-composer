@@ -58,6 +58,7 @@ export interface AggregatorState {
   l1GasUsed: string | null;
   l2BlockBefore: number | null;
   l2BlockAfter: number | null;
+  l2TxHashes: string[];
   l1Done: boolean;
   l2Done: boolean;
   // Results
@@ -105,6 +106,7 @@ const INITIAL_STATE: AggregatorState = {
   l1GasUsed: null,
   l2BlockBefore: null,
   l2BlockAfter: null,
+  l2TxHashes: [],
   l1Done: false,
   l2Done: false,
   localOutput: null,
@@ -485,6 +487,16 @@ export function useAggregator(
       const totalWei = parseTokenAmount(totalAmount, WETH_DECIMALS);
       const localWei = (totalWei * BigInt(splitPercent)) / 100n;
 
+      // Snapshot the predicted quotes BEFORE the swap. The polling loop
+      // updates `state.l1Quote` / `state.l2Quote` / `state.singlePoolQuote`
+      // continuously based on current AMM reserves, so by the time we read
+      // them in the verify phase the reserves have already changed. We need
+      // the BEFORE values for the improvement calculation and for the
+      // L1/L2 output rows in the results card.
+      const l1QuoteSnapshot = stateRef.current.l1Quote;
+      const l2QuoteSnapshot = stateRef.current.l2Quote;
+      const singlePoolSnapshot = stateRef.current.singlePoolQuote;
+
       // Reset execution state
       setState((s) => ({
         ...s,
@@ -496,6 +508,7 @@ export function useAggregator(
         l1GasUsed: null,
         l2BlockBefore: null,
         l2BlockAfter: null,
+        l2TxHashes: [],
         l1Done: false,
         l2Done: false,
         localOutput: null,
@@ -732,15 +745,14 @@ export function useAggregator(
       const totalOutputStr = formatTokenAmount(totalOutput > 0n ? totalOutput : 0n, USDC_DECIMALS);
       const usdcAfterStr = formatTokenAmount(usdcAfter, USDC_DECIMALS);
 
-      // Compute improvement vs single pool
-      const singleQuoteStr = stateRef.current.singlePoolQuote;
+      // Use the BEFORE snapshot for the improvement calculation, not the
+      // current polled value (which was computed against post-swap reserves).
       let improvementStr: string | null = null;
-      if (singleQuoteStr && totalOutput > 0n) {
+      if (singlePoolSnapshot && totalOutput > 0n) {
         try {
-          const singleQuoteWei = parseTokenAmount(singleQuoteStr, USDC_DECIMALS);
+          const singleQuoteWei = parseTokenAmount(singlePoolSnapshot, USDC_DECIMALS);
           if (singleQuoteWei > 0n) {
             const diff = totalOutput - singleQuoteWei;
-            // Multiply by 100_000 for 3 decimal places, then divide
             const pctX1000 = (diff * 100000n) / singleQuoteWei;
             const pctFloat = Number(pctX1000) / 1000;
             const sign = pctFloat >= 0 ? "+" : "";
@@ -751,6 +763,38 @@ export function useAggregator(
         }
       }
 
+      // Fetch L2 protocol transactions in the affected blocks. The cross-chain
+      // delivery txs are protocol txs from the builder address (dev#0) targeting
+      // the CCM. We grab all txs in the range [l2BlockBefore+1, l2BlockAfter]
+      // whose `from` matches the builder.
+      const BUILDER_ADDR = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+      const l2TxHashes: string[] = [];
+      try {
+        const before = stateRef.current.l2BlockBefore;
+        const after = stateRef.current.l2BlockAfter;
+        if (before !== null && after !== null && after > before) {
+          for (let bn = before + 1; bn <= after; bn++) {
+            try {
+              const block = (await rpcCall(config.l2Rpc, "eth_getBlockByNumber", [
+                "0x" + bn.toString(16),
+                true,
+              ])) as { transactions?: Array<{ hash: string; from: string }> } | null;
+              if (block?.transactions) {
+                for (const tx of block.transactions) {
+                  if (tx.from?.toLowerCase() === BUILDER_ADDR) {
+                    l2TxHashes.push(tx.hash);
+                  }
+                }
+              }
+            } catch {
+              /* skip block on error */
+            }
+          }
+        }
+      } catch {
+        /* non-critical */
+      }
+
       const endTime = Date.now();
 
       fastForwardViz(8);
@@ -758,9 +802,15 @@ export function useAggregator(
       setState((s) => ({
         ...s,
         phase: "complete",
+        // Local/remote outputs are the BEFORE snapshots (the predicted quotes).
+        // For an atomic single-tx swap with no concurrent activity these are
+        // exactly what the AMMs delivered.
+        localOutput: l1QuoteSnapshot,
+        remoteOutput: l2QuoteSnapshot,
         totalOutput: totalOutputStr,
         usdcBalanceAfter: usdcAfterStr,
         improvement: improvementStr,
+        l2TxHashes,
         endTime,
       }));
 

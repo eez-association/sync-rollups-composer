@@ -35,6 +35,9 @@ interface AggregatorState {
   l1TxStatus: number | null;
   l1BlockNumber: number | null;
   l1GasUsed: string | null;
+  l2BlockBefore: number | null;
+  l2BlockAfter: number | null;
+  l2TxHashes: string[];
   l1Done: boolean;
   l2Done: boolean;
   localOutput: string | null;
@@ -378,15 +381,9 @@ function ResultsCard({ state }: { state: AggregatorState }) {
           <div className={styles.resultRow}>
             <span className={styles.resultLabel}>Improvement</span>
             <span className={styles.resultValue}>
-              <span className={styles.quoteImprovement}>+{state.improvement}%</span>
+              <span className={styles.quoteImprovement}>{state.improvement}</span>
               <span style={{ marginLeft: 4, fontSize: 10, color: "var(--text-dim)" }}>vs single pool</span>
             </span>
-          </div>
-        )}
-        {state.l1GasUsed && (
-          <div className={styles.resultRow}>
-            <span className={styles.resultLabel}>Gas Used</span>
-            <span className={styles.resultValue}>{state.l1GasUsed} gas</span>
           </div>
         )}
         {state.l1BlockNumber !== null && (
@@ -402,6 +399,18 @@ function ResultsCard({ state }: { state: AggregatorState }) {
             <span className={styles.resultLabel}>L1 Transaction</span>
             <span className={styles.resultValue}>
               <TxLink hash={state.txHash} chain="l1" short={false} />
+            </span>
+          </div>
+        )}
+        {state.l2TxHashes.length > 0 && (
+          <div className={styles.resultRow}>
+            <span className={styles.resultLabel}>
+              L2 {state.l2TxHashes.length === 1 ? "Transaction" : "Transactions"}
+            </span>
+            <span className={styles.resultValue} style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+              {state.l2TxHashes.map((h) => (
+                <TxLink key={h} hash={h} chain="l2" short={false} />
+              ))}
             </span>
           </div>
         )}
@@ -783,24 +792,21 @@ export function AggregatorPanel({
         </div>
       </div>
 
-      {/* Contract Lanes (deployed contracts reference — less important) */}
-      <ContractLanes
-        loading={state.loading}
-        deployed={state.contractsDeployed}
-        l1Contracts={l1Contracts}
-        l2Contracts={l2Contracts}
-      />
-
-      {/* Step tracker */}
-      {showSteps && (
-        <div className={styles.trackerCard}>
-          <div className={styles.trackerTitle}>Execution Progress</div>
-          <StepTracker steps={steps} />
-          {(complete || failed) && (
-            <button className={styles.resetBtn} onClick={onReset}>
-              Reset
-            </button>
+      {/* Execution Progress + Aggregation Results — side by side row */}
+      {(showSteps || complete) && (
+        <div className={styles.progressRow}>
+          {showSteps && (
+            <div className={styles.trackerCard}>
+              <div className={styles.trackerTitle}>Execution Progress</div>
+              <StepTracker steps={steps} />
+              {(complete || failed) && (
+                <button className={styles.resetBtn} onClick={onReset}>
+                  Reset
+                </button>
+              )}
+            </div>
           )}
+          <ResultsCard state={state} />
         </div>
       )}
 
@@ -809,8 +815,13 @@ export function AggregatorPanel({
         <div className={styles.errorBanner}>{state.error}</div>
       )}
 
-      {/* Results card */}
-      <ResultsCard state={state} />
+      {/* Contract Lanes (deployed contracts reference — least important) */}
+      <ContractLanes
+        loading={state.loading}
+        deployed={state.contractsDeployed}
+        l1Contracts={l1Contracts}
+        l2Contracts={l2Contracts}
+      />
 
       {/* Under the Hood */}
       <UnderTheHood />

@@ -944,6 +944,20 @@
    Step Tracker
    ══════════════════════════════════ */
 
+/* Side-by-side row: Execution Progress (left) + Aggregation Results (right) */
+.progressRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-4);
+  align-items: stretch;
+}
+
+@media (max-width: 1024px) {
+  .progressRow {
+    grid-template-columns: 1fr;
+  }
+}
+
 .trackerCard {
   background: var(--bg-card);
   border: 1px solid var(--border);
