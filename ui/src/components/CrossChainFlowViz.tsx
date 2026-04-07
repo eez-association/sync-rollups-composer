@@ -23,15 +23,22 @@ interface CrossChainFlowVizProps {
 
 /* ── Path data ── */
 
+// Box edges with the new 160x64 size:
+//   User    [20-180,  48-112]
+//   Agg     [220-380, 48-112]
+//   L1 AMM  [480-640, 48-112]
+//   Output  [740-900, 48-112]
+//   L2 Exec [260-420, 258-322]
+//   L2 AMM  [520-680, 258-322]
 const PATHS = {
-  userToAgg: "M160,80 L240,80",
-  aggToL1Amm: "M360,80 L500,80",
-  l1AmmToOutput: "M620,80 L760,80",
-  aggToPortalDown: "M300,105 C300,150 300,170 300,190",
-  portalToL2Exec: "M300,210 C300,240 320,270 340,290",
-  l2ExecToL2Amm: "M400,290 L540,290",
-  l2AmmToPortalUp: "M660,290 C700,260 760,230 790,210",
-  portalToOutput: "M790,190 C790,150 810,120 820,105",
+  userToAgg: "M180,80 L220,80",
+  aggToL1Amm: "M380,80 L480,80",
+  l1AmmToOutput: "M640,80 L740,80",
+  aggToPortalDown: "M300,112 C300,150 300,170 300,190",
+  portalToL2Exec: "M300,210 C300,240 320,250 340,258",
+  l2ExecToL2Amm: "M420,290 L520,290",
+  l2AmmToPortalUp: "M680,290 C700,270 770,235 790,210",
+  portalToOutput: "M790,190 C790,150 810,125 820,112",
 } as const;
 
 /* ── Colours ── */
@@ -295,15 +302,15 @@ function JourneyParticle({
  */
 const JOURNEY_PATHS = {
   preSplit: "M100,80 L300,80",
-  // Local leg
+  // Local leg — through L1 AMM center
   localToL1Amm: "M300,80 L560,80",
   localToOutput: "M560,80 L820,80",
-  // Remote leg (broken into 5 short segments to support per-segment label swaps)
-  remoteAggToPortalDown: "M300,90 L300,180",
-  remotePortalToL2Exec: "M300,200 C300,240 320,270 340,290",
+  // Remote leg — exit Aggregator from bottom (y=112), enter L2 Executor top (y=258)
+  remoteAggToPortalDown: "M300,112 L300,180",
+  remotePortalToL2Exec: "M300,200 C300,235 320,250 340,258",
   remoteL2ExecToL2Amm: "M340,290 L600,290",
-  remoteL2AmmToPortalUp: "M600,290 C700,260 760,230 790,200",
-  remotePortalToOutput: "M790,180 L820,90",
+  remoteL2AmmToPortalUp: "M600,290 C700,265 770,235 790,200",
+  remotePortalToOutput: "M790,180 L820,112",
 } as const;
 
 /* ── Coordinated Journey ──
@@ -518,11 +525,12 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }
   // BOTH pool containers have the SAME size. What changes is how full each
   // container is — the LIQUID LEVEL reflects the relative liquidity. A pool
   // with 2x more TVL than another will be visibly more full.
-  const poolW = 120;
-  const poolH = 50;
+  // Pool container size matches FlowNode (160x64) so the schema is uniform
+  const poolW = 160;
+  const poolH = 64;
   const poolX = x - poolW / 2;
   const poolY = y - poolH / 2;
-  const padding = 2;
+  const padding = 3;
   const innerW = poolW - padding * 2;
   const innerH = poolH - padding * 2;
 
@@ -689,7 +697,7 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }
             y={liquidTop + liquidH / 2 - 1}
             textAnchor="middle"
             fill="#c7d2fe"
-            fontSize={8}
+            fontSize={10}
             fontWeight={700}
             fontFamily="var(--mono)"
             opacity={0.95}
@@ -699,12 +707,12 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }
           {reserveA !== null && (
             <text
               x={poolX + padding + leftWidth / 2}
-              y={liquidTop + liquidH / 2 + 9}
+              y={liquidTop + liquidH / 2 + 11}
               textAnchor="middle"
               fill="#a5b4fc"
-              fontSize={7}
+              fontSize={9}
               fontFamily="var(--mono)"
-              opacity={0.75}
+              opacity={0.8}
             >
               {formatReserve(reserveA)}
             </text>
@@ -720,7 +728,7 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }
             y={liquidTop + liquidH / 2 - 1}
             textAnchor="middle"
             fill="#a7f3d0"
-            fontSize={8}
+            fontSize={10}
             fontWeight={700}
             fontFamily="var(--mono)"
             opacity={0.95}
@@ -730,12 +738,12 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }
           {reserveB !== null && (
             <text
               x={dividerX + rightWidth / 2}
-              y={liquidTop + liquidH / 2 + 9}
+              y={liquidTop + liquidH / 2 + 11}
               textAnchor="middle"
               fill="#6ee7b7"
-              fontSize={7}
+              fontSize={9}
               fontFamily="var(--mono)"
-              opacity={0.75}
+              opacity={0.8}
             >
               {formatReserve(reserveB)}
             </text>
@@ -793,18 +801,21 @@ function FlowNode({ x, y, label, sublabel, chain, active }: FlowNodeProps) {
   const activeStroke = chain === "l1"
     ? "var(--accent)"
     : "var(--green)";
+  // Box dimensions enlarged so the schema fills the wider 3/4 column
+  const w = 160;
+  const h = 64;
 
   return (
     <g>
       <rect
-        x={x - 60}
-        y={y - 25}
-        width={120}
-        height={50}
-        rx={8}
+        x={x - w / 2}
+        y={y - h / 2}
+        width={w}
+        height={h}
+        rx={10}
         fill="var(--bg-card)"
         stroke={active ? activeStroke : stroke}
-        strokeWidth={active ? 1.5 : 0.8}
+        strokeWidth={active ? 1.6 : 0.9}
         filter={active ? "url(#nodeGlow)" : undefined}
       />
       <text
@@ -812,19 +823,20 @@ function FlowNode({ x, y, label, sublabel, chain, active }: FlowNodeProps) {
         y={y - 4}
         textAnchor="middle"
         fill="var(--text)"
-        fontSize={11}
-        fontWeight={600}
+        fontSize={14}
+        fontWeight={700}
         fontFamily="var(--sans)"
+        letterSpacing="-0.01em"
       >
         {label}
       </text>
       {sublabel && (
         <text
           x={x}
-          y={y + 12}
+          y={y + 14}
           textAnchor="middle"
           fill="var(--text-dim)"
-          fontSize={9}
+          fontSize={10}
           fontFamily="var(--mono)"
         >
           {sublabel}
@@ -1126,35 +1138,37 @@ export function CrossChainFlowViz({
         {/* Pool labels on top of LiquidPool */}
         <text
           x={560}
-          y={57}
+          y={42}
           textAnchor="middle"
           fill="var(--text)"
-          fontSize={11}
-          fontWeight={600}
+          fontSize={13}
+          fontWeight={700}
           fontFamily="var(--sans)"
+          letterSpacing="-0.01em"
         >
           L1 AMM
         </text>
         <text
           x={600}
-          y={267}
+          y={252}
           textAnchor="middle"
           fill="var(--text)"
-          fontSize={11}
-          fontWeight={600}
+          fontSize={13}
+          fontWeight={700}
           fontFamily="var(--sans)"
+          letterSpacing="-0.01em"
         >
           L2 AMM
         </text>
 
-        {/* Aggregator breathing effect when idle */}
+        {/* Aggregator breathing effect when idle — match the new node size */}
         {vizPhase === 0 && (
           <rect
-            x={240}
-            y={55}
-            width={120}
-            height={50}
-            rx={8}
+            x={220}
+            y={48}
+            width={160}
+            height={64}
+            rx={10}
             fill="none"
             stroke="var(--accent)"
             strokeWidth={0.8}
