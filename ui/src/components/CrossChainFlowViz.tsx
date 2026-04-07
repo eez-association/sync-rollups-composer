@@ -211,8 +211,10 @@ interface JourneyParticleProps {
   labelDy?: number;
 }
 
-// Cycle period in seconds — ALL particles loop in lock-step at this interval
-const CYCLE_PERIOD = 10;
+// Cycle period in seconds — ALL particles loop in lock-step at this interval.
+// The journey runs from t=0 to t=10, then there's a 2s pause before the next
+// cycle starts at t=12.
+const CYCLE_PERIOD = 12;
 
 // Build a 5-cycle list of begin times so SMIL re-fires reliably even when
 // the browser throttles the cycleClock animation. Indefinite repetition is
@@ -512,6 +514,9 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
   // invariant). So the visual split is always 50/50 — the actual reserve
   // amounts are shown as labels inside each half. Liquidity is conveyed
   // through the labels, not the bar widths.
+  //
+  // Liquid fills 70% of the inner height from the bottom — the top 30% is
+  // empty headroom, like a real glass container with liquid inside.
   const poolX = x - 60;
   const poolY = y - 25;
   const poolW = 120;
@@ -525,6 +530,12 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
   const rightWidth = halfW;
   const dividerX = poolX + padding + halfW;
 
+  // Liquid level: 70% fill from the bottom of the inner area
+  const fillRatio = 0.7;
+  const liquidH = innerH * fillRatio;
+  const liquidTop = poolY + padding + (innerH - liquidH);
+  const liquidBottom = poolY + padding + innerH;
+
   const borderColor = chain === "l1"
     ? (active ? "rgba(99,102,241,0.6)" : "rgba(99,102,241,0.25)")
     : (active ? "rgba(52,211,153,0.6)" : "rgba(52,211,153,0.25)");
@@ -536,8 +547,8 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
   const showLeftLabel = leftWidth >= 25;
   const showRightLabel = rightWidth >= 25;
 
-  // Surface wave Y for each side (top of fill)
-  const surfaceY = poolY + padding + 4;
+  // Surface wave Y — sits at the top of the liquid (not the top of the container)
+  const surfaceY = liquidTop;
 
   return (
     <g>
@@ -553,34 +564,34 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         strokeWidth={active ? 1.4 : 0.8}
       />
 
-      {/* Left side — Token A fill (full height, width = leftWidth) */}
+      {/* Left side — Token A liquid fill (70% from bottom) */}
       <rect
         x={poolX + padding}
-        y={poolY + padding}
+        y={liquidTop}
         width={leftWidth}
-        height={innerH}
+        height={liquidH}
         rx={3}
         fill="url(#liquidA)"
-        opacity={0.32}
+        opacity={0.38}
       />
 
-      {/* Right side — Token B fill (full height, width = rightWidth) */}
+      {/* Right side — Token B liquid fill (70% from bottom) */}
       <rect
         x={dividerX}
-        y={poolY + padding}
+        y={liquidTop}
         width={rightWidth}
-        height={innerH}
+        height={liquidH}
         rx={3}
         fill="url(#liquidB)"
-        opacity={0.32}
+        opacity={0.38}
       />
 
-      {/* Vertical divider line at the boundary */}
+      {/* Vertical divider line — only spans the liquid portion */}
       <line
         x1={dividerX}
-        y1={poolY + padding}
+        y1={liquidTop}
         x2={dividerX}
-        y2={poolY + poolH - padding}
+        y2={liquidBottom}
         stroke={chain === "l1" ? "rgba(129,140,248,0.7)" : "rgba(52,211,153,0.7)"}
         strokeWidth={1}
         opacity={0.8}
@@ -645,12 +656,12 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         );
       })()}
 
-      {/* Left token label + amount (centered in left half) */}
+      {/* Left token label + amount (centered in left half, inside the liquid) */}
       {showLeftLabel && (
         <>
           <text
             x={poolX + padding + leftWidth / 2}
-            y={poolY + 22}
+            y={liquidTop + liquidH / 2 - 1}
             textAnchor="middle"
             fill="#c7d2fe"
             fontSize={8}
@@ -663,7 +674,7 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
           {reserveA !== null && (
             <text
               x={poolX + padding + leftWidth / 2}
-              y={poolY + 35}
+              y={liquidTop + liquidH / 2 + 9}
               textAnchor="middle"
               fill="#a5b4fc"
               fontSize={7}
@@ -676,12 +687,12 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         </>
       )}
 
-      {/* Right token label + amount (centered in right half) */}
+      {/* Right token label + amount (centered in right half, inside the liquid) */}
       {showRightLabel && (
         <>
           <text
             x={dividerX + rightWidth / 2}
-            y={poolY + 22}
+            y={liquidTop + liquidH / 2 - 1}
             textAnchor="middle"
             fill="#a7f3d0"
             fontSize={8}
@@ -694,7 +705,7 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
           {reserveB !== null && (
             <text
               x={dividerX + rightWidth / 2}
-              y={poolY + 35}
+              y={liquidTop + liquidH / 2 + 9}
               textAnchor="middle"
               fill="#6ee7b7"
               fontSize={7}
@@ -1039,12 +1050,7 @@ export function CrossChainFlowViz({
         <Portal x={300} y={190} active={portalDownActive} />
         <Portal x={790} y={190} active={portalUpActive} />
 
-        {/* ══════════════ Layer 5: Particles ══════════════ */}
-
-        {/* Coordinated journey — single particle splits at Aggregator into local
-            and remote branches. Both branches arrive at Output simultaneously.
-            Loops forever, independent of vizPhase. */}
-        <CoordinatedJourney />
+        {/* ══════════════ Layer 5: Particles (background ambient only) ══════════════ */}
 
         {/* Merge pulse at Output node when both streams converge */}
         {vizPhase >= 6 && !isComplete && (
@@ -1405,6 +1411,11 @@ export function CrossChainFlowViz({
             opacity={0.15}
           />
         ))}
+
+        {/* ══════════════ Layer 8: Coordinated journey (TOPMOST) ══════════════
+            Particles + labels render LAST so they always paint on top of nodes,
+            pools, and pool labels. */}
+        <CoordinatedJourney />
       </svg>
     </div>
   );
