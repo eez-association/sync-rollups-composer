@@ -13,7 +13,8 @@
    Combined Hero + Viz container
    ══════════════════════════════════ */
 
-.vizContainer {
+/* Main combined card: header strip + viz + swap form, all in one container */
+.mainCard {
   position: relative;
   border-radius: var(--radius);
   background: var(--bg-card);
@@ -26,107 +27,89 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
-.hero {
-  padding: 24px 24px 16px;
-  text-align: center;
+/* Compact header strip — replaces the big hero. One row, badge + title + balances. */
+.mainHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border);
-  position: relative;
-  overflow: hidden;
+  background: linear-gradient(
+    180deg,
+    rgba(99, 102, 241, 0.04) 0%,
+    transparent 100%
+  );
+  flex-wrap: wrap;
 }
 
-.hero::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse at 15% 0%, rgba(99, 102, 241, 0.07) 0%, transparent 55%),
-    radial-gradient(ellipse at 85% 100%, rgba(34, 211, 238, 0.05) 0%, transparent 50%);
-  pointer-events: none;
-  z-index: 0;
+.mainHeaderLeft {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
-.hero > * {
-  position: relative;
-  z-index: 1;
+.mainHeaderRight {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mainHeaderTitle {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+
+.mainHeaderStats {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.dot {
+  color: var(--border-bright);
 }
 
 .heroBadge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 14px;
+  gap: 5px;
+  padding: 3px 10px;
   border-radius: 20px;
   background: rgba(99, 102, 241, 0.12);
   border: 1px solid rgba(99, 102, 241, 0.2);
   color: var(--accent-light);
   font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  margin-bottom: 8px;
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.12),
-    0 0 12px rgba(99, 102, 241, 0.06);
-}
-
-.heroTitle {
-  font-family: var(--sans);
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--text-bright);
-  letter-spacing: -0.02em;
-  margin: 0 0 12px;
-}
-
-.heroStats {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  padding: 6px 16px;
-  border-radius: var(--radius);
-  background: var(--bg-inset);
-  border: 1px solid var(--border);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.02);
-  overflow: hidden;
-}
-
-.heroStat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 2px 16px;
-}
-
-.heroStatValue {
-  font-family: var(--mono);
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--accent-light);
-  line-height: 1;
-  letter-spacing: -0.02em;
-}
-
-.heroStatLabel {
-  font-family: var(--mono);
   font-size: 9px;
-  font-weight: 500;
-  color: var(--text-dim);
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 
-.heroStatDivider {
-  width: 1px;
-  height: 32px;
-  background: var(--border);
-  flex-shrink: 0;
-}
-
 .vizInner {
   position: relative;
+}
+
+/* Inline swap form inside the merged card — no border, just a top divider */
+.swapInline {
+  border-top: 1px solid var(--border);
+  padding: 14px 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(99, 102, 241, 0.025) 100%
+  );
 }
 
 .compareBtn {
@@ -507,47 +490,11 @@
    Swap card — compact Uniswap-style
    ══════════════════════════════════ */
 
+/* Legacy swapSection kept as alias for any leftover refs — no own card */
 .swapSection {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 16px 18px;
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.24),
-    0 4px 16px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.02);
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-/* Header row: title + balances + wrap toggle */
-.swapHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
-}
-
-.swapTitle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--sans);
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text-bright);
-  letter-spacing: -0.01em;
-}
-
-.swapHeaderBalances {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 .headerBalance {
@@ -574,24 +521,37 @@
 .wrapToggleBtn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-dim);
-  background: var(--bg-inset);
-  border: 1px solid var(--border);
+  color: var(--accent-light);
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.35);
   border-radius: 6px;
-  padding: 4px 8px;
+  padding: 6px 12px;
   cursor: pointer;
-  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+  transition:
+    color 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    background 0.15s var(--ease),
+    box-shadow 0.15s var(--ease);
+  box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
 }
 
 .wrapToggleBtn:hover {
-  color: var(--text-bright);
-  border-color: var(--border-bright);
+  color: #fff;
+  background: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.6);
+  box-shadow: 0 0 14px rgba(99, 102, 241, 0.25);
+}
+
+.wrapToggleBtn[aria-expanded="true"] {
+  color: #fff;
+  background: rgba(99, 102, 241, 0.3);
+  border-color: rgba(99, 102, 241, 0.7);
 }
 
 /* Wrap drawer (collapsed by default) */

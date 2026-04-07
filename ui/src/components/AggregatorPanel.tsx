@@ -598,61 +598,24 @@ export function AggregatorPanel({
 
   return (
     <div className={styles.panel}>
-      {/* Hero + Visualization — single card */}
-      <div className={styles.vizContainer}>
-        {/* Hero section — inside the card, above the SVG */}
-        <div className={styles.hero}>
-          <div className={styles.heroBadge}>
-            <IconSplit size={12} />
-            Cross-Chain Aggregator
+      {/* Combined card: header strip + visualization + swap form */}
+      <div className={styles.mainCard}>
+        {/* Compact header strip: badge + title + stats + balances */}
+        <div className={styles.mainHeader}>
+          <div className={styles.mainHeaderLeft}>
+            <span className={styles.heroBadge}>
+              <IconSplit size={11} />
+              Cross-Chain Aggregator
+            </span>
+            <span className={styles.mainHeaderTitle}>Split. Swap. Atomic.</span>
+            <span className={styles.mainHeaderStats}>
+              <span>3 hops</span><span className={styles.dot}>·</span>
+              <span>2 AMMs</span><span className={styles.dot}>·</span>
+              <span>depth 7</span><span className={styles.dot}>·</span>
+              <span>1 tx</span>
+            </span>
           </div>
-          <h2 className={styles.heroTitle}>Split. Swap. Atomic.</h2>
-          <div className={styles.heroStats}>
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>3</span>
-              <span className={styles.heroStatLabel}>Hops</span>
-            </div>
-            <div className={styles.heroStatDivider} />
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>2</span>
-              <span className={styles.heroStatLabel}>AMMs</span>
-            </div>
-            <div className={styles.heroStatDivider} />
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>7</span>
-              <span className={styles.heroStatLabel}>Depth</span>
-            </div>
-            <div className={styles.heroStatDivider} />
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>1</span>
-              <span className={styles.heroStatLabel}>Transaction</span>
-            </div>
-          </div>
-        </div>
-
-        {/* SVG visualization below hero */}
-        <div className={styles.vizInner}>
-          <CrossChainFlowViz
-            vizPhase={state.vizPhase}
-            splitPercent={state.splitPercent}
-            l1ReserveA={state.l1ReserveA}
-            l1ReserveB={state.l1ReserveB}
-            l2ReserveA={state.l2ReserveA}
-            l2ReserveB={state.l2ReserveB}
-            improvement={state.improvement}
-          />
-        </div>
-      </div>
-
-      {/* Swap Section — compact Uniswap-style card */}
-      <div className={styles.swapSection}>
-        {/* Header: title + balances + wrap toggle */}
-        <div className={styles.swapHeader}>
-          <div className={styles.swapTitle}>
-            <IconSplit size={14} />
-            Aggregated Swap
-          </div>
-          <div className={styles.swapHeaderBalances}>
+          <div className={styles.mainHeaderRight}>
             <span className={styles.headerBalance}>
               <span className={styles.headerBalanceLabel}>ETH</span>
               <span className={styles.headerBalanceValue}>
@@ -674,16 +637,32 @@ export function AggregatorPanel({
             <button
               className={styles.wrapToggleBtn}
               onClick={() => setWrapOpen(!wrapOpen)}
-              title="Wrap / Unwrap ETH"
+              title="Wrap ETH ↔ WETH"
               aria-expanded={wrapOpen}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M7 16V4M7 4L3 8M7 4l4 4M17 8v12M17 20l4-4M17 20l-4-4" />
               </svg>
-              Wrap
+              Wrap ETH ↔ WETH
             </button>
           </div>
         </div>
+
+        {/* SVG visualization */}
+        <div className={styles.vizInner}>
+          <CrossChainFlowViz
+            vizPhase={state.vizPhase}
+            splitPercent={state.splitPercent}
+            l1ReserveA={state.l1ReserveA}
+            l1ReserveB={state.l1ReserveB}
+            l2ReserveA={state.l2ReserveA}
+            l2ReserveB={state.l2ReserveB}
+            improvement={state.improvement}
+          />
+        </div>
+
+        {/* Swap form — same card, separated by a thin divider */}
+        <div className={styles.swapInline}>
 
         {/* Wrap/Unwrap drawer (collapsed by default) */}
         {wrapOpen && (
@@ -816,6 +795,7 @@ export function AggregatorPanel({
             <><IconSplit size={15} /> Aggregate Swap</>
           )}
         </button>
+        </div>
       </div>
 
       {/* Contract Lanes (deployed contracts reference — less important) */}
