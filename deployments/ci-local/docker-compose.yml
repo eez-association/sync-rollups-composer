@@ -24,7 +24,9 @@
 services:
   # L1 — local Ethereum node (reth --dev mode)
   l1:
-    image: ghcr.io/paradigmxyz/reth:latest
+    # Pinned to v1.11.3 (matches Cargo.toml reth crate pin on the 1.11.x line).
+    # NEVER use :latest — reth 2.0.0 (2026-04-07) breaks withdrawal trigger flow.
+    image: ghcr.io/paradigmxyz/reth:v1.11.3
     command:
       - node
       - --dev
