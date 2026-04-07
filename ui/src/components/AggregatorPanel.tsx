@@ -653,7 +653,7 @@ export function AggregatorPanel({
 
         {/* Always-visible Wrap / Unwrap mini-section */}
         <div className={styles.wrapBar}>
-          <span className={styles.wrapBarLabel}>ETH ↔ WETH</span>
+          <span className={styles.wrapBarLabel}>Wrap / Unwrap ETH</span>
           <div className={styles.wrapBarRow}>
             <input
               type="text"
@@ -663,7 +663,7 @@ export function AggregatorPanel({
               placeholder="0.1"
             />
             <button className={styles.wrapBtn} onClick={() => onWrapEth(wrapAmount)}>
-              Wrap →
+              ETH → WETH
             </button>
           </div>
           <div className={styles.wrapBarRow}>
@@ -675,7 +675,7 @@ export function AggregatorPanel({
               placeholder="0.1"
             />
             <button className={styles.wrapBtn} onClick={() => onUnwrapWeth(unwrapAmount)}>
-              ← Unwrap
+              WETH → ETH
             </button>
           </div>
         </div>
