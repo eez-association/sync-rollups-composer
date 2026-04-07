@@ -94,10 +94,10 @@
   letter-spacing: 0.08em;
 }
 
-/* Body grid: viz on left, swap form on right (desktop). Stacks on mobile. */
+/* Body grid: viz takes 3/4, swap form takes 1/4 (desktop). Stacks on mobile. */
 .mainBody {
   display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr);
+  grid-template-columns: minmax(0, 3fr) minmax(280px, 1fr);
   gap: 0;
   align-items: stretch;
 }
