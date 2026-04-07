@@ -436,62 +436,131 @@ function ResultsCard({ state }: { state: AggregatorState }) {
   );
 }
 
-/* ── Under the Hood expandable ── */
+/* ── Under the Hood — visual explainer ── */
 function UnderTheHood() {
-  const [open, setOpen] = useState(false);
+  const hops: Array<{
+    num: number;
+    label: string;
+    chain: "L1" | "L2" | "L1→L2" | "L2→L1";
+    title: string;
+    body: React.ReactNode;
+  }> = [
+    {
+      num: 1,
+      label: "Local Swap",
+      chain: "L1",
+      title: "Aggregator splits your WETH",
+      body: (
+        <>
+          Your wallet sends <strong>WETH</strong> to the <strong>Aggregator</strong> contract on L1.
+          It forwards the <em>local</em> portion to the L1 AMM for an immediate WETH→USDC swap,
+          and approves the <em>remote</em> portion for the Bridge.
+        </>
+      ),
+    },
+    {
+      num: 2,
+      label: "Bridge L1→L2",
+      chain: "L1→L2",
+      title: "Cross-chain call to L2",
+      body: (
+        <>
+          The Aggregator calls <code>Bridge.bridgeTokens()</code> and then invokes the
+          <code> L2Executor</code> proxy with <code>swapAndBridgeBack()</code>. The L1 composer
+          RPC traces the transaction, queues <strong>cross-chain entries</strong> on the L2 execution
+          table, and includes them in the next L2 block — all in the same atomic tx.
+        </>
+      ),
+    },
+    {
+      num: 3,
+      label: "Remote Swap",
+      chain: "L2",
+      title: "L2 Executor runs the swap",
+      body: (
+        <>
+          On L2, the <strong>L2Executor</strong> receives <strong>wWETH</strong>, approves
+          the <strong>L2 AMM</strong>, and executes a wWETH→wUSDC swap. The L2 AMM is a
+          separate liquidity pool with its own price, giving you access to <em>two markets at once</em>.
+        </>
+      ),
+    },
+    {
+      num: 4,
+      label: "Bridge L2→L1",
+      chain: "L2→L1",
+      title: "Bounce-back to L1",
+      body: (
+        <>
+          The L2Executor immediately calls <code>Bridge.bridgeTokens()</code> to send the
+          <strong> wUSDC</strong> back to L1. This is a <strong>scope-navigation return call</strong> —
+          part of the same atomic cross-chain scope, depth 7 in the call trace. The Aggregator
+          on L1 receives the wrapped USDC as <strong>real USDC</strong> and forwards the combined
+          output to your wallet.
+        </>
+      ),
+    },
+  ];
+
+  const facts: Array<{ value: string; label: string }> = [
+    { value: "1", label: "atomic tx" },
+    { value: "3", label: "cross-chain hops" },
+    { value: "7", label: "call depth" },
+    { value: "2", label: "AMM pools" },
+    { value: "0", label: "trust assumptions" },
+  ];
 
   return (
     <div className={styles.underHood}>
-      <button
-        className={styles.underHoodHeader}
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-      >
+      <div className={styles.underHoodHeader}>
         <span className={styles.underHoodIcon}>
           <IconSplit size={16} />
         </span>
         <span className={styles.underHoodTitle}>Under the Hood</span>
-        <span className={styles.underHoodChevron} data-open={open ? "true" : "false"}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
+        <span className={styles.underHoodSubtitle}>
+          How a single transaction orchestrates a cross-chain swap
         </span>
-      </button>
-      {open && (
-        <div className={styles.underHoodBody}>
-          <div className={styles.underHoodText}>
-            <p>
-              <strong>3 cross-chain hops, 2 AMMs, depth 7, 1 atomic transaction.</strong>
-            </p>
-            <p style={{ marginTop: 8 }}>
-              The aggregator splits your WETH swap across two liquidity pools on different chains
-              to achieve better execution than either pool alone. Here is what happens inside:
-            </p>
-            <ol style={{ marginTop: 8, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 4 }}>
-              <li>
-                <strong>Hop 1 (L1):</strong> The Aggregator contract receives your WETH, sends a portion
-                to the L1 AMM for a local swap (WETH to USDC), and bridges the remaining portion to L2
-                via <code>bridgeTokens</code>.
-              </li>
-              <li>
-                <strong>Hop 2 (L1 to L2):</strong> The cross-chain composer detects the bridge call, creates
-                execution table entries, and the builder includes them in the next L2 block. The L2Executor
-                receives wrapped WETH on L2 and swaps it through the L2 AMM.
-              </li>
-              <li>
-                <strong>Hop 3 (L2 to L1):</strong> The L2 AMM output (wrapped USDC) is bridged back to L1
-                via a scope-navigation return call. The aggregator receives both the local and remote USDC
-                outputs and forwards the total to you.
-              </li>
-            </ol>
-            <p style={{ marginTop: 8 }}>
-              The entire flow executes atomically: if any hop fails, the whole transaction reverts.
-              No funds are ever at risk. The depth-7 call trace includes: user call, aggregator dispatch,
-              L1 AMM swap, bridge out, L2 executor, L2 AMM swap, and bridge return.
-            </p>
-          </div>
+      </div>
+
+      <div className={styles.underHoodBody}>
+        <p className={styles.underHoodIntro}>
+          Cross-chain DeFi composability usually means <strong>multiple transactions</strong>,
+          bridging delays, and partial execution risk. The <strong>sync rollup protocol</strong>
+          collapses the whole flow into a <strong>single atomic L1 transaction</strong> —
+          either everything succeeds, or nothing happens.
+        </p>
+
+        <div className={styles.hopGrid}>
+          {hops.map((hop) => (
+            <div key={hop.num} className={styles.hopCard} data-chain={hop.chain}>
+              <div className={styles.hopHeader}>
+                <span className={styles.hopNum}>{hop.num}</span>
+                <span className={styles.hopChainBadge} data-chain={hop.chain}>
+                  {hop.chain}
+                </span>
+                <span className={styles.hopLabel}>{hop.label}</span>
+              </div>
+              <div className={styles.hopTitle}>{hop.title}</div>
+              <div className={styles.hopBody}>{hop.body}</div>
+            </div>
+          ))}
         </div>
-      )}
+
+        <div className={styles.factsRow}>
+          {facts.map((f) => (
+            <div key={f.label} className={styles.factItem}>
+              <div className={styles.factValue}>{f.value}</div>
+              <div className={styles.factLabel}>{f.label}</div>
+            </div>
+          ))}
+        </div>
+
+        <p className={styles.underHoodFooter}>
+          If any hop reverts, the whole scope unwinds — no leftover state on L1 or L2,
+          no tokens stranded in a bridge. That is what makes this pattern impossible on
+          traditional cross-chain messaging stacks.
+        </p>
+      </div>
     </div>
   );
 }
@@ -508,7 +577,6 @@ export function AggregatorPanel({
   walletConnected,
   walletAddress: _walletAddress,
 }: AggregatorPanelProps) {
-  const [showRouteDuel, setShowRouteDuel] = useState(false);
   const [wrapAmount, setWrapAmount] = useState("0.1");
   const [unwrapAmount, setUnwrapAmount] = useState("0.1");
 
@@ -572,14 +640,6 @@ export function AggregatorPanel({
 
         {/* SVG visualization below hero */}
         <div className={styles.vizInner}>
-          <button
-            className={styles.compareBtn}
-            data-active={showRouteDuel ? "true" : "false"}
-            onClick={() => setShowRouteDuel(!showRouteDuel)}
-            title="Toggle route comparison"
-          >
-            {showRouteDuel ? "Hide" : "Compare"}
-          </button>
           <CrossChainFlowViz
             vizPhase={state.vizPhase}
             splitPercent={state.splitPercent}
@@ -587,19 +647,10 @@ export function AggregatorPanel({
             l1ReserveB={state.l1ReserveB}
             l2ReserveA={state.l2ReserveA}
             l2ReserveB={state.l2ReserveB}
-            showRouteDuel={showRouteDuel}
             improvement={state.improvement}
           />
         </div>
       </div>
-
-      {/* Contract Lanes */}
-      <ContractLanes
-        loading={state.loading}
-        deployed={state.contractsDeployed}
-        l1Contracts={l1Contracts}
-        l2Contracts={l2Contracts}
-      />
 
       {/* Swap Section */}
       <div className={styles.swapSection}>
@@ -737,6 +788,14 @@ export function AggregatorPanel({
           )}
         </button>
       </div>
+
+      {/* Contract Lanes (deployed contracts reference — less important) */}
+      <ContractLanes
+        loading={state.loading}
+        deployed={state.contractsDeployed}
+        l1Contracts={l1Contracts}
+        l2Contracts={l2Contracts}
+      />
 
       {/* Step tracker */}
       {showSteps && (
