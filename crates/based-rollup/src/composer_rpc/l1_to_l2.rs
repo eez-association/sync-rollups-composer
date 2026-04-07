@@ -253,6 +253,12 @@ async fn handle_request(
         for (method, params) in &methods {
             if method == "eth_sendRawTransaction" {
                 if let Some(raw_tx) = params.and_then(|p| p.first()).and_then(|v| v.as_str()) {
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        raw_tx_prefix = %&raw_tx[..raw_tx.len().min(42)],
+                        raw_tx_len = raw_tx.len(),
+                        "L1 compositor: intercepted eth_sendRawTransaction"
+                    );
                     match handle_cross_chain_tx(
                         &client,
                         &l1_rpc_url,
@@ -437,12 +443,24 @@ async fn queue_execution_table(
                 // can distinguish them from L1→L2 calls.
                 call_json["targetRollupId"] = serde_json::json!(0u64);
             }
+            // Propagate in_reverted_frame for partial revert patterns (revertContinue).
+            if c.in_reverted_frame {
+                call_json["inRevertedFrame"] = serde_json::json!(true);
+            }
             // Propagate discovery iteration and L1 trace depth for reentrant detection.
             if c.discovery_iteration > 0 {
                 call_json["discoveryIteration"] = serde_json::json!(c.discovery_iteration);
             }
             if c.trace_depth > 0 {
                 call_json["l1TraceDepth"] = serde_json::json!(c.trace_depth);
+            }
+            // Propagate scope for nested calls so the RPC handler can set the
+            // correct BuildExecutionTableCall.scope field (distinct from the
+            // call_action.scope which must stay empty for L1 actionHash identity).
+            if c.trace_depth > 1 {
+                let scope_vals: Vec<String> =
+                    (0..c.trace_depth).map(|_| "0x0".to_string()).collect();
+                call_json["scope"] = serde_json::json!(scope_vals);
             }
             call_json
         })
@@ -537,6 +555,11 @@ struct DetectedInternalCall {
     /// iterations — each level triggers the next) from continuation patterns
     /// (all calls discovered in the same iteration — user tx calls them directly).
     discovery_iteration: usize,
+    /// Whether this call is inside a reverted frame (ancestor has "error" in trace).
+    /// Used for partial revert patterns (revertContinue L1→L2): calls inside a
+    /// try/catch that reverts need REVERT/REVERT_CONTINUE on L2, while calls
+    /// outside the reverted frame continue normally.
+    in_reverted_frame: bool,
 }
 
 /// Execute a `debug_traceCallMany` bundle on L2:
@@ -879,6 +902,7 @@ async fn simulate_l1_to_l2_call_on_l2(
                 vec![],     // delivery_return_data placeholder
                 false,      // delivery_failed placeholder
                 vec![],     // l1_delivery_scope placeholder
+                false,      // tx_reverts
             );
             placeholders.extend(placeholder.l2_table_entries);
         }
@@ -1025,10 +1049,79 @@ async fn simulate_l1_to_l2_call_on_l2(
             let retry_inner = extract_inner_destination_return_data(&retry_trace, destination)
                 .unwrap_or(retry_data);
             return (retry_inner, true, retry_children);
+        } else {
+            // Run 2 also failed — extract revert data from the retry trace.
+            // When the destination contract always reverts (e.g., RevertCounter),
+            // Run 2 (with RESULT entry loaded) actually reaches the destination,
+            // so the retry trace contains the real revert data. Run 1 may not
+            // reach the destination (ExecutionNotFound reverts first).
+            tracing::info!(
+                target: "based_rollup::l1_proxy",
+                dest = %destination,
+                retry_trace_has_calls = retry_trace.get("calls").and_then(|v| v.as_array()).map_or(0, |a| a.len()),
+                retry_trace_error = retry_trace.get("error").and_then(|v| v.as_str()).unwrap_or("none"),
+                "Run 2 failed — attempting to extract revert data from retry trace"
+            );
+            let retry_inner = extract_inner_destination_return_data(&retry_trace, destination);
+            if let Some(ref data) = retry_inner {
+                if !data.is_empty() {
+                    tracing::info!(
+                        target: "based_rollup::l1_proxy",
+                        dest = %destination,
+                        retry_data_len = data.len(),
+                        "Run 2 failed but captured revert data from trace"
+                    );
+                    return (data.clone(), false, retry_children);
+                }
+            }
+            // Trace extraction didn't find the destination call in the CCM trace
+            // (nested self-calls may not expose children). Use debug_traceCallMany
+            // with a direct call to the destination to capture revert data.
+            let direct_req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "debug_traceCallMany",
+                "params": [
+                    [{ "transactions": [{
+                        "from": format!("{source_address}"),
+                        "to": format!("{destination}"),
+                        "data": format!("0x{}", hex::encode(data)),
+                        "gas": "0x2faf080"
+                    }] }],
+                    null,
+                    { "tracer": "callTracer" }
+                ],
+                "id": 99959
+            });
+            if let Ok(resp) = client.post(l2_rpc_url).json(&direct_req).send().await {
+                if let Ok(body) = resp.json::<Value>().await {
+                    if let Some(trace) = body
+                        .get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                        .and_then(|a| a.first())
+                    {
+                        let has_error = trace.get("error").is_some();
+                        let output = trace.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
+                        let clean = output.strip_prefix("0x").unwrap_or(output);
+                        if let Ok(revert_data) = hex::decode(clean) {
+                            if has_error && !revert_data.is_empty() {
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    dest = %destination,
+                                    data_len = revert_data.len(),
+                                    data_hex = %format!("0x{}", hex::encode(&revert_data[..revert_data.len().min(20)])),
+                                    "captured revert data from direct debug_traceCallMany"
+                                );
+                                return (revert_data, false, retry_children);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // Run 2 failed — use the inner return data from Run 1
+    // Both runs failed without capturing destination data
     (inner_return_data, inner_success, children)
 }
 
@@ -1778,6 +1871,7 @@ async fn walk_l1_trace_generic(
             parent_call_index: None, // root-level L1→L2 call
             trace_depth: c.trace_depth,
             discovery_iteration: 0, // initial detection from first trace
+            in_reverted_frame: c.in_reverted_frame,
         })
         .collect()
 }
@@ -1826,6 +1920,7 @@ async fn build_and_run_l1_postbatch_trace(
             },
             discovery_iteration: c.discovery_iteration,
             l1_trace_depth: c.trace_depth,
+            in_reverted_frame: c.in_reverted_frame,
         })
         .collect();
 
@@ -2285,15 +2380,17 @@ async fn trace_and_detect_internal_calls(
     )
     .await;
 
+    // Track the last converged retrace walk for in_reverted_frame correction.
+    // The initial trace (without entries) sets ALL calls to in_reverted_frame=true
+    // (whole tx reverts). The converged retrace (entries loaded) reflects the REAL
+    // trace behavior: only calls inside try/catch that reverts for business logic
+    // have in_reverted_frame=true. We save at the SECOND loop convergence and apply
+    // as a final positional override before queue_execution_table.
+    let mut last_converged_walk: Vec<DetectedInternalCall> = Vec::new();
+
     // Iterative L1 discovery: if the initial trace found cross-chain calls but the
     // user tx reverted, retrace with entries loaded to discover calls hidden behind
-    // the revert. Example: Aggregator calls Bridge.bridgeEther (reverts without
-    // entries) then proxy.incrementProxy (never reached). Loading entries for the
-    // bridge deposit allows the retrace to reach incrementProxy.
-    //
-    // This mirrors trace_and_detect_l2_internal_calls in l2_to_l1.rs (Problem 1).
-    // Uses build_and_run_l1_postbatch_trace which already handles entry construction,
-    // proof signing, and traceCallMany execution.
+    // the revert.
     if top_level_error && !detected_calls.is_empty() {
         if let Some(builder_key_hex) = &builder_private_key {
             let key_clean = builder_key_hex
@@ -2349,8 +2446,9 @@ async fn trace_and_detect_internal_calls(
                     .await;
 
                     // Find truly new calls (not already in detected_calls).
+                    // Use iter().cloned() to preserve new_detected for saving.
                     let truly_new: Vec<_> = new_detected
-                        .into_iter()
+                        .iter()
                         .filter(|new_call| {
                             !detected_calls.iter().any(|existing| {
                                 existing.destination == new_call.destination
@@ -2359,9 +2457,12 @@ async fn trace_and_detect_internal_calls(
                                     && existing.source_address == new_call.source_address
                             })
                         })
+                        .cloned()
                         .collect();
 
                     if truly_new.is_empty() {
+                        // Save first loop retrace for early in_reverted_frame correction.
+                        last_converged_walk = new_detected;
                         tracing::info!(
                             target: "based_rollup::l1_proxy",
                             iteration,
@@ -2383,9 +2484,59 @@ async fn trace_and_detect_internal_calls(
         }
     }
 
+    // Early in_reverted_frame correction from the first loop's converged retrace.
+    // Must happen BEFORE enrichment because the enrichment skip (partial revert)
+    // needs correct in_reverted_frame values.
+    if !last_converged_walk.is_empty() && last_converged_walk.len() == detected_calls.len() {
+        // Property-based matching with count pairing: for each unique
+        // (dest, calldata, value, source, depth) tuple, match the Nth occurrence
+        // in detected_calls with the Nth occurrence in last_converged_walk.
+        // This is safe even when identical calls exist (e.g., CallTwice) because
+        // the count-based pairing preserves occurrence order.
+        let mut consumed: std::collections::HashMap<
+            (Address, Vec<u8>, U256, Address, usize),
+            usize,
+        > = std::collections::HashMap::new();
+        for existing in detected_calls.iter_mut() {
+            let key = (
+                existing.destination,
+                existing.calldata.clone(),
+                existing.value,
+                existing.source_address,
+                existing.trace_depth,
+            );
+            let idx = consumed.entry(key.clone()).or_insert(0);
+            // Find the Nth matching call in last_converged_walk
+            let mut count = 0usize;
+            for retrace in &last_converged_walk {
+                if retrace.destination == key.0
+                    && retrace.calldata == key.1
+                    && retrace.value == key.2
+                    && retrace.source_address == key.3
+                    && retrace.trace_depth == key.4
+                {
+                    if count == *idx {
+                        if existing.in_reverted_frame != retrace.in_reverted_frame {
+                            tracing::debug!(
+                                target: "based_rollup::l1_proxy",
+                                dest = %existing.destination,
+                                old = existing.in_reverted_frame,
+                                new = retrace.in_reverted_frame,
+                                "early in_reverted_frame correction (before enrichment)"
+                            );
+                            existing.in_reverted_frame = retrace.in_reverted_frame;
+                        }
+                        break;
+                    }
+                    count += 1;
+                }
+            }
+            *idx += 1;
+        }
+    }
+
     // Enrich detected calls with L2 return data by simulating each L1→L2 call
-    // on L2. The RESULT action hash includes the exact return bytes from the
-    // target contract (contracts/sync-rollups-protocol/docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md §C.2).
+    // on L2.
     //
     // CHAINED simulation: when multiple calls are detected (e.g., CallTwice calling
     // Counter.increment() twice), each call must see the state effects of previous
@@ -2414,6 +2565,17 @@ async fn trace_and_detect_internal_calls(
             )
             .await;
             sys_result.and_then(|s| super::common::parse_address_from_abi_return(&s))
+        };
+
+        // Pre-compute partial revert: only skip reverted calls when there's a MIX
+        // of reverted and non-reverted calls (actual try/catch pattern). When ALL
+        // calls are in_reverted_frame=true (e.g., flash-loan where the whole trace
+        // reverts in simulation), this is NOT a partial revert — all calls need
+        // chained state effects for correct simulation.
+        let enrichment_has_partial_revert = {
+            let any_rev = detected_calls.iter().any(|c| c.in_reverted_frame);
+            let any_non_rev = detected_calls.iter().any(|c| !c.in_reverted_frame);
+            any_rev && any_non_rev
         };
 
         #[allow(clippy::needless_range_loop)]
@@ -2507,38 +2669,56 @@ async fn trace_and_detect_internal_calls(
             // Build RESULT entry and exec calldata for this call (for future chaining).
             // Uses final_ret_data/final_success after Bug 2 override so the RESULT hash
             // is correct for the corrected return data.
-            let result_action = crate::cross_chain::CrossChainAction {
-                action_type: crate::cross_chain::CrossChainActionType::Result,
-                rollup_id: U256::from(rollup_id),
-                destination: Address::ZERO,
-                value: U256::ZERO,
-                data: final_ret_data,
-                failed: !final_success,
-                source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
-                scope: vec![],
-            };
-            let result_hash = crate::table_builder::compute_action_hash(&result_action);
-            prior_result_entries.push(crate::cross_chain::CrossChainExecutionEntry {
-                state_deltas: vec![],
-                action_hash: result_hash,
-                next_action: result_action,
-            });
+            //
+            // PARTIAL REVERT: skip adding reverted calls to prior_result_entries and
+            // prior_exec_calldatas. In the real execution, reverted calls are inside a
+            // try/catch scope — their state effects are rolled back by ScopeReverted.
+            // Including them in the chained simulation would let subsequent calls see
+            // state changes that won't persist, producing incorrect return data
+            // (e.g., Counter sees 1 instead of 0 for the non-reverted call).
+            if !enrichment_has_partial_revert || !detected_calls[call_idx].in_reverted_frame {
+                let result_action = crate::cross_chain::CrossChainAction {
+                    action_type: crate::cross_chain::CrossChainActionType::Result,
+                    rollup_id: U256::from(rollup_id),
+                    destination: Address::ZERO,
+                    value: U256::ZERO,
+                    data: final_ret_data,
+                    failed: !final_success,
+                    source_address: Address::ZERO,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                };
+                let result_hash = crate::table_builder::compute_action_hash(&result_action);
+                prior_result_entries.push(crate::cross_chain::CrossChainExecutionEntry {
+                    state_deltas: vec![],
+                    action_hash: result_hash,
+                    next_action: result_action,
+                });
 
-            // Build exec calldata for this call.
-            let sim_action = crate::cross_chain::CrossChainAction {
-                action_type: crate::cross_chain::CrossChainActionType::Call,
-                rollup_id: U256::from(rollup_id),
-                destination: call_destination,
-                value: call_value,
-                data: call_calldata,
-                failed: false,
-                source_address: call_source,
-                source_rollup: U256::ZERO,
-                scope: vec![],
-            };
-            let exec_cd = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
-            prior_exec_calldatas.push((exec_cd.to_vec(), call_value));
+                // Build exec calldata for this call.
+                let sim_action = crate::cross_chain::CrossChainAction {
+                    action_type: crate::cross_chain::CrossChainActionType::Call,
+                    rollup_id: U256::from(rollup_id),
+                    destination: call_destination,
+                    value: call_value,
+                    data: call_calldata,
+                    failed: false,
+                    source_address: call_source,
+                    source_rollup: U256::ZERO,
+                    scope: vec![],
+                };
+                let exec_cd =
+                    crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
+                prior_exec_calldatas.push((exec_cd.to_vec(), call_value));
+            } else {
+                tracing::info!(
+                    target: "based_rollup::l1_proxy",
+                    call_idx,
+                    dest = %call_destination,
+                    "skipping reverted call from chained L2 simulation prior entries \
+                     (state effects rolled back by scope revert in real execution)"
+                );
+            }
 
             // Convert child L2→L1 proxy calls to DetectedInternalCall and
             // accumulate them with parent index for correct L1→L2→L1 entry linking.
@@ -2566,6 +2746,7 @@ async fn trace_and_detect_internal_calls(
                         parent_call_index: Some(call_idx), // linked to parent L1→L2 call
                         trace_depth: 0,     // L2→L1 child: depth in L2 simulation
                         discovery_iteration: 0, // will be updated in iterative loop
+                        in_reverted_frame: false, // L2→L1 children: not in reverted frame
                     },
                 ));
             }
@@ -2811,13 +2992,10 @@ async fn trace_and_detect_internal_calls(
                         "walked user tx trace for cross-chain calls"
                     );
 
+                    // Save retrace walk for final in_reverted_frame correction.
+                    last_converged_walk = new_detected.clone();
+
                     // Find truly new calls using count-based comparison.
-                    // A call is "new" only if new_detected has MORE of that
-                    // (dest, calldata, value, source_address) tuple than all_calls —
-                    // supports legitimate duplicate calls (e.g., CallTwice calling
-                    // increment() twice). The CALL action hash includes value and
-                    // sourceAddress, so two calls to the same proxy with different
-                    // ETH values or from different sources are distinct.
                     let new_calls = filter_new_by_count(new_detected, &all_calls, |a, b| {
                         a.destination == b.destination
                             && a.calldata == b.calldata
@@ -3145,6 +3323,7 @@ async fn trace_and_detect_internal_calls(
                                             parent_call_index: None,
                                             trace_depth: 0,
                                             discovery_iteration: iteration,
+                                            in_reverted_frame: false, // iterative child: not in reverted frame
                                         },
                                     ));
                                 }
@@ -3531,10 +3710,56 @@ async fn trace_and_detect_internal_calls(
 
                             // STEP B: Rebuild L2 entries with updated child delivery return,
                             // then run L2 sim for the parent.
+                            //
+                            // The `sim_action` is what gets passed as the entry-point call
+                            // to `executeIncomingCrossChainCall`. On L2, this call triggers
+                            // the ENTIRE entry chain via newScope / _resolveScopes, so the
+                            // correct entry point depends on how the chain is structured:
+                            //
+                            // * REENTRANT (each L1→L2 call nested deeper via strictly
+                            //   increasing trace depth, e.g. PingPong depth 5): each level's
+                            //   parent is reached via its own scope navigation leg from the
+                            //   previous level. Simulating any specific level's parent
+                            //   directly works because each level's execution is a pure
+                            //   function of its input — no cross-level state dependency.
+                            //   → use detected_calls[idx] as the sim entry point.
+                            //
+                            // * NON-REENTRANT SIBLINGS (multiple L1→L2 calls at the same
+                            //   trace depth, e.g. multi-directional aggregator: Bridge.bridgeTokens
+                            //   followed by L2Executor.swapAndBridgeBack): call[N] depends
+                            //   on state effects from call[0..N-1] (e.g. swapAndBridgeBack
+                            //   needs wrapped tokens minted by receiveTokens). If we run
+                            //   `executeIncomingCrossChainCall(call[N])` directly, the L2
+                            //   runtime starts scope navigation from call[N] and never
+                            //   executes the earlier siblings — so the dependent state is
+                            //   missing and the simulation reverts.
+                            //   → use the FIRST root L1→L2 call as the sim entry point. The
+                            //   L2 runtime will execute call[0] → entry chain → call[1] →
+                            //   ... → call[N] in sequence, building state cumulatively.
+                            //   BFS still extracts the return data for call[N]'s destination.
+                            let sim_entry_idx = if is_reentrant_pattern {
+                                idx
+                            } else {
+                                // First root in trace order. `root_indices` is reversed
+                                // (innermost first), so the first root in trace order is
+                                // the LAST element.
+                                *root_indices.last().unwrap_or(&idx)
+                            };
                             let call_destination = detected_calls[idx].destination;
-                            let call_calldata = detected_calls[idx].calldata.clone();
-                            let call_value = detected_calls[idx].value;
-                            let call_source = detected_calls[idx].source_address;
+                            let call_calldata = detected_calls[sim_entry_idx].calldata.clone();
+                            let call_value = detected_calls[sim_entry_idx].value;
+                            let call_source = detected_calls[sim_entry_idx].source_address;
+                            let entry_destination = detected_calls[sim_entry_idx].destination;
+
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                idx,
+                                sim_entry_idx,
+                                is_reentrant_pattern,
+                                entry_dest = %entry_destination,
+                                bfs_target = %call_destination,
+                                "post-convergence: selected L2 sim entry point"
+                            );
 
                             let l1_detected: Vec<crate::table_builder::L1DetectedCall> =
                                 detected_calls
@@ -3561,6 +3786,7 @@ async fn trace_and_detect_internal_calls(
                                         },
                                         discovery_iteration: c.discovery_iteration,
                                         l1_trace_depth: c.trace_depth,
+                                        in_reverted_frame: c.in_reverted_frame,
                                     })
                                     .collect();
                             let analyzed = crate::table_builder::analyze_continuation_calls(
@@ -3628,7 +3854,12 @@ async fn trace_and_detect_internal_calls(
                             let sim_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Call,
                                 rollup_id: U256::from(rollup_id),
-                                destination: call_destination,
+                                // Entry point for `executeIncomingCrossChainCall` — the
+                                // FIRST root call in non-reentrant patterns so the entry
+                                // chain executes cumulatively. BFS still extracts the
+                                // return data for `call_destination` (the current level's
+                                // parent destination).
+                                destination: entry_destination,
                                 value: call_value,
                                 data: call_calldata,
                                 failed: false,
@@ -3653,18 +3884,28 @@ async fn trace_and_detect_internal_calls(
                             .await;
 
                             if let Some((trace, success)) = sim_result {
-                                // BFS extraction
+                                // BFS extraction — finds the direct call node matching
+                                // `call_destination` and returns its return data. When BFS
+                                // hits, that IS the parent's own return value (not a scope-
+                                // chain-resolved propagation), so it is always safe to capture.
                                 let inner =
                                     extract_inner_destination_return_data(&trace, call_destination)
                                         .unwrap_or_default();
-                                let inner_success = !inner.is_empty()
+                                let bfs_hit = !inner.is_empty();
+                                let inner_success = bfs_hit
                                     || destination_call_succeeded_in_trace(
                                         &trace,
                                         call_destination,
                                     );
 
-                                // Fallback to top-level if BFS empty
-                                let (ret_data, inner_success) = if inner.is_empty() && success {
+                                // Fallback to top-level if BFS empty. The top-level
+                                // return reflects the FINAL scope resolution, which may
+                                // not equal the parent's own return for continuation
+                                // patterns whose parent returns void but whose child
+                                // chain propagates data back through newScope.
+                                let (ret_data, inner_success, used_fallback) = if inner.is_empty()
+                                    && success
+                                {
                                     let raw = extract_return_data_from_trace(&trace);
                                     let decoded = if raw.len() >= 64 {
                                         let dlen = U256::from_be_slice(&raw[32..64]).to::<usize>();
@@ -3672,9 +3913,9 @@ async fn trace_and_detect_internal_calls(
                                     } else {
                                         raw
                                     };
-                                    (decoded, true)
+                                    (decoded, true, true)
                                 } else {
-                                    (inner, inner_success)
+                                    (inner, inner_success, false)
                                 };
 
                                 tracing::info!(
@@ -3684,6 +3925,8 @@ async fn trace_and_detect_internal_calls(
                                     ret_data_len = ret_data.len(),
                                     inner_success,
                                     sim_success = success,
+                                    bfs_hit,
+                                    used_fallback,
                                     ret_data_hex = %if ret_data.is_empty() {
                                         "0x".to_string()
                                     } else {
@@ -3692,26 +3935,44 @@ async fn trace_and_detect_internal_calls(
                                     "post-convergence: L2 sim result for parent"
                                 );
 
-                                // For reentrant patterns: update return data (deepCall returns
-                                // incrementing values needed for result propagation entries).
-                                // For continuation patterns with children: DON'T update.
-                                // The L2 sim returns scope-chain-resolved data (e.g., CounterL1's
-                                // return propagated back) but the parent (CAP2) returns void.
-                                // Overwriting with sim data corrupts the resolution_terminal entry.
+                                // Update policy (distinguishes BFS hit from top-level fallback):
+                                //
+                                // * BFS hit → always update. The return data is the parent's
+                                //   OWN return (e.g., swapAndBridgeBack returning uint256
+                                //   USDC amount in the multi-directional aggregator pattern).
+                                //   This is the parent function's direct return value, not a
+                                //   scope-chain propagation, so it is ALWAYS the correct data
+                                //   to store on the L2 RESULT entry that _processCallAtScope
+                                //   will consume after this call executes.
+                                //
+                                // * Top-level fallback → risky for continuation parents with
+                                //   children: the fallback extracts the scope-chain-resolved
+                                //   return (e.g., CounterL1's return propagated through
+                                //   newScope). For the CAP2 pattern, the parent returns void
+                                //   but the fallback would capture CounterL1's propagated
+                                //   return, corrupting the L2 RESULT entry. Skip in that case.
+                                //
+                                // * Reentrant pattern (depth-chain of L1→L2 calls) → always
+                                //   safe: the scope chain resolution is the intended return
+                                //   semantics for deepCall-style reentrant patterns.
+                                //
+                                // * No children → always safe: no scope chain propagation
+                                //   could possibly have happened.
                                 let has_children = detected_calls
                                     .iter()
                                     .any(|c| c.parent_call_index == Some(idx));
-                                if is_reentrant_pattern || !has_children {
-                                    if inner_success || !ret_data.is_empty() {
-                                        detected_calls[idx].return_data = ret_data;
-                                        detected_calls[idx].call_success = inner_success;
-                                    }
-                                } else {
+                                let skip_update =
+                                    used_fallback && has_children && !is_reentrant_pattern;
+
+                                if skip_update {
                                     tracing::info!(
                                         target: "based_rollup::l1_proxy",
                                         idx,
-                                        "post-convergence: skipping L2 return update for continuation parent with children (returns void)"
+                                        "post-convergence: skipping L2 return update (top-level fallback for continuation parent with children — scope-chain data may not equal parent's own return)"
                                     );
+                                } else if inner_success || !ret_data.is_empty() {
+                                    detected_calls[idx].return_data = ret_data;
+                                    detected_calls[idx].call_success = inner_success;
                                 }
                             }
                         }
@@ -3745,6 +4006,67 @@ async fn trace_and_detect_internal_calls(
             "no internal cross-chain calls found in trace — forwarding tx directly"
         );
         return Ok(None);
+    }
+
+    // Final in_reverted_frame correction from the last converged retrace.
+    // Uses property-based matching with count pairing (same as early correction).
+    // No length guard — walk only contains L1→L2 calls while detected_calls may
+    // also include L2→L1 children from enrichment. Property matching by
+    // (dest, calldata, value, source, depth) ensures only identical calls update.
+    if !last_converged_walk.is_empty() {
+        let mut consumed: std::collections::HashMap<
+            (Address, Vec<u8>, U256, Address, usize),
+            usize,
+        > = std::collections::HashMap::new();
+        for existing in detected_calls.iter_mut() {
+            let key = (
+                existing.destination,
+                existing.calldata.clone(),
+                existing.value,
+                existing.source_address,
+                existing.trace_depth,
+            );
+            let idx = consumed.entry(key.clone()).or_insert(0);
+            let mut count = 0usize;
+            for retrace in &last_converged_walk {
+                if retrace.destination == key.0
+                    && retrace.calldata == key.1
+                    && retrace.value == key.2
+                    && retrace.source_address == key.3
+                    && retrace.trace_depth == key.4
+                {
+                    if count == *idx {
+                        if existing.in_reverted_frame != retrace.in_reverted_frame {
+                            tracing::debug!(
+                                target: "based_rollup::l1_proxy",
+                                dest = %existing.destination,
+                                old = existing.in_reverted_frame,
+                                new = retrace.in_reverted_frame,
+                                "final in_reverted_frame correction from converged retrace"
+                            );
+                            existing.in_reverted_frame = retrace.in_reverted_frame;
+                        }
+                        break;
+                    }
+                    count += 1;
+                }
+            }
+            *idx += 1;
+        }
+    }
+
+    for (i, c) in detected_calls.iter().enumerate() {
+        tracing::debug!(
+            target: "based_rollup::composer_rpc::l1_to_l2",
+            idx = i,
+            dest = %c.destination,
+            in_reverted_frame = c.in_reverted_frame,
+            call_success = c.call_success,
+            trace_depth = c.trace_depth,
+            target_rollup_id = c.target_rollup_id,
+            parent = ?c.parent_call_index,
+            "FINAL detected_calls before queue_execution_table"
+        );
     }
 
     tracing::info!(

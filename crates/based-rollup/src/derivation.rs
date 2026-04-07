@@ -402,9 +402,74 @@ impl DerivationPipeline {
             // L2 conversion (convert_l1_entries_to_l2_pairs) skips entries whose
             // nextAction is CALL (continuation entries), losing their state deltas and
             // breaking the chain. Must use the original entries here.
+            //
+            // Detect REVERT batches FIRST — they need special handling for
+            // effective_state_root (see below).
+            // Detect REVERT entries in the ORIGINAL batch (before consumed filtering).
+            // REVERT entries are L1-only (§D.12 atomicity) — consumed inside a
+            // reverted scope, no ExecutionConsumed events, filtered out of
+            // deferred_entries. Their state deltas should NOT advance effective_state_root
+            // (the on-chain stateRoot after ScopeReverted = batch_final_state_root).
+            let l1_has_revert = entries.iter().any(|e| {
+                e.next_action.action_type == cross_chain::CrossChainActionType::Revert
+                    || e.next_action.action_type
+                        == cross_chain::CrossChainActionType::RevertContinue
+            });
+
+            // Also detect REVERT in the L2 block body (L1→L2 partial revert).
+            // For L1→L2 direction, REVERT/REVERT_CONTINUE entries appear in
+            // loadExecutionTable calldata in the block body, not in L1 entries.
+            let l2_has_revert = block_txs.iter().any(|tx_bytes| {
+                if tx_bytes.is_empty() || tx_bytes.as_ref() == [0xc0] {
+                    return false;
+                }
+                let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
+                    match alloy_rlp::Decodable::decode(&mut tx_bytes.as_ref()) {
+                        Ok(t) => t,
+                        Err(_) => return false,
+                    };
+                use alloy_consensus::Transaction as _;
+                txs.iter().any(|tx| {
+                    if let Some(entries) = cross_chain::try_decode_load_execution_table(tx.input())
+                    {
+                        entries.iter().any(|e| {
+                            e.next_action.action_type == cross_chain::CrossChainActionType::Revert
+                                || e.next_action.action_type
+                                    == cross_chain::CrossChainActionType::RevertContinue
+                        })
+                    } else {
+                        false
+                    }
+                })
+            });
+
+            let batch_has_revert = l1_has_revert || l2_has_revert;
+
+            // Collect action_hashes of entries that are part of REVERT groups.
+            // These entries' deltas should NOT be chained into effective_state_root.
+            // In deferred_entries, only Entry 0 (L2TX trigger, consumed outside scope)
+            // survives consumed-filtering. Its delta would incorrectly advance the root.
+            // All deferred entries in a REVERT batch belong to the REVERT group.
+            // Entry verification hold ensures REVERT batches are not mixed with
+            // normal deposits — the builder submits them in their own postBatch.
+            let revert_action_hashes: std::collections::HashSet<B256> = if batch_has_revert {
+                entries
+                    .iter()
+                    .filter(|e| e.action_hash != B256::ZERO) // skip immediate
+                    .map(|e| e.action_hash)
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
             let mut effective_state_root = batch_final_state_root;
             let rollup_id_u256 = U256::from(self.config.rollup_id);
             for entry in &deferred_entries {
+                // Skip REVERT group entries — their deltas are consumed-and-reverted
+                // on L1, should not advance effective_state_root.
+                if revert_action_hashes.contains(&entry.action_hash) {
+                    continue;
+                }
                 for delta in &entry.state_deltas {
                     if delta.current_state == effective_state_root
                         && delta.rollup_id == rollup_id_u256
@@ -412,6 +477,16 @@ impl DerivationPipeline {
                         effective_state_root = delta.new_state;
                     }
                 }
+            }
+
+            if batch_has_revert {
+                info!(
+                    target: "based_rollup::derivation",
+                    %l1_block,
+                    %effective_state_root,
+                    "REVERT batch detected — skipping L2 entry reconstruction \
+                     (L2 entries already in block body loadExecutionTable)"
+                );
             }
 
             // Reconstruct L2-format entry pairs from L1-format entries + CALL actions.
@@ -423,7 +498,12 @@ impl DerivationPipeline {
                 .flat_map(|v| v.iter())
                 .cloned()
                 .collect();
-            let deferred_entries = if !call_actions.is_empty() {
+            let deferred_entries = if batch_has_revert {
+                // REVERT batch: skip reconstruction. The block body already has correct
+                // L2 entries. Pass through the consumed entry (Entry 0) as-is — it carries
+                // the state delta for effective_state_root computation.
+                deferred_entries
+            } else if !call_actions.is_empty() {
                 let mut pairs =
                     cross_chain::convert_l1_entries_to_l2_pairs(&deferred_entries, &call_actions);
                 // Append continuation entries for multi-call patterns (§4e).
@@ -585,7 +665,7 @@ impl DerivationPipeline {
                 // snapshot to the driver. The driver handles ALL filtering
                 // generically via trial-execution + ExecutionConsumed events +
                 // prefix counting. No type-specific counting is needed here.
-                let filtering = if has_unconsumed_entries && i == 0 {
+                let filtering = if has_unconsumed_entries && !batch_has_revert && i == 0 {
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,

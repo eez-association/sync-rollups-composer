@@ -77,6 +77,11 @@ pub struct DetectedCall {
     /// Used by post-convergence enrichment to extract delivery return data
     /// from intermediate hops without additional simulation.
     pub output: Vec<u8>,
+    /// Whether this proxy call is inside a reverted frame (ancestor has "error").
+    /// Used for partial revert patterns (revertContinueL2): calls inside a
+    /// try/catch that reverts need REVERT/REVERT_CONTINUE on L1, while calls
+    /// outside the reverted frame continue normally.
+    pub in_reverted_frame: bool,
 }
 
 /// Identity of a cross-chain proxy.
@@ -301,7 +306,8 @@ pub async fn walk_trace_tree(
         ephemeral_proxies,
         detected_calls,
         unresolved_proxies,
-        0, // root node is at depth 0
+        0,     // root node is at depth 0
+        false, // root is not inside a reverted frame
     )
     .await;
 }
@@ -354,6 +360,7 @@ async fn walk_trace_tree_inner(
     detected_calls: &mut Vec<DetectedCall>,
     unresolved_proxies: &mut HashSet<Address>,
     depth: usize,
+    in_reverted_frame: bool,
 ) {
     let parsed = match parse_trace_node(node) {
         Some(p) => p,
@@ -369,6 +376,7 @@ async fn walk_trace_tree_inner(
                 detected_calls,
                 unresolved_proxies,
                 depth,
+                in_reverted_frame,
             )
             .await;
             return;
@@ -391,6 +399,7 @@ async fn walk_trace_tree_inner(
             detected_calls,
             unresolved_proxies,
             depth,
+            in_reverted_frame,
         )
         .await;
         return;
@@ -416,6 +425,7 @@ async fn walk_trace_tree_inner(
             detected_calls,
             unresolved_proxies,
             depth,
+            in_reverted_frame,
         )
         .await;
         return;
@@ -429,6 +439,8 @@ async fn walk_trace_tree_inner(
         let info = resolve_proxy_info(parsed.to, lookup, proxy_cache, ephemeral_proxies).await;
 
         if let Some(proxy_info) = info {
+            // Check if this node itself has an error (node-level revert).
+            let node_has_error = node.get("error").and_then(|v| v.as_str()).is_some();
             tracing::info!(
                 target: "based_rollup::trace",
                 proxy = %parsed.to,
@@ -438,6 +450,8 @@ async fn walk_trace_tree_inner(
                 calldata_len = parsed.input.len(),
                 value = %parsed.value,
                 depth,
+                in_reverted_frame,
+                node_has_error,
                 "detected cross-chain proxy call via executeCrossChainCall child"
             );
 
@@ -457,6 +471,7 @@ async fn walk_trace_tree_inner(
                 source_address: parsed.from,
                 trace_depth: depth,
                 output: proxy_output,
+                in_reverted_frame,
             });
         } else {
             // Proxy identity not found — record as unresolved so callers can
@@ -486,6 +501,7 @@ async fn walk_trace_tree_inner(
             detected_calls,
             unresolved_proxies,
             depth,
+            in_reverted_frame,
         )
         .await;
         return;
@@ -501,6 +517,7 @@ async fn walk_trace_tree_inner(
         detected_calls,
         unresolved_proxies,
         depth,
+        in_reverted_frame,
     )
     .await;
 }
@@ -521,9 +538,36 @@ async fn recurse_children(
     detected_calls: &mut Vec<DetectedCall>,
     unresolved_proxies: &mut HashSet<Address>,
     depth: usize,
+    in_reverted_frame: bool,
 ) {
     if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
         for child in calls {
+            // A child is in a reverted frame if the parent already is,
+            // or if the CHILD ITSELF has an "error" field (meaning its
+            // descendants will be inside a reverted context).
+            let child_self_error = child.get("error").and_then(|v| v.as_str());
+            let child_reverted = in_reverted_frame || child_self_error.is_some();
+            // Diagnostic log: when a child becomes reverted because of its OWN
+            // error (not just inherited), log the to/from/error so we can tell
+            // which call is poisoning the descendants.
+            if !in_reverted_frame && child_self_error.is_some() {
+                let child_to = child.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+                let child_from = child.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                let child_input = child
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(10).collect::<String>())
+                    .unwrap_or_default();
+                tracing::debug!(
+                    target: "based_rollup::trace",
+                    parent_depth = depth,
+                    child_to,
+                    child_from,
+                    child_sel = %child_input,
+                    child_error = %child_self_error.unwrap_or("?"),
+                    "child node has error — descendants will be in_reverted_frame"
+                );
+            }
             Box::pin(walk_trace_tree_inner(
                 child,
                 manager_addresses,
@@ -533,6 +577,7 @@ async fn recurse_children(
                 detected_calls,
                 unresolved_proxies,
                 depth + 1,
+                child_reverted,
             ))
             .await;
         }

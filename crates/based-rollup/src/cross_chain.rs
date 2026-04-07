@@ -88,7 +88,65 @@ sol! {
             bytes callData,
             bytes proof
         );
+
+        /// Protocol errors that occur when entries aren't loaded (simulation artifacts).
+        /// These are NOT terminal failures — the delivery will succeed once entries are posted.
+        error ExecutionNotFound();
+        error ExecutionNotInCurrentBlock();
+        error CallExecutionFailed();
+        error InvalidRevertData();
     }
+}
+
+/// Check if revert data is a protocol simulation artifact (entry not loaded yet).
+///
+/// Simulation artifacts are reverts that only occur because entries aren't loaded
+/// during delivery simulation. They disappear once entries are posted. Two patterns:
+///
+/// 1. **Selector-only reverts** (≤4 bytes): any parameterless error like
+///    `ExecutionNotFound()`, `UnauthorizedCaller()`, etc. Real terminal failures
+///    always carry ABI-encoded params (Error(string) ≥ 68 bytes, Panic(uint256) = 36
+///    bytes, custom errors with data > 4 bytes).
+///
+/// 2. **Known protocol errors** with params: `ExecutionNotInCurrentBlock`,
+///    `CallExecutionFailed`, `InvalidRevertData` — identified by typed selectors.
+///
+/// 3. **Wrapped errors**: any `error Xyz(bytes)` wrapper (e.g., proxy contracts wrap
+///    inner revert data). Detected generically by attempting ABI decode of `(bytes)`,
+///    then checking the inner data recursively. No contract-specific selectors needed.
+pub fn is_simulation_artifact(data: &[u8]) -> bool {
+    use alloy_sol_types::SolError;
+    // Pattern 1: empty or selector-only (no ABI params)
+    if data.len() <= 4 {
+        return true;
+    }
+    // Pattern 2: known protocol errors (may have params in future versions)
+    let sel = &data[..4];
+    if sel == ICrossChainManagerL2::ExecutionNotFound::SELECTOR
+        || sel == ICrossChainManagerL2::ExecutionNotInCurrentBlock::SELECTOR
+        || sel == ICrossChainManagerL2::CallExecutionFailed::SELECTOR
+        || sel == ICrossChainManagerL2::InvalidRevertData::SELECTOR
+    {
+        return true;
+    }
+    // Pattern 3: generic wrapper unwrap — try to ABI-decode as (bytes) and recurse.
+    // Catches any error that wraps inner revert data, regardless of the wrapper's
+    // selector (e.g., Bridge's ProxyCallFailed, or any future wrapper contract).
+    // ABI layout: 4-byte selector + abi.encode(bytes) = offset(32) + length(32) + data
+    if data.len() > 68 {
+        // Try to decode the params after the 4-byte selector as a single `bytes` field.
+        // ABI: [selector(4)][offset(32)][length(32)][data(length)]
+        let params = &data[4..];
+        if let Some(len_bytes) = params.get(32..64) {
+            let inner_len =
+                alloy_primitives::U256::from_be_slice(len_bytes).saturating_to::<usize>();
+            if inner_len > 0 && params.len() >= 64 + inner_len {
+                let inner = &params[64..64 + inner_len];
+                return is_simulation_artifact(inner);
+            }
+        }
+    }
+    false
 }
 
 sol! {
@@ -213,6 +271,58 @@ impl CrossChainAction {
     }
 }
 
+// ──────────────────────────────────────────────
+//  REVERT / REVERT_CONTINUE helpers (§D.12)
+// ──────────────────────────────────────────────
+
+/// Build a canonical REVERT action.
+///
+/// Signals scope revert on L1. The `scope` determines which `newScope` level
+/// catches the `ScopeReverted` error. Fields match spec §D.12 and
+/// `IntegrationTest.t.sol:Scenario 5`.
+pub fn revert_action(rollup_id: U256, scope: Vec<U256>) -> CrossChainAction {
+    CrossChainAction {
+        action_type: CrossChainActionType::Revert,
+        rollup_id,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: false,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope,
+    }
+}
+
+/// Build a canonical REVERT_CONTINUE action.
+///
+/// Looked up via `_getRevertContinuation(rollupId)` on L1.
+/// The hash of this action is deterministic for a given `rollup_id`.
+/// Fields: `failed=true`, everything else zero/empty (spec §D.12).
+pub fn revert_continue_action(rollup_id: U256) -> CrossChainAction {
+    CrossChainAction {
+        action_type: CrossChainActionType::RevertContinue,
+        rollup_id,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: true,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    }
+}
+
+/// Compute the deterministic action hash for REVERT_CONTINUE.
+///
+/// `keccak256(abi.encode(Action{REVERT_CONTINUE, rollupId, 0, 0, "", true, 0, 0, []}))`
+pub fn compute_revert_continue_hash(rollup_id: U256) -> B256 {
+    let action = revert_continue_action(rollup_id);
+    keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &action.to_sol_action(),
+    ))
+}
+
 impl CrossChainStateDelta {
     /// Convert to the Solidity ABI struct representation.
     fn to_sol(&self) -> ICrossChainManagerL2::StateDelta {
@@ -268,6 +378,19 @@ pub fn filter_new_by_count<T>(
         }
     }
     result
+}
+
+/// Try to decode `loadExecutionTable(entries)` calldata into Rust entry types.
+/// Returns `None` if the selector doesn't match or decoding fails.
+pub fn try_decode_load_execution_table(calldata: &[u8]) -> Option<Vec<CrossChainExecutionEntry>> {
+    use alloy_sol_types::SolCall;
+    let decoded = ICrossChainManagerL2::loadExecutionTableCall::abi_decode(calldata).ok()?;
+    let entries: Vec<CrossChainExecutionEntry> = decoded
+        .entries
+        .iter()
+        .filter_map(|e| CrossChainExecutionEntry::from_sol(e).ok())
+        .collect();
+    Some(entries)
 }
 
 /// Encode the calldata for `CrossChainManagerL2.loadExecutionTable(entries)`.
@@ -703,6 +826,7 @@ pub fn build_l2_to_l1_call_entries(
     delivery_return_data: Vec<u8>,
     delivery_failed: bool,
     l1_delivery_scope: Vec<U256>,
+    tx_reverts: bool,
 ) -> WithdrawalEntries {
     let rollup_id_u256 = U256::from(rollup_id);
 
@@ -792,13 +916,13 @@ pub fn build_l2_to_l1_call_entries(
         &l1_trigger_action.to_sol_action(),
     ));
 
-    tracing::info!(
+    tracing::debug!(
         target: "based_rollup::cross_chain",
         %l1_trigger_hash,
         rlp_len = l1_trigger_action.data.len(),
         rlp_prefix = %format!("0x{}", hex::encode(&l1_trigger_action.data[..std::cmp::min(20, l1_trigger_action.data.len())])),
         rollup_id = %l1_trigger_action.rollup_id,
-        "DEBUG: L2TX entry action_hash (from build_l2_to_l1_call_entries)"
+        "L2TX entry action_hash (from build_l2_to_l1_call_entries)"
     );
 
     // nextAction for L2TX trigger = delivery CALL (executes on L1 via _resolveScopes)
@@ -806,6 +930,17 @@ pub fn build_l2_to_l1_call_entries(
     // executing at _processCallAtScope. Depth = number of user contract boundaries
     // between the L2 tx entry and the proxy call in the L2 trace.
     // Example: SCA→SCB→proxy = scope=[0,0] (2 levels of wrapping).
+    //
+    // For REVERT entries (tx_reverts=true): the delivery CALL scope must be at
+    // least [0] so that _resolveScopes enters newScope([0]), giving REVERT a
+    // scope frame to match against. With scope=[], the CALL executes at root
+    // scope via _processCallAtScope directly — no newScope frame to catch
+    // ScopeReverted (per revertCounterL2 protocol E2E test).
+    let effective_scope = if tx_reverts && l1_delivery_scope.is_empty() {
+        vec![U256::ZERO] // minimum scope=[0] for REVERT matching
+    } else {
+        l1_delivery_scope.clone()
+    };
     let l1_delivery_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: U256::ZERO, // L1 scope
@@ -815,12 +950,17 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_u256,
-        scope: l1_delivery_scope,
+        scope: effective_scope.clone(),
     };
 
     // Entry 2 action_hash: matches what _processCallAtScope builds after executing
     // the delivery call on L1: RESULT(rollupId=CALL.rollupId=0, data=returnData).
     // For withdrawals (EOA): returnData empty. For contracts: from L1 simulation.
+    let delivery_return_data_len = delivery_return_data.len();
+    let delivery_return_data_hex_snap = format!(
+        "0x{}",
+        hex::encode(&delivery_return_data[..delivery_return_data.len().min(40)])
+    );
     let l1_delivery_result = CrossChainAction {
         action_type: CrossChainActionType::Result,
         rollup_id: U256::ZERO,
@@ -869,28 +1009,119 @@ pub fn build_l2_to_l1_call_entries(
         -I256::try_from(value).unwrap_or(I256::ZERO)
     };
 
-    let l1_deferred_entries = vec![
-        CrossChainExecutionEntry {
-            state_deltas: vec![CrossChainStateDelta {
-                rollup_id: rollup_id_u256,
-                current_state: B256::ZERO,
-                new_state: B256::ZERO,
-                ether_delta: I256::ZERO, // consumed BEFORE ETH sent
-            }],
-            action_hash: l1_trigger_hash,
-            next_action: l1_delivery_action,
-        },
-        CrossChainExecutionEntry {
-            state_deltas: vec![CrossChainStateDelta {
-                rollup_id: rollup_id_u256,
-                current_state: B256::ZERO,
-                new_state: B256::ZERO,
-                ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
-            }],
-            action_hash: l1_delivery_result_hash,
-            next_action: l2tx_terminal, // §C.6: L2TX terminal is always void
-        },
-    ];
+    // When tx_reverts=true, Entry 1's nextAction becomes REVERT and we add
+    // a REVERT_CONTINUE entry (Entry 2). The scope revert mechanism in
+    // Rollups.sol undoes the delivery call's L1 state changes.
+    //
+    // Entry 2's ether_delta = 0 because _etherDelta is RESET to 0 after
+    // each _applyStateDeltas call (Rollups.sol:517). No ETH flows between
+    // Entry 1 and Entry 2 consumption.
+    let l1_deferred_entries = if tx_reverts {
+        // REVERT scope is ALWAYS [0] — the first child scope of _resolveScopes.
+        // This is independent of the delivery scope (which can be [0], [0,0], etc.).
+        // REVERT([0]) is caught by newScope([0]) → ScopeReverted bubbles to
+        // newScope([]) → caught by _resolveScopes. This reverts ALL effects
+        // within the scope, regardless of delivery depth.
+        // Evidence: both revertCounterL2 (delivery=[0]) and deepScopeRevert
+        // (delivery=[0,0]) use REVERT(scope=[0]).
+        let revert_next = revert_action(rollup_id_u256, vec![U256::ZERO]);
+        let revert_continue_hash = compute_revert_continue_hash(rollup_id_u256);
+        vec![
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: I256::ZERO, // consumed BEFORE ETH sent
+                }],
+                action_hash: l1_trigger_hash,
+                next_action: l1_delivery_action,
+            },
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
+                }],
+                action_hash: l1_delivery_result_hash,
+                next_action: revert_next, // REVERT instead of terminal RESULT
+            },
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: I256::ZERO, // _etherDelta reset after Entry 1
+                }],
+                action_hash: revert_continue_hash,
+                next_action: l2tx_terminal, // terminal RESULT(failed=false)
+            },
+        ]
+    } else {
+        vec![
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: I256::ZERO, // consumed BEFORE ETH sent
+                }],
+                action_hash: l1_trigger_hash,
+                next_action: l1_delivery_action,
+            },
+            CrossChainExecutionEntry {
+                state_deltas: vec![CrossChainStateDelta {
+                    rollup_id: rollup_id_u256,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
+                    ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
+                }],
+                action_hash: l1_delivery_result_hash,
+                next_action: l2tx_terminal, // §C.6: L2TX terminal is always void
+            },
+        ]
+    };
+
+    if tx_reverts {
+        tracing::info!(
+            target: "based_rollup::cross_chain",
+            l2_entries = l2_table_entries.len(),
+            l1_entries = l1_deferred_entries.len(),
+            %l2_call_hash,
+            %l2_result_hash,
+            delivery_return_data_len,
+            delivery_failed,
+            delivery_return_data_hex = %delivery_return_data_hex_snap,
+            "build_l2_to_l1_call_entries: REVERT entries built"
+        );
+        for (i, entry) in l1_deferred_entries.iter().enumerate() {
+            tracing::debug!(
+                target: "based_rollup::cross_chain",
+                idx = i,
+                action_hash = %entry.action_hash,
+                next_action_type = ?entry.next_action.action_type,
+                next_action_rollup_id = %entry.next_action.rollup_id,
+                next_action_failed = entry.next_action.failed,
+                next_action_data_len = entry.next_action.data.len(),
+                next_action_scope_len = entry.next_action.scope.len(),
+                ether_delta = %entry.state_deltas.first().map(|d| d.ether_delta).unwrap_or_default(),
+                "build_l2_to_l1_call_entries: REVERT L1 entry"
+            );
+        }
+        for (i, entry) in l2_table_entries.iter().enumerate() {
+            tracing::debug!(
+                target: "based_rollup::cross_chain",
+                idx = i,
+                action_hash = %entry.action_hash,
+                next_action_type = ?entry.next_action.action_type,
+                next_action_failed = entry.next_action.failed,
+                next_action_data_len = entry.next_action.data.len(),
+                next_action_data_hex = %format!("0x{}", hex::encode(&entry.next_action.data[..entry.next_action.data.len().min(40)])),
+                "build_l2_to_l1_call_entries: REVERT L2 entry"
+            );
+        }
+    }
 
     WithdrawalEntries {
         l2_table_entries,
@@ -962,6 +1193,15 @@ pub fn convert_l1_entries_to_l2_pairs(
         // Skip continuation entries (nextAction is CALL, not RESULT).
         // These are handled by reconstruct_continuation_l2_entries.
         if entry.next_action.action_type == CrossChainActionType::Call {
+            continue;
+        }
+        // Skip REVERT/REVERT_CONTINUE entries — these are L1-only scope revert
+        // entries (§D.12 atomicity) with no L2 counterpart. The L2 tx reverts
+        // atomically via EVM; the L2 entries (CALL→RESULT pair) are already
+        // in the block body's loadExecutionTable calldata.
+        if entry.next_action.action_type == CrossChainActionType::Revert
+            || entry.next_action.action_type == CrossChainActionType::RevertContinue
+        {
             continue;
         }
         let idx = consumed_idx.entry(entry.action_hash).or_insert(0);
@@ -1072,6 +1312,20 @@ pub fn reconstruct_continuation_l2_entries(
     let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
 
     let mut continuation_entries = Vec::new();
+
+    // Skip reconstruction for REVERT batches — L2 entries are already in the
+    // block body's loadExecutionTable calldata. REVERT entries (§D.12) are L1-only;
+    // the L2 tx reverts atomically and CCM entries remain in the block body.
+    let has_revert_entries = l1_entries
+        .iter()
+        .any(|e| e.next_action.action_type == CrossChainActionType::Revert);
+    if has_revert_entries {
+        tracing::info!(
+            target: "based_rollup::cross_chain",
+            "skipping continuation reconstruction for REVERT batch (L2 entries in block body)"
+        );
+        return continuation_entries;
+    }
 
     for entry in l1_entries {
         // Continuation pattern: nextAction is a CALL (not RESULT)
@@ -2090,13 +2344,30 @@ pub fn attach_generic_state_deltas(
         let pre_root = roots[k];
         let post_root = roots[k + 1];
         let group_size = end.saturating_sub(start);
+        // Detect REVERT groups by inspecting entry action types directly —
+        // no external revert_group_flags parameter needed.
+        let is_revert_group = entries[start..end]
+            .iter()
+            .any(|e| e.next_action.action_type == CrossChainActionType::Revert);
 
         // Build the per-entry root chain: [r_0, r_1, ..., r_N]
         // r_0 = pre_root, r_N = post_root, intermediates are synthetic.
+        //
+        // For REVERT groups: _handleScopeRevert captures stateRoot AFTER Entry 1's
+        // delta but BEFORE Entry 2's (Rollups.sol:375). The captured value becomes
+        // the final stateRoot. So Entry 1's newState must equal post_root (the real
+        // block root). Entry 2's delta is consumed inside the reverted scope — its
+        // effect is discarded. We use identity (post→post) for the last entry.
+        //
+        // Normal:  [pre, syn_1, ..., syn_{N-1}, post]
+        // REVERT:  [pre, syn_1, ..., post, post]  (last 2 = post)
         let entry_roots: Vec<B256> = (0..=group_size)
             .map(|j| {
                 if j == 0 {
                     pre_root
+                } else if is_revert_group && j >= group_size.saturating_sub(1) {
+                    // REVERT group: second-to-last and last roots = post_root
+                    post_root
                 } else if j == group_size {
                     post_root
                 } else {

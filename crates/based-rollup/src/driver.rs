@@ -132,6 +132,9 @@ pub struct Driver<P, Pool> {
     pending_l1_entries: Vec<CrossChainExecutionEntry>,
     /// Index of the first entry in each trigger group within `pending_l1_entries`.
     pending_l1_group_starts: Vec<usize>,
+    /// Per-group flag: true means entries in this group are independent
+    /// (not chained state deltas). Used for L1→L2 partial revert.
+    pending_l1_independent: Vec<bool>,
     /// Trigger metadata for groups that need L1 trigger txs (`executeL2TX`).
     /// Indexed by group. `None` for protocol-triggered groups (deposits).
     pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>,
@@ -439,6 +442,7 @@ where
             queued_l2_to_l1_calls,
             pending_l1_entries: Vec::new(),
             pending_l1_group_starts: Vec::new(),
+            pending_l1_independent: Vec::new(),
             pending_l1_trigger_metadata: Vec::new(),
             prev_health_l2_head: 0,
             last_l2_head_advance: std::time::Instant::now(),
@@ -1179,6 +1183,7 @@ where
         // during the Sync transition. See issue #237.
         let pre_drain_l1_len = self.pending_l1_entries.len();
         let pre_drain_l1_groups = self.pending_l1_group_starts.len();
+        let pre_drain_l1_independent = self.pending_l1_independent.len();
         let pre_drain_l1_meta = self.pending_l1_trigger_metadata.len();
 
         let mut queued_l1_txs_for_block: Vec<Bytes> = Vec::new();
@@ -1220,14 +1225,35 @@ where
                         had_continuation = true;
                     }
 
-                    rpc_entries.push(call.call_entry.clone());
-                    if call.extra_l2_entries.is_empty() {
-                        // Simple deposit: CALL trigger + RESULT table entry
-                        rpc_entries.push(call.result_entry.clone());
+                    // Terminal failure: delivery ALWAYS fails (e.g., RevertCounter).
+                    // RESULT(failed=true) with non-empty revert data after enrichment
+                    // = true terminal failure. Skip L2 entries — protocol specifies no
+                    // loadExecutionTable for terminal reverts.
+                    // Terminal failure: the L2 delivery ALWAYS reverts (destination
+                    // contract error, not a missing-entry simulation artifact).
+                    // Simulation artifacts are protocol errors (ExecutionNotFound, etc.)
+                    // that only occur when entries aren't loaded yet.
+                    let is_terminal_failure = call.result_entry.next_action.failed
+                        && !crate::cross_chain::is_simulation_artifact(
+                            &call.result_entry.next_action.data,
+                        );
+                    if !is_terminal_failure {
+                        rpc_entries.push(call.call_entry.clone());
+                        if call.extra_l2_entries.is_empty() {
+                            // Simple deposit: CALL trigger + RESULT table entry
+                            rpc_entries.push(call.result_entry.clone());
+                        } else {
+                            // Multi-call continuation: continuation entries provide their own RESULT entries.
+                            // Skip result_entry to avoid conflicting actionHash.
+                            rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                        }
                     } else {
-                        // Multi-call continuation: continuation entries provide their own RESULT entries.
-                        // Skip result_entry to avoid conflicting actionHash.
-                        rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                        tracing::debug!(
+                            target: "based_rollup::driver",
+                            call_id = %call.call_entry.action_hash,
+                            data_len = call.result_entry.next_action.data.len(),
+                            "terminal failure: skipping L2 entries (delivery always reverts)"
+                        );
                     }
                     if !call.raw_l1_tx.is_empty() {
                         queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
@@ -1248,6 +1274,8 @@ where
                         self.pending_l1_entries.extend(l1_entry);
                     }
                     self.pending_l1_group_starts.push(group_start);
+                    self.pending_l1_independent
+                        .push(call.l1_independent_entries);
                     self.pending_l1_trigger_metadata.push(None); // protocol trigger, no L1 executeL2TX needed
 
                     // Save for re-push on build failure (call is consumed by value)
@@ -1301,6 +1329,7 @@ where
                     self.pending_l1_entries
                         .extend(w.l1_deferred_entries.iter().cloned());
                     self.pending_l1_group_starts.push(group_start);
+                    self.pending_l1_independent.push(false); // L2→L1 calls are always chained
                     self.pending_l1_trigger_metadata.push(Some(TriggerMetadata {
                         user: w.user,
                         amount: w.amount,
@@ -1423,6 +1452,8 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
+                    self.pending_l1_independent
+                        .truncate(pre_drain_l1_independent);
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -1480,6 +1511,8 @@ where
                     // not lost when clear_internal_state() runs. See issue #237.
                     self.pending_l1_entries.truncate(pre_drain_l1_len);
                     self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
+                    self.pending_l1_independent
+                        .truncate(pre_drain_l1_independent);
                     self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
@@ -1618,6 +1651,7 @@ where
                         // Entries will be re-queued on the next builder cycle.
                         self.pending_l1_entries.clear();
                         self.pending_l1_group_starts.clear();
+                        self.pending_l1_independent.clear();
                         self.pending_l1_trigger_metadata.clear();
                         built.state_root // No entries → speculative IS clean
                     }
@@ -1642,6 +1676,70 @@ where
                     roots = intermediate_roots.len(),
                     "attached generic state deltas to unified L1 entries"
                 );
+
+                // Override state deltas for independent groups (L1→L2 partial revert).
+                // In independent groups, L1 try/catch rolls back the reverted call's
+                // state, so all entries see the same pre-root. Override ALL entries
+                // in the group to use intermediate_roots[k] as currentState.
+                let num_groups = self.pending_l1_group_starts.len();
+                for k in 0..num_groups {
+                    if k >= self.pending_l1_independent.len() || !self.pending_l1_independent[k] {
+                        continue;
+                    }
+                    if k >= intermediate_roots.len() {
+                        break;
+                    }
+                    let pre_root = intermediate_roots[k];
+                    let start = self.pending_l1_group_starts[k];
+                    let end = if k + 1 < num_groups {
+                        self.pending_l1_group_starts[k + 1]
+                    } else {
+                        self.pending_l1_entries.len()
+                    };
+                    for i in start..end {
+                        if let Some(delta) = self.pending_l1_entries[i].state_deltas.first_mut() {
+                            delta.current_state = pre_root;
+                        }
+                    }
+                    debug!(
+                        target: "based_rollup::driver",
+                        group = k,
+                        entries = end - start,
+                        %pre_root,
+                        "overrode currentState for independent group (partial revert)"
+                    );
+                }
+
+                // Log composite entry hashes (VerifyL1Batch format) for byte-level debugging.
+                // composite = keccak256(abi.encode(actionHash, keccak256(abi.encode(nextAction))))
+                for (i, e) in self.pending_l1_entries.iter().enumerate() {
+                    use alloy_sol_types::SolType as _;
+                    let next_action_encoded =
+                        crate::cross_chain::ICrossChainManagerL2::Action::abi_encode(
+                            &e.next_action.to_sol_action(),
+                        );
+                    let next_action_hash = alloy_primitives::keccak256(&next_action_encoded);
+                    // abi.encode(bytes32, bytes32) = 64 bytes concatenated
+                    let mut composite_input = Vec::with_capacity(64);
+                    composite_input.extend_from_slice(e.action_hash.as_slice());
+                    composite_input.extend_from_slice(next_action_hash.as_slice());
+                    let composite = alloy_primitives::keccak256(&composite_input);
+                    debug!(
+                        target: "based_rollup::driver",
+                        idx = i,
+                        action_hash = %e.action_hash,
+                        next_action_type = ?e.next_action.action_type,
+                        next_action_rollup_id = %e.next_action.rollup_id,
+                        next_action_dest = %e.next_action.destination,
+                        next_action_scope = ?e.next_action.scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                        next_action_data_hex = %format!("0x{}", hex::encode(&e.next_action.data)),
+                        next_action_failed = e.next_action.failed,
+                        current_state = %e.state_deltas.first().map(|d| format!("{}", d.current_state)).unwrap_or_default(),
+                        new_state = %e.state_deltas.first().map(|d| format!("{}", d.new_state)).unwrap_or_default(),
+                        composite_verify_hash = %composite,
+                        "L1 entry [byte-level] for VerifyL1Batch comparison"
+                    );
+                }
             }
 
             // Queue ALL blocks for L1 submission (including empty ones).
@@ -1707,6 +1805,7 @@ where
             }
             self.pending_l1_entries.clear();
             self.pending_l1_group_starts.clear();
+            self.pending_l1_independent.clear();
             self.pending_l1_trigger_metadata.clear();
             return Ok(());
         };
@@ -1961,6 +2060,7 @@ where
         // Drain L1 entry queues for submission.
         let l1_entries_owned = std::mem::take(&mut self.pending_l1_entries);
         let group_starts = std::mem::take(&mut self.pending_l1_group_starts);
+        let independent = std::mem::take(&mut self.pending_l1_independent);
         let trigger_metadata = std::mem::take(&mut self.pending_l1_trigger_metadata);
 
         info!(
@@ -2174,10 +2274,30 @@ where
                                 };
 
                             if !consumed_hashes.is_empty() {
-                                // Count how many entries we need per hash
+                                // Count how many entries we need per hash.
+                                // Skip REVERT/REVERT_CONTINUE entries — they are consumed inside
+                                // reverted scopes so their ExecutionConsumed events are reverted
+                                // by ScopeReverted. We identify them by action_type (Revert) and
+                                // by matching the REVERT_CONTINUE action hash.
+                                let revert_continue_hash =
+                                    crate::cross_chain::compute_revert_continue_hash(
+                                        alloy_primitives::U256::from(self.config.rollup_id),
+                                    );
+
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
                                     std::collections::HashMap::new();
-                                for e in l1_entries.iter().filter(|e| e.action_hash != B256::ZERO) {
+                                for e in l1_entries.iter() {
+                                    if e.action_hash == alloy_primitives::B256::ZERO {
+                                        continue;
+                                    }
+                                    if e.next_action.action_type
+                                        == crate::cross_chain::CrossChainActionType::Revert
+                                    {
+                                        continue;
+                                    }
+                                    if e.action_hash == revert_continue_hash {
+                                        continue;
+                                    }
                                     *entry_counts.entry(e.action_hash).or_default() += 1;
                                 }
                                 // Check that consumed count >= entry count for each hash
@@ -2274,6 +2394,7 @@ where
                             }
                             self.pending_l1_entries = l1_entries_owned;
                             self.pending_l1_group_starts = group_starts;
+                            self.pending_l1_independent = independent;
                             self.pending_l1_trigger_metadata = trigger_metadata;
                         }
                         return Ok(());
@@ -2290,6 +2411,7 @@ where
                 // Put entries back
                 self.pending_l1_entries = l1_entries_owned;
                 self.pending_l1_group_starts = group_starts;
+                self.pending_l1_independent = independent;
                 self.pending_l1_trigger_metadata = trigger_metadata;
             }
         }
@@ -2747,6 +2869,7 @@ where
         self.pending_submissions.clear();
         self.pending_l1_entries.clear();
         self.pending_l1_group_starts.clear();
+        self.pending_l1_independent.clear();
         self.pending_l1_trigger_metadata.clear();
         self.pending_entry_verification_block = None;
         self.entry_verify_deferrals = 0;
@@ -3949,8 +4072,39 @@ where
         // loadExecutionTable + executeIncomingCrossChainCall (if cross-chain entries)
         if !execution_entries.is_empty() && !self.config.cross_chain_manager_address.is_zero() {
             let our_rollup_id = alloy_primitives::U256::from(self.config.rollup_id);
-            let (table_entries, trigger_entries) =
+            let (table_entries, mut trigger_entries) =
                 cross_chain::partition_entries(execution_entries, our_rollup_id);
+
+            // Scope override for REVERT patterns: when table entries contain a
+            // REVERT, the trigger's executeIncomingCrossChainCall must use a
+            // scope one level deeper than the REVERT's scope. This ensures
+            // newScope creates the nested scope for try/catch isolation.
+            // E.g., REVERT has scope=[0] → trigger uses scope=[0,0].
+            let has_revert = table_entries
+                .iter()
+                .any(|e| e.next_action.action_type == cross_chain::CrossChainActionType::Revert);
+            if has_revert {
+                // Find the REVERT entry's scope length to compute trigger scope depth.
+                let revert_scope_len = table_entries
+                    .iter()
+                    .filter(|e| {
+                        e.next_action.action_type == cross_chain::CrossChainActionType::Revert
+                    })
+                    .map(|e| e.next_action.scope.len())
+                    .max()
+                    .unwrap_or(0);
+                let trigger_scope: Vec<alloy_primitives::U256> =
+                    vec![alloy_primitives::U256::ZERO; revert_scope_len + 1];
+                for trigger in &mut trigger_entries {
+                    info!(
+                        target: "based_rollup::driver",
+                        old_scope_len = trigger.next_action.scope.len(),
+                        new_scope_len = trigger_scope.len(),
+                        "overriding trigger scope for REVERT pattern"
+                    );
+                    trigger.next_action.scope = trigger_scope.clone();
+                }
+            }
 
             if !table_entries.is_empty() {
                 block_txs.push(cross_chain::build_load_table_tx(

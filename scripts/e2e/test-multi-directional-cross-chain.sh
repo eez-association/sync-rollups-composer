@@ -131,36 +131,17 @@ wait_for_pending_zero 60 >/dev/null || true
 L2_BLK=$(get_block_number "$L2_RPC")
 wait_for_block_advance "$L2_RPC" "$L2_BLK" 5 90 >/dev/null || true
 
-# Find wrapped tokens on L2
+# Find wrapped tokens on L2 via Bridge_L2.getWrappedToken().
+# Bridge.bridgeTokens calls receiveTokens on the destination, which deploys
+# WrappedToken via CREATE2 with salt = keccak256(originalToken, originalRollupId).
+# originalRollupId=0 because both tokens are native to L1 (mainnet).
 echo "Finding wrapped tokens on L2..."
-WETH_L2=""
-USDC_L2=""
-L2_LATEST=$(cast block-number --rpc-url "$L2_RPC" 2>/dev/null)
-for block in $(seq $((L2_LATEST - 20)) "$L2_LATEST"); do
-    LOGS=$(cast logs --rpc-url "$L2_RPC" --from-block "$block" --to-block "$block" 2>/dev/null || echo "")
-    # Parse transfer events to find tokens sent to our address
-done
-
-# Fallback: use cast to check balances at known wrapped token addresses
-# The bridge creates WrappedToken via CREATE2 — addresses depend on original token + rollupId
-# We can find them by checking recent contract deployments
-for addr in $(cast logs --rpc-url "$L2_RPC" --from-block 1 --to-block "$L2_LATEST" \
-    --topic "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" \
-    --topic "" --topic "0x$(printf '%064s' "${TEST_ADDR:2}" | tr ' ' '0')" 2>/dev/null \
-    | grep "^address" | awk '{print $2}' | sort -u); do
-    BAL=$(cast call --rpc-url "$L2_RPC" "$addr" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "0")
-    CODE=$(cast code --rpc-url "$L2_RPC" "$addr" 2>/dev/null | wc -c)
-    if [ "$BAL" != "0" ] && [ "$CODE" -gt 10 ]; then
-        if [ -z "$WETH_L2" ] && [ "$(printf '%d' "$BAL" 2>/dev/null || echo 0)" -gt 1000000000000000000 ] 2>/dev/null; then
-            WETH_L2="$addr"
-            echo "  L2 WETH: $WETH_L2 (bal=$BAL)"
-        elif [ -z "$USDC_L2" ] && [ "$(printf '%d' "$BAL" 2>/dev/null || echo 0)" -gt 1000000 ] 2>/dev/null; then
-            USDC_L2="$addr"
-            echo "  L2 USDC: $USDC_L2 (bal=$BAL)"
-        fi
-    fi
-done
-assert "DEPLOY: Found L2 wrapped tokens" '[ -n "$WETH_L2" ] && [ -n "$USDC_L2" ]'
+WETH_L2=$(cast call --rpc-url "$L2_RPC" "$L2_BRIDGE" "getWrappedToken(address,uint256)(address)" "$TOKEN_L1" 0 2>/dev/null || echo "")
+USDC_L2=$(cast call --rpc-url "$L2_RPC" "$L2_BRIDGE" "getWrappedToken(address,uint256)(address)" "$USDC_L1" 0 2>/dev/null || echo "")
+echo "  L2 WETH: $WETH_L2"
+echo "  L2 USDC: $USDC_L2"
+assert "DEPLOY: Found L2 wrapped tokens" \
+    '[ -n "$WETH_L2" ] && [ "$WETH_L2" != "0x0000000000000000000000000000000000000000" ] && [ -n "$USDC_L2" ] && [ "$USDC_L2" != "0x0000000000000000000000000000000000000000" ]'
 
 # L2 AMM
 AMM_L2=$(forge_deploy "$L2_RPC" "src/SimpleAMM.sol:SimpleAMM" --constructor-args "$WETH_L2" "$USDC_L2")
@@ -267,7 +248,7 @@ start_timer
 cast send --rpc-url "$L1_RPC" --private-key "$TEST_KEY" "$TOKEN_L1" "mint(address,uint256)" "$TEST_ADDR" 10000000000000000000 --gas-limit 100000 > /dev/null 2>&1
 cast send --rpc-url "$L1_RPC" --private-key "$TEST_KEY" "$TOKEN_L1" "approve(address,uint256)" "$AGG_L1" 10000000000000000000 --gas-limit 100000 > /dev/null 2>&1
 
-USDC_BEFORE=$(cast call --rpc-url "$L1_RPC" "$USDC_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "0")
+USDC_BEFORE=$(cast call --rpc-url "$L1_RPC" "$USDC_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null | awk '{print $1}' || echo "0")
 
 echo "  Swapping 5 WETH: 3 local + 2 remote..."
 RESULT_C=$(cast send --rpc-url "$L1_PROXY" --private-key "$TEST_KEY" \
@@ -282,7 +263,9 @@ if [ "$STATUS_C" = "0x1" ]; then
     L2_BLK=$(get_block_number "$L2_RPC")
     wait_for_block_advance "$L2_RPC" "$L2_BLK" 5 90 >/dev/null || true
 
-    USDC_AFTER=$(cast call --rpc-url "$L1_RPC" "$USDC_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null || echo "0")
+    # cast call returns "109643332400 [1.096e11]" — strip the bracketed
+    # scientific notation to get the plain integer for arithmetic comparison.
+    USDC_AFTER=$(cast call --rpc-url "$L1_RPC" "$USDC_L1" "balanceOf(address)(uint256)" "$TEST_ADDR" 2>/dev/null | awk '{print $1}' || echo "0")
     GAINED=$(echo "scale=6; ($USDC_AFTER - $USDC_BEFORE) / 1000000" | bc 2>/dev/null || echo "?")
     echo "  USDC gained: $GAINED"
     assert "TEST_C: Aggregated swap (3 hops)" '[ "$USDC_AFTER" -gt "$USDC_BEFORE" ]'

@@ -160,6 +160,10 @@ pub struct L2CrossChainCallParams {
     /// L2 trace: scope = vec![0; trace_depth]. Empty for direct proxy calls.
     #[serde(default)]
     pub l1_delivery_scope: Vec<U256>,
+    /// Whether the L2 tx reverts AFTER making cross-chain calls.
+    /// When true, L1 entries include REVERT/REVERT_CONTINUE to undo L1 state changes.
+    #[serde(default)]
+    pub tx_reverts: bool,
 }
 
 /// A queued cross-chain call with its entry pair, gas price, and raw L1 tx.
@@ -188,6 +192,11 @@ pub struct QueuedCrossChainCall {
     /// converting the CALL+RESULT pair via `convert_pairs_to_l1_entries`.
     /// Empty for simple deposits (legacy path applies).
     pub l1_entries: Vec<CrossChainExecutionEntry>,
+    /// Whether the L2 tx reverts after cross-chain calls (atomicity revert).
+    pub tx_reverts: bool,
+    /// L1 entries are independent (not chained state deltas). For L1→L2 partial
+    /// revert: the reverted call's state is rolled back by try/catch on L1.
+    pub l1_independent_entries: bool,
 }
 
 /// A queued L2→L1 call with L2 table entries and L1 deferred entries.
@@ -214,6 +223,8 @@ pub struct QueuedL2ToL1Call {
     /// Number of `executeL2TX` calls needed.
     /// Simple withdrawals = 1. Multi-call patterns with N root L2→L1 calls = N.
     pub trigger_count: usize,
+    /// Whether the L2 tx reverts after cross-chain calls (atomicity revert).
+    pub tx_reverts: bool,
 }
 
 /// Result of simulating a contract call.
@@ -280,6 +291,12 @@ pub struct BuildExecutionTableCall {
     /// Original L1 trace depth from walk_trace_tree.
     #[serde(default)]
     pub l1_trace_depth: usize,
+    /// Whether this call is inside a reverted frame on L1 (try/catch that reverts).
+    /// Used for partial revert patterns (revertContinue L1→L2): the reverted call
+    /// needs REVERT/REVERT_CONTINUE on L2, while calls outside the reverted frame
+    /// continue normally.
+    #[serde(default)]
+    pub in_reverted_frame: bool,
 }
 
 /// Result of building a multi-call execution table.
@@ -309,6 +326,9 @@ pub struct BuildL2ToL1ExecutionTableParams {
     /// Raw signed L2 transaction (held for driver injection).
     #[serde(default)]
     pub raw_l2_tx: Bytes,
+    /// Whether the L2 tx reverts AFTER making cross-chain calls.
+    #[serde(default)]
+    pub tx_reverts: bool,
 }
 
 /// A single L2→L1 call for the reverse multi-call continuation execution table builder.
@@ -334,6 +354,10 @@ pub struct BuildL2ToL1Call {
     /// Accumulated scope for L1 delivery.
     #[serde(default)]
     pub scope: Vec<U256>,
+    /// Whether this call is inside a reverted frame on L2 (try/catch that reverts).
+    /// Used for partial revert patterns where some calls need REVERT/REVERT_CONTINUE.
+    #[serde(default)]
+    pub in_reverted_frame: bool,
 }
 
 /// A return call (L1→L2) for the reverse multi-call continuation execution table builder.
@@ -659,6 +683,8 @@ where
                 raw_l1_tx: params.raw_l1_tx.clone(),
                 extra_l2_entries: vec![],
                 l1_entries: vec![],
+                tx_reverts: false,
+                l1_independent_entries: false,
             });
         }
 
@@ -742,9 +768,26 @@ where
             params.delivery_return_data.to_vec(),
             params.delivery_failed,
             params.l1_delivery_scope, // scope from trace depth
+            params.tx_reverts,
         );
 
         let call_id = entries.l2_table_entries[0].action_hash;
+
+        if params.tx_reverts {
+            tracing::info!(
+                target: "based_rollup::rpc",
+                destination = %params.destination,
+                source = %params.source_address,
+                delivery_return_data_hex = %format!("0x{}", hex::encode(&params.delivery_return_data)),
+                delivery_return_data_len = params.delivery_return_data.len(),
+                delivery_failed = params.delivery_failed,
+                tx_reverts = params.tx_reverts,
+                l2_entries = entries.l2_table_entries.len(),
+                l1_entries = entries.l1_deferred_entries.len(),
+                %call_id,
+                "initiate_l2_cross_chain_call: REVERT mode — entries built"
+            );
+        }
 
         tracing::info!(
             target: "based_rollup::rpc",
@@ -776,6 +819,7 @@ where
                 raw_l2_tx: params.raw_l2_tx.clone(),
                 rlp_encoded_tx: params.raw_l2_tx.to_vec(),
                 trigger_count: 1, // Simple L2→L1 call: one executeL2TX
+                tx_reverts: params.tx_reverts,
             });
         }
 
@@ -825,6 +869,7 @@ where
                 scope: c.scope.clone(),
                 discovery_iteration: c.discovery_iteration,
                 l1_trace_depth: c.l1_trace_depth,
+                in_reverted_frame: c.in_reverted_frame,
             })
             .collect();
 
@@ -918,6 +963,8 @@ where
                 raw_l1_tx: params.raw_l1_tx.clone(),
                 extra_l2_entries: continuation.l2_entries,
                 l1_entries: continuation.l1_entries,
+                tx_reverts: false,
+                l1_independent_entries: continuation.l1_independent_entries,
             });
         }
 
@@ -968,6 +1015,7 @@ where
                 delivery_return_data: c.delivery_return_data.to_vec(),
                 delivery_failed: c.delivery_failed,
                 scope: c.scope.clone(),
+                in_reverted_frame: c.in_reverted_frame,
             })
             .collect();
 
@@ -1044,8 +1092,12 @@ where
 
         // Build L2 table entries and L1 deferred entries for the continuation pattern.
         // Pass rlp_encoded_tx for the L2TX trigger entries on L1.
-        let continuation =
-            build_l2_to_l1_continuation_entries(&detected, rollup_id, params.raw_l2_tx.as_ref());
+        let continuation = build_l2_to_l1_continuation_entries(
+            &detected,
+            rollup_id,
+            params.raw_l2_tx.as_ref(),
+            params.tx_reverts,
+        );
 
         let l2_count = continuation.l2_entries.len();
         let l1_count = continuation.l1_entries.len();
@@ -1126,6 +1178,7 @@ where
                 raw_l2_tx: params.raw_l2_tx.clone(),
                 rlp_encoded_tx: params.raw_l2_tx.to_vec(),
                 trigger_count: 1,
+                tx_reverts: params.tx_reverts,
             });
         }
 

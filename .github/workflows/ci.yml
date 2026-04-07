@@ -226,11 +226,10 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Start Docker stack (core services only — no explorers, no crosschain-tx-sender)
+      - name: Start Docker stack (core services only — no explorers, no tx-senders)
         run: |
           docker compose -f deployments/testnet-eez/docker-compose.yml \
-            up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender \
-            complex-tx-sender
+            up -d l1 deploy builder fullnode1 fullnode2 deploy-l2 tx-sender
         env:
           COMPOSE_PROJECT_NAME: ci-e2e
           ROLLUP_IMAGE: ${{ needs.docker-build.outputs.rollup-image }}
@@ -282,6 +281,7 @@ jobs:
           cd contracts/sync-rollups-protocol
           rm -rf lib/openzeppelin-contracts/fv/harnesses
           sudo rm -rf cache out  # Docker deploy container leaves root-owned files
+          sudo chown -R "$(id -u):$(id -g)" .  # Fix ownership after Docker mounts
           forge build --skip "fv/*"
 
       - name: Prepare protocol E2E environment
@@ -395,11 +395,11 @@ jobs:
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
 
-      - name: "Protocol E2E: deepScope (L2→L1 deep nested scope)"
+      - name: "Protocol E2E: deepScopeL2 (L2→L1 deep nested scope)"
         timeout-minutes: 5
         run: |
           cd contracts/sync-rollups-protocol
-          bash script/e2e/shared/run-network.sh script/e2e/deepScope/E2E.s.sol \
+          bash script/e2e/shared/run-network.sh script/e2e/deepScopeL2/E2E.s.sol \
             --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
@@ -449,6 +449,51 @@ jobs:
             --pk "$PROTOCOL_E2E_PK" \
             --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
 
+      - name: "Protocol E2E: revertCounter (L1→L2 revert simple)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertCounter/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: revertCounterL2 (L2→L1 revert simple)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertCounterL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: revertContinue (L1→L2 partial revert)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertContinue/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: revertContinueL2 (L2→L1 partial revert)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/revertContinueL2/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
+      - name: "Protocol E2E: nestedCallRevert (L1→L2 nested call with revert)"
+        timeout-minutes: 5
+        run: |
+          cd contracts/sync-rollups-protocol
+          bash script/e2e/shared/run-network.sh script/e2e/nestedCallRevert/E2E.s.sol \
+            --l1-rpc http://localhost:9556 --l2-rpc http://localhost:9548 \
+            --pk "$PROTOCOL_E2E_PK" \
+            --rollups "$PROTOCOL_E2E_ROLLUPS" --manager-l2 "$PROTOCOL_E2E_MANAGER_L2"
+
       # ── Bash E2E tests (longer, integration-level) ──────────────────
 
       - name: Run bridge E2E test
@@ -479,8 +524,8 @@ jobs:
         env:
           DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
 
-      - name: Run cross-chain atomicity E2E test (issue #272 — needs REVERT_CONTINUE)
-        continue-on-error: true  # Requires feature/reverts protocol support (not yet implemented)
+      - name: Run cross-chain atomicity E2E test (issue #272)
+        continue-on-error: true  # Bash E2E has stricter assertions than protocol forge tests — some steps still failing
         run: bash scripts/e2e/test-cross-chain-atomicity.sh
         env:
           DOCKER_COMPOSE_CMD: "docker compose -p ci-e2e -f deployments/testnet-eez/docker-compose.yml"
@@ -494,6 +539,8 @@ jobs:
           docker compose -f deployments/testnet-eez/docker-compose.yml logs fullnode1 --tail 50
           echo "=== Deploy logs ==="
           docker compose -f deployments/testnet-eez/docker-compose.yml logs deploy --tail 50
+          echo "=== Deploy-flash-loan logs ==="
+          docker compose -f deployments/testnet-eez/docker-compose.yml logs deploy-flash-loan --tail 50
           echo "=== Health ==="
           curl -s http://localhost:9560/health || echo "unreachable"
         env:

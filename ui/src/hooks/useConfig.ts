@@ -56,6 +56,25 @@ export function useConfigLoader() {
             setConfig({ reverseExecutorL1: env["REVERSE_EXECUTOR_L1"] });
           if (!config.faucetAddress && env["FAUCET_ADDRESS"])
             setConfig({ faucetAddress: env["FAUCET_ADDRESS"] });
+          // Aggregator addresses
+          if (!config.aggWeth && env["AGG_WETH_ADDRESS"])
+            setConfig({ aggWeth: env["AGG_WETH_ADDRESS"] });
+          if (!config.aggUsdc && env["AGG_USDC_ADDRESS"])
+            setConfig({ aggUsdc: env["AGG_USDC_ADDRESS"] });
+          if (!config.aggL1Amm && env["AGG_L1_AMM_ADDRESS"])
+            setConfig({ aggL1Amm: env["AGG_L1_AMM_ADDRESS"] });
+          if (!config.aggAggregator && env["AGG_AGGREGATOR_ADDRESS"])
+            setConfig({ aggAggregator: env["AGG_AGGREGATOR_ADDRESS"] });
+          if (!config.aggL2Executor && env["AGG_L2_EXECUTOR_ADDRESS"])
+            setConfig({ aggL2Executor: env["AGG_L2_EXECUTOR_ADDRESS"] });
+          if (!config.aggL2Amm && env["AGG_L2_AMM_ADDRESS"])
+            setConfig({ aggL2Amm: env["AGG_L2_AMM_ADDRESS"] });
+          if (!config.aggL2ExecutorProxy && env["AGG_L2_EXECUTOR_PROXY_ADDRESS"])
+            setConfig({ aggL2ExecutorProxy: env["AGG_L2_EXECUTOR_PROXY_ADDRESS"] });
+          if (!config.aggWrappedWethL2 && env["AGG_WRAPPED_WETH_L2"])
+            setConfig({ aggWrappedWethL2: env["AGG_WRAPPED_WETH_L2"] });
+          if (!config.aggWrappedUsdcL2 && env["AGG_WRAPPED_USDC_L2"])
+            setConfig({ aggWrappedUsdcL2: env["AGG_WRAPPED_USDC_L2"] });
           registerContractsFromEnv(env);
         }
       } catch {

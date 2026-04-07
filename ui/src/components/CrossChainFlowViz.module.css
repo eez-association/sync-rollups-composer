@@ -1,0 +1,100 @@
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   CrossChainFlowViz — Hero SVG visualization
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/* ── Container ── */
+
+.container {
+  width: 100%;
+  aspect-ratio: 960 / 370;
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+  box-shadow: var(--shadow-card);
+  transition: box-shadow var(--duration-slow) var(--ease);
+}
+
+.container:hover {
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* ── SVG ── */
+
+.svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* ── Breathing animation for idle aggregator node ── */
+
+.breathing {
+  animation: breathing 3s ease-in-out infinite;
+}
+
+/* ── Active portal glow ── */
+
+.portalActive {
+  filter: drop-shadow(0 0 8px var(--cyan));
+  transition: filter 0.3s var(--ease);
+}
+
+/* ── Success path stroke transition ── */
+
+.successPath {
+  stroke: var(--green) !important;
+  transition: stroke 0.3s var(--ease);
+}
+
+/* ── Route duel ghost path ── */
+
+.routeDuelGhost {
+  stroke: var(--red);
+  stroke-dasharray: 6 4;
+  opacity: 0.4;
+}
+
+/* ── Atomic badge — stroke reveal animation ── */
+
+.atomicBadge {
+  animation: strokeReveal 0.6s ease-out 0.1s forwards;
+}
+
+/* ── Pool container clip ── */
+
+.poolContainer {
+  overflow: hidden;
+}
+
+/* ── Phase transitions — fade elements in/out smoothly ── */
+
+.fadeIn {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* ── Shimmer overlay for active pools ── */
+
+.poolShimmer {
+  animation: shimmer 2s linear infinite;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.03) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+}
+
+/* ── Depth counter pulse ── */
+
+.depthCounter {
+  animation: bloomPulse 2s ease-in-out infinite;
+}
+
+/* ── Grid dots subtle animation ── */
+
+.gridDot {
+  animation: pulseGlow 4s ease-in-out infinite;
+}

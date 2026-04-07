@@ -136,6 +136,7 @@ Specialized subagents in `.claude/agents/`. The user communicates in Spanish —
 - Use `test-writer` to create `*_tests.rs` tests. Never touches production code.
 - Use `spec-writer` to update docs/DERIVATION.md after changes are audited.
 - Use `qa` to validate features E2E in Docker: bridge deposits/withdrawals, state convergence, builder recovery, nonce recovery.
+- Use `protocol-qa` to run protocol-level E2E tests from `contracts/sync-rollups-protocol/script/e2e/`, investigate user tx reverts (status 0x0) despite hash matches, decode postBatch entries, verify state delta chaining, and trace L1 execution failures (ExecutionNotFound, CallExecutionFailed, etc.).
 - Use `maintainer` after changes land to keep CLAUDE.md, agents, and docs in sync.
 
 ### Dispatch Protocol
@@ -154,6 +155,8 @@ core-worker → auditor → test-writer → qa → spec-writer → maintainer
 - `ui-worker` + `core-worker` (different directories)
 - `general-worker` + any (research/external repos)
 - `qa` + `auditor` (both read-only)
+- `protocol-qa` + `qa` (different test suites, both read-only)
+- `protocol-qa` + `auditor` (both read-only)
 
 ### NEVER Parallel
 
@@ -177,7 +180,7 @@ sync-rollup-composer/
 │   ├── DERIVATION.md                   # Normative spec
 │   └── architecture.excalidraw         # Architecture diagram
 ├── CLAUDE.md                           # This file
-├── .claude/agents/                     # 8 subagent definitions
+├── .claude/agents/                     # 9 subagent definitions
 ├── deployments/
 │   ├── shared/
 │   │   ├── docker-compose.base.yml     # Reusable builder/fullnode templates

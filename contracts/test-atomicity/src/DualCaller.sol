@@ -2,7 +2,11 @@
 pragma solidity ^0.8.28;
 
 interface ISimpleStorage {
-    function value() external view returns (uint256);
+    /// @dev Intentionally NOT marked `view` so Solidity emits a regular CALL
+    ///      instead of STATICCALL. The cross-chain proxy mutates Rollups
+    ///      storage (consumes execution entries) which is forbidden inside
+    ///      a STATICCALL context — would revert with `StateChangeDuringStaticCall`.
+    function value() external returns (uint256);
 }
 
 interface ICounter {

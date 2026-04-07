@@ -2259,6 +2259,7 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         return_data.clone(),
         false,
         vec![], // l1_delivery_scope: empty for tests (no deep nesting)
+        false,  // tx_reverts
     );
 
     // L2 table entry 0: CALL entry, nextAction = RESULT with delivery return data.
@@ -2322,6 +2323,7 @@ fn test_build_withdrawal_entries_still_void() {
         vec![],     // delivery_return_data: EOA recipient
         false,      // delivery_failed
         vec![],     // l1_delivery_scope
+        false,      // tx_reverts
     );
 
     // L2 RESULT entries should have empty data (EOA target, no return data).
@@ -2362,6 +2364,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         vec![],
         false,
         vec![], // l1_delivery_scope
+        false,  // tx_reverts
     );
 
     // Build entries with non-empty return data.
@@ -2376,6 +2379,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         return_data,
         false,
         vec![], // l1_delivery_scope
+        false,  // tx_reverts
     );
 
     // The CALL entry hash should be the same (same CALL action regardless of return data).
@@ -2415,6 +2419,7 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
         return_data.clone(),
         false,
         deep_scope.clone(),
+        false, // tx_reverts
     );
 
     // Build with empty scope (direct call)
@@ -2428,6 +2433,7 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
         return_data.clone(),
         false,
         vec![],
+        false, // tx_reverts
     );
 
     // L1 entry 0 nextAction (delivery CALL) must carry the deep scope.
@@ -2488,5 +2494,454 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
     assert!(
         l1_entry_1_deep.next_action.scope.is_empty(),
         "L1 terminal RESULT must have scope=[]"
+    );
+}
+
+// ──────────────────────────────────────────────
+//  REVERT / REVERT_CONTINUE helpers (§D.12)
+// ──────────────────────────────────────────────
+
+#[test]
+fn test_revert_action_canonical_fields() {
+    let rollup_id = U256::from(42069);
+    let scope = vec![U256::ZERO];
+    let action = revert_action(rollup_id, scope.clone());
+
+    assert_eq!(action.action_type, CrossChainActionType::Revert);
+    assert_eq!(action.rollup_id, rollup_id);
+    assert_eq!(action.destination, Address::ZERO);
+    assert_eq!(action.value, U256::ZERO);
+    assert!(action.data.is_empty());
+    assert!(!action.failed, "REVERT.failed must be false (spec §D.12)");
+    assert_eq!(action.source_address, Address::ZERO);
+    assert_eq!(action.source_rollup, U256::ZERO);
+    assert_eq!(action.scope, scope);
+
+    // Verify Solidity ABI conversion
+    let sol = action.to_sol_action();
+    assert_eq!(sol.actionType, ICrossChainManagerL2::ActionType::REVERT);
+    assert!(!sol.failed);
+    assert_eq!(sol.scope.len(), 1);
+}
+
+#[test]
+fn test_revert_continue_action_canonical_fields() {
+    let rollup_id = U256::from(42069);
+    let action = revert_continue_action(rollup_id);
+
+    assert_eq!(action.action_type, CrossChainActionType::RevertContinue);
+    assert_eq!(action.rollup_id, rollup_id);
+    assert_eq!(action.destination, Address::ZERO);
+    assert_eq!(action.value, U256::ZERO);
+    assert!(action.data.is_empty());
+    assert!(
+        action.failed,
+        "REVERT_CONTINUE.failed must be true (spec §D.12)"
+    );
+    assert_eq!(action.source_address, Address::ZERO);
+    assert_eq!(action.source_rollup, U256::ZERO);
+    assert!(
+        action.scope.is_empty(),
+        "REVERT_CONTINUE.scope must be [] (spec §D.12)"
+    );
+
+    // Verify Solidity ABI conversion
+    let sol = action.to_sol_action();
+    assert_eq!(
+        sol.actionType,
+        ICrossChainManagerL2::ActionType::REVERT_CONTINUE
+    );
+    assert!(sol.failed);
+    assert!(sol.scope.is_empty());
+}
+
+#[test]
+fn test_compute_revert_continue_hash_deterministic() {
+    let rollup_id = U256::from(42069);
+
+    // Hash must be deterministic — same rollup_id always produces same hash
+    let hash1 = compute_revert_continue_hash(rollup_id);
+    let hash2 = compute_revert_continue_hash(rollup_id);
+    assert_eq!(hash1, hash2, "REVERT_CONTINUE hash must be deterministic");
+
+    // Different rollup_id produces different hash
+    let hash3 = compute_revert_continue_hash(U256::from(1));
+    assert_ne!(
+        hash1, hash3,
+        "different rollupId must produce different hash"
+    );
+
+    // Hash is non-zero
+    assert_ne!(hash1, B256::ZERO, "hash must not be zero");
+}
+
+#[test]
+fn test_revert_continue_hash_matches_manual_abi_encode() {
+    // Manually construct the same action and hash it to verify consistency
+    let rollup_id = U256::from(42069);
+    let action = CrossChainAction {
+        action_type: CrossChainActionType::RevertContinue,
+        rollup_id,
+        destination: Address::ZERO,
+        value: U256::ZERO,
+        data: vec![],
+        failed: true,
+        source_address: Address::ZERO,
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let manual_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &action.to_sol_action(),
+    ));
+    let helper_hash = compute_revert_continue_hash(rollup_id);
+    assert_eq!(
+        manual_hash, helper_hash,
+        "compute_revert_continue_hash must match manual ABI encode + keccak256"
+    );
+}
+
+/// Verify `build_l2_to_l1_call_entries(tx_reverts=true)` produces 3 L1 entries
+/// with correct REVERT/REVERT_CONTINUE structure matching IntegrationTest Scenario 5.
+#[test]
+fn test_build_l2_to_l1_call_entries_tx_reverts() {
+    let destination = Address::with_last_byte(0x42);
+    let source = Address::with_last_byte(0x01);
+    let rollup_id = 42069u64;
+    let rollup_id_u256 = U256::from(rollup_id);
+    let return_data = U256::from(4).to_be_bytes_vec(); // Counter returns 4
+    let delivery_scope = vec![U256::ZERO]; // depth 1
+
+    let entries = build_l2_to_l1_call_entries(
+        destination,
+        vec![0xd0, 0x9d, 0xe0, 0x8a], // increment() selector
+        U256::ZERO,
+        source,
+        rollup_id,
+        vec![0xc0], // rlp_encoded_tx placeholder
+        return_data.clone(),
+        false, // delivery succeeded
+        delivery_scope.clone(),
+        true, // tx_reverts!
+    );
+
+    // L2 entries: UNCHANGED — still 2 entries (CALL→RESULT pair)
+    assert_eq!(
+        entries.l2_table_entries.len(),
+        2,
+        "L2 entries must be 2 (unchanged)"
+    );
+    assert_eq!(
+        entries.l2_table_entries[0].next_action.action_type,
+        CrossChainActionType::Result,
+        "L2 Entry 0 nextAction must be RESULT"
+    );
+
+    // L1 entries: 3 instead of 2
+    assert_eq!(
+        entries.l1_deferred_entries.len(),
+        3,
+        "L1 entries must be 3 for tx_reverts"
+    );
+
+    // Entry 0: hash(L2TX) → CALL(delivery)
+    let e0 = &entries.l1_deferred_entries[0];
+    assert_eq!(
+        e0.next_action.action_type,
+        CrossChainActionType::Call,
+        "L1 Entry 0 nextAction must be CALL (delivery)"
+    );
+    assert_eq!(
+        e0.next_action.scope, delivery_scope,
+        "delivery CALL scope must match"
+    );
+    assert_eq!(
+        e0.state_deltas[0].ether_delta,
+        I256::ZERO,
+        "Entry 0 ether_delta must be 0 (consumed before ETH sent)"
+    );
+
+    // Entry 1: hash(RESULT) → REVERT(rollupId=ourL2, scope=delivery_scope)
+    let e1 = &entries.l1_deferred_entries[1];
+    assert_eq!(
+        e1.next_action.action_type,
+        CrossChainActionType::Revert,
+        "L1 Entry 1 nextAction must be REVERT (not terminal RESULT)"
+    );
+    assert_eq!(
+        e1.next_action.rollup_id, rollup_id_u256,
+        "REVERT rollupId must be our L2 rollup"
+    );
+    assert_eq!(
+        e1.next_action.scope,
+        vec![U256::ZERO],
+        "REVERT scope must always be [0] (first child of _resolveScopes)"
+    );
+    assert!(
+        !e1.next_action.failed,
+        "REVERT.failed must be false (spec §D.12)"
+    );
+
+    // Entry 2: hash(REVERT_CONTINUE) → RESULT(terminal, failed=false)
+    let e2 = &entries.l1_deferred_entries[2];
+    let expected_rc_hash = compute_revert_continue_hash(rollup_id_u256);
+    assert_eq!(
+        e2.action_hash, expected_rc_hash,
+        "Entry 2 actionHash must be hash(REVERT_CONTINUE)"
+    );
+    assert_eq!(
+        e2.next_action.action_type,
+        CrossChainActionType::Result,
+        "Entry 2 nextAction must be terminal RESULT"
+    );
+    assert_eq!(
+        e2.next_action.rollup_id, rollup_id_u256,
+        "terminal RESULT rollupId must be our L2"
+    );
+    assert!(
+        !e2.next_action.failed,
+        "terminal RESULT.failed must be false (required by _resolveScopes)"
+    );
+    assert!(
+        e2.next_action.data.is_empty(),
+        "terminal RESULT.data must be empty (void)"
+    );
+    assert_eq!(
+        e2.state_deltas[0].ether_delta,
+        I256::ZERO,
+        "Entry 2 ether_delta must be 0 (_etherDelta reset after Entry 1)"
+    );
+}
+
+/// Verify tx_reverts=false still produces 2 L1 entries (backward compatibility).
+#[test]
+fn test_build_l2_to_l1_call_entries_no_revert_unchanged() {
+    let entries_normal = build_l2_to_l1_call_entries(
+        Address::with_last_byte(0x42),
+        vec![0xd0, 0x9d, 0xe0, 0x8a],
+        U256::ZERO,
+        Address::with_last_byte(0x01),
+        1,
+        vec![0xc0],
+        vec![],
+        false,
+        vec![],
+        false, // tx_reverts=false
+    );
+    assert_eq!(
+        entries_normal.l1_deferred_entries.len(),
+        2,
+        "tx_reverts=false must produce 2 L1 entries (unchanged)"
+    );
+    assert_eq!(
+        entries_normal.l1_deferred_entries[1]
+            .next_action
+            .action_type,
+        CrossChainActionType::Result,
+        "tx_reverts=false Entry 1 must have terminal RESULT"
+    );
+}
+
+/// Verify REVERT entries with ETH value have correct ether_delta accounting.
+#[test]
+fn test_build_l2_to_l1_call_entries_revert_with_eth_value() {
+    let amount = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
+    let entries = build_l2_to_l1_call_entries(
+        Address::with_last_byte(0x42),
+        vec![],
+        amount,
+        Address::with_last_byte(0x01),
+        1,
+        vec![0xc0],
+        vec![],
+        false,
+        vec![],
+        true, // tx_reverts
+    );
+
+    assert_eq!(entries.l1_deferred_entries.len(), 3);
+
+    // Entry 0: ether_delta = 0 (before ETH sent)
+    assert_eq!(
+        entries.l1_deferred_entries[0].state_deltas[0].ether_delta,
+        I256::ZERO
+    );
+
+    // Entry 1: ether_delta = -1 ETH (after ETH sent by proxy)
+    let expected_delta = -I256::try_from(amount).unwrap();
+    assert_eq!(
+        entries.l1_deferred_entries[1].state_deltas[0].ether_delta,
+        expected_delta
+    );
+
+    // Entry 2: ether_delta = 0 (_etherDelta reset by _applyStateDeltas after Entry 1)
+    assert_eq!(
+        entries.l1_deferred_entries[2].state_deltas[0].ether_delta,
+        I256::ZERO
+    );
+}
+
+/// Verify `attach_generic_state_deltas` for REVERT groups produces the correct
+/// root chain: Entry 1's newState = post_root, Entry 2 = identity (post→post).
+///
+/// This ensures `_handleScopeRevert` (Rollups.sol:375) captures the correct
+/// stateRoot (= post_root = block's real state root).
+#[test]
+fn test_attach_generic_state_deltas_revert_group() {
+    let pre = B256::with_last_byte(0x01);
+    let post = B256::with_last_byte(0x02);
+    let rollup_id = 42069u64;
+    let rollup_id_u256 = U256::from(rollup_id);
+
+    // 3-entry REVERT group (L2TX→CALL, RESULT→REVERT, REVERT_CONTINUE→RESULT)
+    let mut entries = vec![
+        CrossChainExecutionEntry {
+            state_deltas: vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
+                ether_delta: I256::ZERO,
+            }],
+            action_hash: B256::with_last_byte(0xAA),
+            next_action: CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: U256::ZERO,
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: vec![],
+                failed: false,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            },
+        },
+        CrossChainExecutionEntry {
+            state_deltas: vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
+                ether_delta: I256::ZERO,
+            }],
+            action_hash: B256::with_last_byte(0xBB),
+            next_action: revert_action(rollup_id_u256, vec![]),
+        },
+        CrossChainExecutionEntry {
+            state_deltas: vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
+                ether_delta: I256::ZERO,
+            }],
+            action_hash: compute_revert_continue_hash(rollup_id_u256),
+            next_action: CrossChainAction {
+                action_type: CrossChainActionType::Result,
+                rollup_id: rollup_id_u256,
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: vec![],
+                failed: false,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            },
+        },
+    ];
+
+    let roots = vec![pre, post]; // 1 group → 2 roots
+    let group_starts = vec![0usize];
+
+    attach_generic_state_deltas(&mut entries, &roots, rollup_id, &group_starts);
+
+    // Entry 0: pre → synthetic
+    assert_eq!(entries[0].state_deltas[0].current_state, pre);
+    let syn1 = entries[0].state_deltas[0].new_state;
+    assert_ne!(syn1, pre, "synthetic root must differ from pre");
+    assert_ne!(syn1, post, "synthetic root must differ from post");
+
+    // Entry 1: synthetic → post_root (the captured value for _handleScopeRevert)
+    assert_eq!(entries[1].state_deltas[0].current_state, syn1);
+    assert_eq!(
+        entries[1].state_deltas[0].new_state, post,
+        "Entry 1 newState must be post_root (captured by _handleScopeRevert)"
+    );
+
+    // Entry 2: post_root → post_root (identity — consumed inside reverted scope)
+    assert_eq!(
+        entries[2].state_deltas[0].current_state, post,
+        "Entry 2 currentState must be post_root"
+    );
+    assert_eq!(
+        entries[2].state_deltas[0].new_state, post,
+        "Entry 2 newState must be post_root (identity delta)"
+    );
+}
+
+/// Verify non-REVERT groups produce normal (non-identity) state delta chains.
+#[test]
+fn test_attach_generic_state_deltas_normal_group_with_flags() {
+    let pre = B256::with_last_byte(0x01);
+    let post = B256::with_last_byte(0x02);
+    let rollup_id = 1u64;
+    let rollup_id_u256 = U256::from(rollup_id);
+
+    // 2-entry normal group
+    let mut entries = vec![
+        CrossChainExecutionEntry {
+            state_deltas: vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
+                ether_delta: I256::ZERO,
+            }],
+            action_hash: B256::with_last_byte(0xAA),
+            next_action: CrossChainAction {
+                action_type: CrossChainActionType::Call,
+                rollup_id: U256::ZERO,
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: vec![],
+                failed: false,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            },
+        },
+        CrossChainExecutionEntry {
+            state_deltas: vec![CrossChainStateDelta {
+                rollup_id: rollup_id_u256,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
+                ether_delta: I256::ZERO,
+            }],
+            action_hash: B256::with_last_byte(0xBB),
+            next_action: CrossChainAction {
+                action_type: CrossChainActionType::Result,
+                rollup_id: rollup_id_u256,
+                destination: Address::ZERO,
+                value: U256::ZERO,
+                data: vec![],
+                failed: false,
+                source_address: Address::ZERO,
+                source_rollup: U256::ZERO,
+                scope: vec![],
+            },
+        },
+    ];
+
+    let roots = vec![pre, post];
+    let group_starts = vec![0usize];
+
+    attach_generic_state_deltas(&mut entries, &roots, rollup_id, &group_starts);
+
+    // Entry 0: pre → synthetic
+    assert_eq!(entries[0].state_deltas[0].current_state, pre);
+    let syn1 = entries[0].state_deltas[0].new_state;
+
+    // Entry 1: synthetic → post (normal chain, NOT identity)
+    assert_eq!(entries[1].state_deltas[0].current_state, syn1);
+    assert_eq!(entries[1].state_deltas[0].new_state, post);
+    // Verify it's NOT identity (syn1 ≠ post for a 2-entry group)
+    assert_ne!(
+        syn1, post,
+        "normal group: intermediate must differ from post"
     );
 }
