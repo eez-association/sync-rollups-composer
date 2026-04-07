@@ -507,22 +507,19 @@ interface LiquidPoolProps {
   reserveB: string | null;
   chain: "l1" | "l2";
   active: boolean;
-  /** Visual scale 0.55–1.0; bigger = more total liquidity vs the other pool */
-  scale?: number;
+  /** Liquid fill 0.15–0.85; how full the container is (bigger = more TVL) */
+  fillRatio?: number;
 }
 
-function LiquidPool({ x, y, reserveA, reserveB, chain, active, scale = 1 }: LiquidPoolProps) {
+function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }: LiquidPoolProps) {
   // In a Uniswap V2 AMM, both sides always have equal VALUE (that's the
-  // invariant). So the visual split is always 50/50 — the actual reserve
-  // amounts are shown as labels inside each half. Liquidity is conveyed
-  // through the labels and the OVERALL pool size (bigger pool = more TVL).
+  // invariant). So the visual split is always 50/50.
   //
-  // Liquid fills 70% of the inner height from the bottom — the top 30% is
-  // empty headroom, like a real glass container with liquid inside.
-  const baseW = 120;
-  const baseH = 50;
-  const poolW = Math.round(baseW * scale);
-  const poolH = Math.round(baseH * scale);
+  // BOTH pool containers have the SAME size. What changes is how full each
+  // container is — the LIQUID LEVEL reflects the relative liquidity. A pool
+  // with 2x more TVL than another will be visibly more full.
+  const poolW = 120;
+  const poolH = 50;
   const poolX = x - poolW / 2;
   const poolY = y - poolH / 2;
   const padding = 2;
@@ -534,9 +531,9 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, scale = 1 }: Liqu
   const rightWidth = halfW;
   const dividerX = poolX + padding + halfW;
 
-  // Liquid level: 70% fill from the bottom of the inner area
-  const fillRatio = 0.7;
-  const liquidH = innerH * fillRatio;
+  // Liquid level — how full this pool is (clamped to keep something visible)
+  const ratio = Math.max(0.12, Math.min(0.92, fillRatio));
+  const liquidH = innerH * ratio;
   const liquidTop = poolY + padding + (innerH - liquidH);
   const liquidBottom = poolY + padding + innerH;
 
@@ -885,15 +882,16 @@ export function CrossChainFlowViz({
   const localWidth = (splitPercent / 100) * 3 + 0.5;
   const remoteWidth = ((100 - splitPercent) / 100) * 3 + 0.5;
 
-  // Pool sizes scale with relative liquidity. Bigger pool = full size (1.0),
-  // smaller pool = sqrt of the ratio so the difference is visible but not extreme.
+  // Both pool containers are the SAME size. The LIQUID LEVEL inside differs
+  // proportionally to relative liquidity — bigger TVL = more full container.
   const l1Liq = l1ReserveA ? parseFloat(l1ReserveA) : 0;
   const l2Liq = l2ReserveA ? parseFloat(l2ReserveA) : 0;
   const maxLiq = Math.max(l1Liq, l2Liq, 1);
-  // Use sqrt to soften the visual difference (a 2x liquidity ratio → ~1.41x size).
-  // Floor at 0.55 so even tiny pools stay readable.
-  const l1Scale = Math.max(0.55, Math.sqrt(l1Liq / maxLiq) || 0.55);
-  const l2Scale = Math.max(0.55, Math.sqrt(l2Liq / maxLiq) || 0.55);
+  // The pool with the most liquidity fills to ~85% of the container.
+  // Smaller pool fills proportionally (linear ratio).
+  const MAX_FILL = 0.85;
+  const l1Fill = (l1Liq / maxLiq) * MAX_FILL;
+  const l2Fill = (l2Liq / maxLiq) * MAX_FILL;
 
   // Determine which nodes are active based on phase
   const activeNodes = useMemo(() => {
@@ -1074,7 +1072,7 @@ export function CrossChainFlowViz({
           reserveB={l1ReserveB}
           chain="l1"
           active={vizPhase >= 2 && vizPhase <= 4}
-          scale={l1Scale}
+          fillRatio={l1Fill}
         />
         <LiquidPool
           x={600}
@@ -1083,7 +1081,7 @@ export function CrossChainFlowViz({
           reserveB={l2ReserveB}
           chain="l2"
           active={vizPhase >= 5 && vizPhase <= 6}
-          scale={l2Scale}
+          fillRatio={l2Fill}
         />
 
         {/* ══════════════ Layer 4: Bridge Portals ══════════════ */}
