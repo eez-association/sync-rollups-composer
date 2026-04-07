@@ -248,20 +248,21 @@ function JourneyParticle({
       </circle>
 
       {/* Label — follows the particle on the same path with the same timing.
-          The text uses y={labelDy} so it sits offset above/below the moving origin. */}
+          The text uses y={labelDy} so it sits offset above/below the moving origin.
+          NOTE: no `filter` on text — glow blurs glyphs and ruins legibility. */}
       <text
         x={0}
         y={labelDy}
-        fontSize={9}
-        fontWeight={700}
+        fontSize={12}
+        fontWeight={800}
         fill={labelColor}
         textAnchor="middle"
-        fontFamily="var(--mono)"
-        filter="url(#glow)"
+        fontFamily="var(--sans)"
         style={{ paintOrder: "stroke fill" }}
-        stroke="rgba(8,10,18,0.75)"
-        strokeWidth={2.4}
+        stroke="#000"
+        strokeWidth={3}
         strokeLinejoin="round"
+        strokeOpacity={0.9}
       >
         {label}
         <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
@@ -305,99 +306,98 @@ function CoordinatedJourney() {
   return (
     <g>
       {/* Master cycle clock — drives the begin events of every segment.
-          A 4s repeating animation; each cycleClock.begin event restarts the chain. */}
+          An 8s repeating animation; each cycleClock.begin event restarts the chain. */}
       <rect x={-10} y={-10} width={1} height={1} fill="none" opacity={0}>
         <animate
           id="cycleClock"
           attributeName="opacity"
           from="0"
           to="0"
-          dur="4s"
+          dur="8s"
           begin="0s"
           repeatCount="indefinite"
         />
       </rect>
 
-      {/* ── Phase A: Pre-split (t=0 → t=1) ── */}
+      {/* ── Phase A: Pre-split (t=0 → t=2) ── */}
       <JourneyParticle
         path={JOURNEY_PATHS.preSplit}
-        duration={1.0}
+        duration={2.0}
         beginOffset={0}
         color={COL.gold}
         label="WETH"
         labelColor={COL.gold}
         size="large"
-        labelDy={-13}
+        labelDy={-15}
       />
 
-      {/* ── Phase B Local: Aggregator → L1 AMM → Output (t=1 → t=4) ──
-          Two segments: WETH (1s) then USDC (2s). */}
+      {/* ── Phase B Local: Aggregator → L1 AMM → Output (t=2 → t=8) ── */}
       <JourneyParticle
         path={JOURNEY_PATHS.localToL1Amm}
-        duration={1.5}
-        beginOffset={1.0}
+        duration={3.0}
+        beginOffset={2.0}
         color={COL.gold}
         label="WETH"
         labelColor={COL.gold}
-        labelDy={-12}
+        labelDy={-14}
       />
       <JourneyParticle
         path={JOURNEY_PATHS.localToOutput}
-        duration={1.5}
-        beginOffset={2.5}
+        duration={3.0}
+        beginOffset={5.0}
+        color={COL.blue}
+        label="USDC"
+        labelColor={COL.blue}
+        labelDy={-14}
+      />
+
+      {/* ── Phase B Remote: Aggregator → Portal → L2 Exec → L2 AMM → Portal → Output (t=2 → t=8) ──
+          Five segments totaling 6s — same total wall-clock time as the local branch
+          even though the path is much longer. The remote particle moves visually faster. */}
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteAggToPortalDown}
+        duration={1.0}
+        beginOffset={2.0}
+        color={COL.gold}
+        label="WETH"
+        labelColor={COL.gold}
+        labelDy={-12}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remotePortalToL2Exec}
+        duration={1.0}
+        beginOffset={3.0}
+        color={COL.cyan}
+        label="wWETH"
+        labelColor={COL.cyan}
+        labelDy={-12}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteL2ExecToL2Amm}
+        duration={1.2}
+        beginOffset={4.0}
+        color={COL.cyan}
+        label="wWETH"
+        labelColor={COL.cyan}
+        labelDy={16}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteL2AmmToPortalUp}
+        duration={1.4}
+        beginOffset={5.2}
+        color={COL.cyan}
+        label="wUSDC"
+        labelColor={COL.cyan}
+        labelDy={-12}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remotePortalToOutput}
+        duration={1.4}
+        beginOffset={6.6}
         color={COL.blue}
         label="USDC"
         labelColor={COL.blue}
         labelDy={-12}
-      />
-
-      {/* ── Phase B Remote: Aggregator → Portal → L2 Exec → L2 AMM → Portal → Output (t=1 → t=4) ──
-          Five segments totaling 3s — same total wall-clock time as the local branch
-          even though the path is much longer. The remote particle moves visually faster. */}
-      <JourneyParticle
-        path={JOURNEY_PATHS.remoteAggToPortalDown}
-        duration={0.5}
-        beginOffset={1.0}
-        color={COL.gold}
-        label="WETH"
-        labelColor={COL.gold}
-        labelDy={-10}
-      />
-      <JourneyParticle
-        path={JOURNEY_PATHS.remotePortalToL2Exec}
-        duration={0.5}
-        beginOffset={1.5}
-        color={COL.cyan}
-        label="wWETH"
-        labelColor={COL.cyan}
-        labelDy={-10}
-      />
-      <JourneyParticle
-        path={JOURNEY_PATHS.remoteL2ExecToL2Amm}
-        duration={0.6}
-        beginOffset={2.0}
-        color={COL.cyan}
-        label="wWETH"
-        labelColor={COL.cyan}
-        labelDy={14}
-      />
-      <JourneyParticle
-        path={JOURNEY_PATHS.remoteL2AmmToPortalUp}
-        duration={0.7}
-        beginOffset={2.6}
-        color={COL.cyan}
-        label="wUSDC"
-        labelColor={COL.cyan}
-        labelDy={-10}
-      />
-      <JourneyParticle
-        path={JOURNEY_PATHS.remotePortalToOutput}
-        duration={0.7}
-        beginOffset={3.3}
-        color={COL.blue}
-        label="USDC"
-        labelColor={COL.blue}
-        labelDy={-10}
       />
     </g>
   );
