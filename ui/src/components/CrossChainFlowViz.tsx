@@ -507,20 +507,24 @@ interface LiquidPoolProps {
   reserveB: string | null;
   chain: "l1" | "l2";
   active: boolean;
+  /** Visual scale 0.55–1.0; bigger = more total liquidity vs the other pool */
+  scale?: number;
 }
 
-function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps) {
+function LiquidPool({ x, y, reserveA, reserveB, chain, active, scale = 1 }: LiquidPoolProps) {
   // In a Uniswap V2 AMM, both sides always have equal VALUE (that's the
   // invariant). So the visual split is always 50/50 — the actual reserve
   // amounts are shown as labels inside each half. Liquidity is conveyed
-  // through the labels, not the bar widths.
+  // through the labels and the OVERALL pool size (bigger pool = more TVL).
   //
   // Liquid fills 70% of the inner height from the bottom — the top 30% is
   // empty headroom, like a real glass container with liquid inside.
-  const poolX = x - 60;
-  const poolY = y - 25;
-  const poolW = 120;
-  const poolH = 50;
+  const baseW = 120;
+  const baseH = 50;
+  const poolW = Math.round(baseW * scale);
+  const poolH = Math.round(baseH * scale);
+  const poolX = x - poolW / 2;
+  const poolY = y - poolH / 2;
   const padding = 2;
   const innerW = poolW - padding * 2;
   const innerH = poolH - padding * 2;
@@ -547,8 +551,11 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
   const showLeftLabel = leftWidth >= 25;
   const showRightLabel = rightWidth >= 25;
 
-  // Surface wave Y — sits at the top of the liquid (not the top of the container)
-  const surfaceY = liquidTop;
+  // Surface wave Y — sit slightly INSIDE the liquid so wave crests just touch
+  // the visual top of the liquid rect. The wave path then oscillates around
+  // this Y, so half the wave is above (touching liquidTop) and half below.
+  const waveAmp = 1.5;
+  const surfaceY = liquidTop + waveAmp;
 
   return (
     <g>
@@ -608,51 +615,73 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         opacity={0.07}
       />
 
-      {/* Horizontal wave on top of LEFT side surface */}
-      {leftWidth > 12 && (() => {
-        const segCount = Math.max(1, Math.floor((leftWidth - 4) / 8));
-        const wavePath = `M${poolX + padding + 2},${surfaceY} q4,-1.5 8,0` +
-          " t8,0".repeat(Math.max(0, segCount - 1));
-        return (
-          <path
-            d={wavePath}
-            fill="none"
-            stroke="#a5b4fc"
-            strokeWidth={0.7}
-            opacity={0.6}
-          >
-            <animateTransform
-              attributeName="transform"
-              type="translate"
-              values="0,0; -8,0; 0,0"
-              dur="3s"
-              repeatCount="indefinite"
-            />
-          </path>
-        );
-      })()}
+      {/* Build a symmetric sine-like wave path centered on yCenter.
+          Each "cycle" is 12px wide and oscillates ±waveAmp around yCenter,
+          so crests touch (yCenter - waveAmp) and valleys reach (yCenter + waveAmp). */}
+      {(() => {
+        const buildWave = (xStart: number, xEnd: number, yCenter: number) => {
+          const cycleW = 12;
+          const halfCycle = cycleW / 2;
+          let d = `M${xStart},${yCenter}`;
+          // Extend slightly past xEnd so the animateTransform translate doesn't reveal a gap
+          const extEnd = xEnd + cycleW;
+          let x = xStart;
+          let goingUp = true;
+          while (x < extEnd) {
+            const nextX = x + halfCycle;
+            const peakY = goingUp ? yCenter - waveAmp : yCenter + waveAmp;
+            const cx = x + halfCycle / 2;
+            // Quadratic curve: control point at midpoint with peak Y, end point at next baseline
+            d += ` Q${cx},${peakY} ${nextX},${yCenter}`;
+            x = nextX;
+            goingUp = !goingUp;
+          }
+          return d;
+        };
 
-      {/* Horizontal wave on top of RIGHT side surface */}
-      {rightWidth > 12 && (() => {
-        const segCount = Math.max(1, Math.floor((rightWidth - 4) / 8));
-        const wavePath = `M${dividerX + 2},${surfaceY} q4,-1.5 8,0` +
-          " t8,0".repeat(Math.max(0, segCount - 1));
         return (
-          <path
-            d={wavePath}
-            fill="none"
-            stroke="#6ee7b7"
-            strokeWidth={0.7}
-            opacity={0.6}
-          >
-            <animateTransform
-              attributeName="transform"
-              type="translate"
-              values="0,0; -8,0; 0,0"
-              dur="3.6s"
-              repeatCount="indefinite"
-            />
-          </path>
+          <>
+            {/* LEFT side wave */}
+            {leftWidth > 12 && (
+              <path
+                d={buildWave(poolX + padding, poolX + padding + leftWidth, surfaceY)}
+                fill="none"
+                stroke="#a5b4fc"
+                strokeWidth={0.8}
+                opacity={0.7}
+                strokeLinecap="round"
+                clipPath={`path('M${poolX + padding},${liquidTop} h${leftWidth} v${liquidH} h-${leftWidth} Z')`}
+              >
+                <animateTransform
+                  attributeName="transform"
+                  type="translate"
+                  values="0,0; -12,0; 0,0"
+                  dur="3s"
+                  repeatCount="indefinite"
+                />
+              </path>
+            )}
+            {/* RIGHT side wave */}
+            {rightWidth > 12 && (
+              <path
+                d={buildWave(dividerX, dividerX + rightWidth, surfaceY)}
+                fill="none"
+                stroke="#6ee7b7"
+                strokeWidth={0.8}
+                opacity={0.7}
+                strokeLinecap="round"
+                clipPath={`path('M${dividerX},${liquidTop} h${rightWidth} v${liquidH} h-${rightWidth} Z')`}
+              >
+                <animateTransform
+                  attributeName="transform"
+                  type="translate"
+                  values="0,0; -12,0; 0,0"
+                  dur="3.6s"
+                  repeatCount="indefinite"
+                />
+              </path>
+            )}
+          </>
         );
       })()}
 
@@ -856,6 +885,16 @@ export function CrossChainFlowViz({
   const localWidth = (splitPercent / 100) * 3 + 0.5;
   const remoteWidth = ((100 - splitPercent) / 100) * 3 + 0.5;
 
+  // Pool sizes scale with relative liquidity. Bigger pool = full size (1.0),
+  // smaller pool = sqrt of the ratio so the difference is visible but not extreme.
+  const l1Liq = l1ReserveA ? parseFloat(l1ReserveA) : 0;
+  const l2Liq = l2ReserveA ? parseFloat(l2ReserveA) : 0;
+  const maxLiq = Math.max(l1Liq, l2Liq, 1);
+  // Use sqrt to soften the visual difference (a 2x liquidity ratio → ~1.41x size).
+  // Floor at 0.55 so even tiny pools stay readable.
+  const l1Scale = Math.max(0.55, Math.sqrt(l1Liq / maxLiq) || 0.55);
+  const l2Scale = Math.max(0.55, Math.sqrt(l2Liq / maxLiq) || 0.55);
+
   // Determine which nodes are active based on phase
   const activeNodes = useMemo(() => {
     const set = new Set<string>();
@@ -1035,6 +1074,7 @@ export function CrossChainFlowViz({
           reserveB={l1ReserveB}
           chain="l1"
           active={vizPhase >= 2 && vizPhase <= 4}
+          scale={l1Scale}
         />
         <LiquidPool
           x={600}
@@ -1043,6 +1083,7 @@ export function CrossChainFlowViz({
           reserveB={l2ReserveB}
           chain="l2"
           active={vizPhase >= 5 && vizPhase <= 6}
+          scale={l2Scale}
         />
 
         {/* ══════════════ Layer 4: Bridge Portals ══════════════ */}
