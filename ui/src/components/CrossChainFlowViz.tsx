@@ -535,7 +535,6 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }
   const ratio = Math.max(0.12, Math.min(0.92, fillRatio));
   const liquidH = innerH * ratio;
   const liquidTop = poolY + padding + (innerH - liquidH);
-  const liquidBottom = poolY + padding + innerH;
 
   const borderColor = chain === "l1"
     ? (active ? "rgba(99,102,241,0.6)" : "rgba(99,102,241,0.25)")
@@ -590,12 +589,12 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }
         opacity={0.38}
       />
 
-      {/* Vertical divider line — only spans the liquid portion */}
+      {/* Vertical divider line — spans the FULL container height (top to bottom) */}
       <line
         x1={dividerX}
-        y1={liquidTop}
+        y1={poolY + padding}
         x2={dividerX}
-        y2={liquidBottom}
+        y2={poolY + poolH - padding}
         stroke={chain === "l1" ? "rgba(129,140,248,0.7)" : "rgba(52,211,153,0.7)"}
         strokeWidth={1}
         opacity={0.8}
