@@ -160,74 +160,14 @@ function SvgDefs() {
   );
 }
 
-/* ── Particle Stream ── */
-
-interface ParticleStreamProps {
-  pathData: string;
-  color: string;
-  active: boolean;
-  count?: number;
-  speed?: number;
-  particleSize?: "small" | "normal" | "large";
-}
-
-/* Size presets: plasma radius, halo radius, core radius */
+/* ── Particle size presets ──
+ * plasma radius, halo radius, core radius
+ * Used by JourneyParticle for the 3-layer particle rendering. */
 const PARTICLE_SIZES = {
   small:  { plasma: 5,  halo: 3, core: 1   },
   normal: { plasma: 7,  halo: 4, core: 1.5 },
   large:  { plasma: 10, halo: 6, core: 2.5 },
 } as const;
-
-function ParticleStream({
-  pathData,
-  color,
-  active,
-  count = 5,
-  speed = 1.0,
-  particleSize = "normal",
-}: ParticleStreamProps) {
-  if (!active) return null;
-  const sz = PARTICLE_SIZES[particleSize];
-  return (
-    <g>
-      {Array.from({ length: count }, (_, i) => {
-        const dur = `${speed + i * 0.15}s`;
-        const begin = `${i * 0.18}s`;
-        return (
-          <g key={i}>
-            {/* Plasma tail — outermost, soft, displaced */}
-            <circle r={sz.plasma} fill={color} opacity={0.12} filter="url(#plasma)">
-              <animateMotion
-                dur={dur}
-                begin={begin}
-                repeatCount="indefinite"
-                path={pathData}
-              />
-            </circle>
-            {/* Color halo — mid-layer glow */}
-            <circle r={sz.halo} fill={color} opacity={0.35} filter="url(#glow)">
-              <animateMotion
-                dur={dur}
-                begin={begin}
-                repeatCount="indefinite"
-                path={pathData}
-              />
-            </circle>
-            {/* White core — crisp center */}
-            <circle r={sz.core} fill={COL.white} opacity={0.9}>
-              <animateMotion
-                dur={dur}
-                begin={begin}
-                repeatCount="indefinite"
-                path={pathData}
-              />
-            </circle>
-          </g>
-        );
-      })}
-    </g>
-  );
-}
 
 /* ── Ambient idle particles — slow drifting specks ── */
 
@@ -246,6 +186,219 @@ function AmbientParticles() {
       <circle r={3} fill={COL.cyan} opacity={0.3} filter="url(#glow)">
         <animateMotion dur="12s" repeatCount="indefinite" path="M250,190 C450,185 650,195 800,190" />
       </circle>
+    </g>
+  );
+}
+
+/* ── Journey Particle ── */
+
+/**
+ * A particle that travels along a single path segment, with a label following it.
+ *
+ * Drives off a master cycle: visible only between [beginOffset, beginOffset+duration]
+ * within each cycle. The animation is restarted by the master cycle's `begin` event,
+ * so the whole sequence loops smoothly forever.
+ */
+interface JourneyParticleProps {
+  path: string;
+  duration: number;
+  beginOffset: number;
+  color: string;
+  label: string;
+  labelColor: string;
+  size?: "small" | "normal" | "large";
+  /** Where to put the label relative to the particle: above (-) or below (+) */
+  labelDy?: number;
+}
+
+function JourneyParticle({
+  path,
+  duration,
+  beginOffset,
+  color,
+  label,
+  labelColor,
+  size = "normal",
+  labelDy = -12,
+}: JourneyParticleProps) {
+  const sz = PARTICLE_SIZES[size];
+  // Animations are tied to the master cycle (#cycleClock). Each cycle the particle
+  // spawns at its beginOffset, animates for `duration`, then disappears.
+  const startEvent = `cycleClock.begin+${beginOffset}s`;
+  const endEvent = `cycleClock.begin+${beginOffset + duration}s`;
+  const dur = `${duration}s`;
+
+  return (
+    <g opacity={0}>
+      {/* Master visibility — show during the segment, hide at the end */}
+      <set attributeName="opacity" to="1" begin={startEvent} />
+      <set attributeName="opacity" to="0" begin={endEvent} />
+
+      {/* Plasma tail */}
+      <circle r={sz.plasma} fill={color} opacity={0.18} filter="url(#plasma)">
+        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+      </circle>
+      {/* Color halo */}
+      <circle r={sz.halo} fill={color} opacity={0.45} filter="url(#glow)">
+        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+      </circle>
+      {/* White core */}
+      <circle r={sz.core} fill={COL.white} opacity={0.95}>
+        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+      </circle>
+
+      {/* Label — follows the particle on the same path with the same timing.
+          The text uses y={labelDy} so it sits offset above/below the moving origin. */}
+      <text
+        x={0}
+        y={labelDy}
+        fontSize={9}
+        fontWeight={700}
+        fill={labelColor}
+        textAnchor="middle"
+        fontFamily="var(--mono)"
+        filter="url(#glow)"
+        style={{ paintOrder: "stroke fill" }}
+        stroke="rgba(8,10,18,0.75)"
+        strokeWidth={2.4}
+        strokeLinejoin="round"
+      >
+        {label}
+        <animateMotion dur={dur} begin={startEvent} path={path} fill="freeze" />
+      </text>
+    </g>
+  );
+}
+
+/* ── Journey path constants ──
+ *
+ * Combined SVG path strings for each leg of the cross-chain story.
+ * The remote leg is broken into multiple segments to allow per-segment
+ * label changes (WETH → wWETH → wUSDC → USDC).
+ *
+ * Cycle layout (4s total):
+ *   t=0.0 → t=1.0  Pre-split:  User → Aggregator
+ *   t=1.0 → t=4.0  Local:      Aggregator → L1 AMM → Output (3s)
+ *   t=1.0 → t=4.0  Remote:     Aggregator → Portal → L2 Exec → L2 AMM → Portal → Output (3s)
+ *
+ * Both branches end at t=4.0 (Output) so they arrive simultaneously.
+ */
+const JOURNEY_PATHS = {
+  preSplit: "M100,80 L300,80",
+  // Local leg
+  localToL1Amm: "M300,80 L560,80",
+  localToOutput: "M560,80 L820,80",
+  // Remote leg (broken into 5 short segments to support per-segment label swaps)
+  remoteAggToPortalDown: "M300,90 L300,180",
+  remotePortalToL2Exec: "M300,200 C300,240 320,270 340,290",
+  remoteL2ExecToL2Amm: "M340,290 L600,290",
+  remoteL2AmmToPortalUp: "M600,290 C700,260 760,230 790,200",
+  remotePortalToOutput: "M790,180 L820,90",
+} as const;
+
+/* ── Coordinated Journey ──
+ *
+ * Renders the full cross-chain journey: a single particle splits at the Aggregator
+ * into local and remote branches that arrive at Output simultaneously. Loops forever.
+ */
+function CoordinatedJourney() {
+  return (
+    <g>
+      {/* Master cycle clock — drives the begin events of every segment.
+          A 4s repeating animation; each cycleClock.begin event restarts the chain. */}
+      <rect x={-10} y={-10} width={1} height={1} fill="none" opacity={0}>
+        <animate
+          id="cycleClock"
+          attributeName="opacity"
+          from="0"
+          to="0"
+          dur="4s"
+          begin="0s"
+          repeatCount="indefinite"
+        />
+      </rect>
+
+      {/* ── Phase A: Pre-split (t=0 → t=1) ── */}
+      <JourneyParticle
+        path={JOURNEY_PATHS.preSplit}
+        duration={1.0}
+        beginOffset={0}
+        color={COL.gold}
+        label="WETH"
+        labelColor={COL.gold}
+        size="large"
+        labelDy={-13}
+      />
+
+      {/* ── Phase B Local: Aggregator → L1 AMM → Output (t=1 → t=4) ──
+          Two segments: WETH (1s) then USDC (2s). */}
+      <JourneyParticle
+        path={JOURNEY_PATHS.localToL1Amm}
+        duration={1.5}
+        beginOffset={1.0}
+        color={COL.gold}
+        label="WETH"
+        labelColor={COL.gold}
+        labelDy={-12}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.localToOutput}
+        duration={1.5}
+        beginOffset={2.5}
+        color={COL.blue}
+        label="USDC"
+        labelColor={COL.blue}
+        labelDy={-12}
+      />
+
+      {/* ── Phase B Remote: Aggregator → Portal → L2 Exec → L2 AMM → Portal → Output (t=1 → t=4) ──
+          Five segments totaling 3s — same total wall-clock time as the local branch
+          even though the path is much longer. The remote particle moves visually faster. */}
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteAggToPortalDown}
+        duration={0.5}
+        beginOffset={1.0}
+        color={COL.gold}
+        label="WETH"
+        labelColor={COL.gold}
+        labelDy={-10}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remotePortalToL2Exec}
+        duration={0.5}
+        beginOffset={1.5}
+        color={COL.cyan}
+        label="wWETH"
+        labelColor={COL.cyan}
+        labelDy={-10}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteL2ExecToL2Amm}
+        duration={0.6}
+        beginOffset={2.0}
+        color={COL.cyan}
+        label="wWETH"
+        labelColor={COL.cyan}
+        labelDy={14}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteL2AmmToPortalUp}
+        duration={0.7}
+        beginOffset={2.6}
+        color={COL.cyan}
+        label="wUSDC"
+        labelColor={COL.cyan}
+        labelDy={-10}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remotePortalToOutput}
+        duration={0.7}
+        beginOffset={3.3}
+        color={COL.blue}
+        label="USDC"
+        labelColor={COL.blue}
+        labelDy={-10}
+      />
     </g>
   );
 }
@@ -359,23 +512,36 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
   const a = reserveA ? parseFloat(reserveA) : 0;
   const b = reserveB ? parseFloat(reserveB) : 0;
   const total = a + b;
-  const ratioA = total > 0 ? a / total : 0.5;
-
-  // Pool inner height is 46px (50 - 4px for padding visual), liquid fills from bottom
-  const innerH = 46;
-  const liquidAHeight = ratioA * innerH;
-  const liquidBHeight = (1 - ratioA) * innerH;
+  // Vertical split: left = token A, right = token B. Width proportional to raw token COUNT.
+  // Clamp ratio so neither side disappears entirely (5% min for each).
+  const rawRatioA = total > 0 ? a / total : 0.5;
+  const ratioA = Math.min(0.95, Math.max(0.05, rawRatioA));
 
   const poolX = x - 60;
   const poolY = y - 25;
   const poolW = 120;
+  const poolH = 50;
+  const padding = 2;
+  const innerW = poolW - padding * 2;
+  const innerH = poolH - padding * 2;
+
+  const leftWidth = innerW * ratioA;
+  const rightWidth = innerW * (1 - ratioA);
+  const dividerX = poolX + padding + leftWidth;
 
   const borderColor = chain === "l1"
     ? (active ? "rgba(99,102,241,0.6)" : "rgba(99,102,241,0.25)")
     : (active ? "rgba(52,211,153,0.6)" : "rgba(52,211,153,0.25)");
 
-  // Wave path for the liquid surface
-  const waveY = poolY + 2 + liquidBHeight;
+  const tokenALabel = chain === "l1" ? "WETH" : "wWETH";
+  const tokenBLabel = chain === "l1" ? "USDC" : "wUSDC";
+
+  // Visibility thresholds — hide labels on very narrow sides
+  const showLeftLabel = leftWidth >= 25;
+  const showRightLabel = rightWidth >= 25;
+
+  // Surface wave Y for each side (top of fill)
+  const surfaceY = poolY + padding + 4;
 
   return (
     <g>
@@ -384,33 +550,44 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         x={poolX}
         y={poolY}
         width={poolW}
-        height={50}
+        height={poolH}
         rx={6}
         fill="rgba(18,18,28,0.6)"
         stroke={borderColor}
         strokeWidth={active ? 1.4 : 0.8}
       />
 
-      {/* Token B fill — top portion (gradient) */}
+      {/* Left side — Token A fill (full height, width = leftWidth) */}
       <rect
-        x={poolX + 2}
-        y={poolY + 2}
-        width={poolW - 4}
-        height={liquidBHeight}
-        rx={4}
-        fill="url(#liquidB)"
-        opacity={0.2}
+        x={poolX + padding}
+        y={poolY + padding}
+        width={leftWidth}
+        height={innerH}
+        rx={3}
+        fill="url(#liquidA)"
+        opacity={0.32}
       />
 
-      {/* Token A fill — bottom portion (gradient) */}
+      {/* Right side — Token B fill (full height, width = rightWidth) */}
       <rect
-        x={poolX + 2}
-        y={poolY + 2 + liquidBHeight}
-        width={poolW - 4}
-        height={liquidAHeight}
-        rx={4}
-        fill="url(#liquidA)"
-        opacity={0.25}
+        x={dividerX}
+        y={poolY + padding}
+        width={rightWidth}
+        height={innerH}
+        rx={3}
+        fill="url(#liquidB)"
+        opacity={0.32}
+      />
+
+      {/* Vertical divider line at the boundary */}
+      <line
+        x1={dividerX}
+        y1={poolY + padding}
+        x2={dividerX}
+        y2={poolY + poolH - padding}
+        stroke={chain === "l1" ? "rgba(129,140,248,0.7)" : "rgba(52,211,153,0.7)"}
+        strokeWidth={1}
+        opacity={0.8}
       />
 
       {/* Glass reflection — subtle white gradient at top */}
@@ -421,84 +598,134 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         height={4}
         rx={2}
         fill="white"
-        opacity={0.06}
+        opacity={0.07}
       />
 
-      {/* Animated wave surface at the A/B boundary */}
-      <g opacity={0.5}>
-        <path
-          d={`M${poolX + 2},${waveY} q15,-3 30,0 t30,0 t30,0 t30,0`}
-          fill="none"
-          stroke="#818cf8"
-          strokeWidth={0.8}
-          opacity={0.6}
-        >
-          <animateTransform
-            attributeName="transform"
-            type="translate"
-            values="0,0; -15,0; 0,0"
-            dur="3s"
-            repeatCount="indefinite"
-          />
-        </path>
-        <path
-          d={`M${poolX + 2},${waveY + 1} q12,2 24,0 t24,0 t24,0 t24,0 t24,0`}
-          fill="none"
-          stroke="#34d399"
-          strokeWidth={0.5}
-          opacity={0.4}
-        >
-          <animateTransform
-            attributeName="transform"
-            type="translate"
-            values="0,0; -10,0; 0,0"
-            dur="4.5s"
-            repeatCount="indefinite"
-          />
-        </path>
-      </g>
+      {/* Horizontal wave on top of LEFT side surface */}
+      {leftWidth > 12 && (() => {
+        const segCount = Math.max(1, Math.floor((leftWidth - 4) / 8));
+        const wavePath = `M${poolX + padding + 2},${surfaceY} q4,-1.5 8,0` +
+          " t8,0".repeat(Math.max(0, segCount - 1));
+        return (
+          <path
+            d={wavePath}
+            fill="none"
+            stroke="#a5b4fc"
+            strokeWidth={0.7}
+            opacity={0.6}
+          >
+            <animateTransform
+              attributeName="transform"
+              type="translate"
+              values="0,0; -8,0; 0,0"
+              dur="3s"
+              repeatCount="indefinite"
+            />
+          </path>
+        );
+      })()}
 
-      {/* Reserve labels */}
-      {reserveA !== null && (
-        <text
-          x={poolX + 8}
-          y={y + 18}
-          fill="#818cf8"
-          fontSize={7}
-          fontFamily="var(--mono)"
-          opacity={0.7}
-        >
-          {chain === "l1" ? "WETH" : "wWETH"}: {formatReserve(reserveA)}
-        </text>
+      {/* Horizontal wave on top of RIGHT side surface */}
+      {rightWidth > 12 && (() => {
+        const segCount = Math.max(1, Math.floor((rightWidth - 4) / 8));
+        const wavePath = `M${dividerX + 2},${surfaceY} q4,-1.5 8,0` +
+          " t8,0".repeat(Math.max(0, segCount - 1));
+        return (
+          <path
+            d={wavePath}
+            fill="none"
+            stroke="#6ee7b7"
+            strokeWidth={0.7}
+            opacity={0.6}
+          >
+            <animateTransform
+              attributeName="transform"
+              type="translate"
+              values="0,0; -8,0; 0,0"
+              dur="3.6s"
+              repeatCount="indefinite"
+            />
+          </path>
+        );
+      })()}
+
+      {/* Left token label + amount (centered in left half) */}
+      {showLeftLabel && (
+        <>
+          <text
+            x={poolX + padding + leftWidth / 2}
+            y={poolY + 22}
+            textAnchor="middle"
+            fill="#c7d2fe"
+            fontSize={8}
+            fontWeight={700}
+            fontFamily="var(--mono)"
+            opacity={0.95}
+          >
+            {tokenALabel}
+          </text>
+          {reserveA !== null && (
+            <text
+              x={poolX + padding + leftWidth / 2}
+              y={poolY + 35}
+              textAnchor="middle"
+              fill="#a5b4fc"
+              fontSize={7}
+              fontFamily="var(--mono)"
+              opacity={0.75}
+            >
+              {formatReserve(reserveA)}
+            </text>
+          )}
+        </>
       )}
-      {reserveB !== null && (
-        <text
-          x={x + 8}
-          y={y + 18}
-          fill="#34d399"
-          fontSize={7}
-          fontFamily="var(--mono)"
-          opacity={0.7}
-        >
-          {chain === "l1" ? "USDC" : "wUSDC"}: {formatReserve(reserveB)}
-        </text>
+
+      {/* Right token label + amount (centered in right half) */}
+      {showRightLabel && (
+        <>
+          <text
+            x={dividerX + rightWidth / 2}
+            y={poolY + 22}
+            textAnchor="middle"
+            fill="#a7f3d0"
+            fontSize={8}
+            fontWeight={700}
+            fontFamily="var(--mono)"
+            opacity={0.95}
+          >
+            {tokenBLabel}
+          </text>
+          {reserveB !== null && (
+            <text
+              x={dividerX + rightWidth / 2}
+              y={poolY + 35}
+              textAnchor="middle"
+              fill="#6ee7b7"
+              fontSize={7}
+              fontFamily="var(--mono)"
+              opacity={0.75}
+            >
+              {formatReserve(reserveB)}
+            </text>
+          )}
+        </>
       )}
 
       {/* Shimmer overlay when active */}
       {active && (
         <rect
-          x={poolX + 2}
-          y={poolY + 2}
-          width={poolW - 4}
-          height={46}
+          x={poolX + padding}
+          y={poolY + padding}
+          width={innerW}
+          height={innerH}
           rx={4}
           fill="none"
-          stroke={chain === "l1" ? "rgba(99,102,241,0.3)" : "rgba(52,211,153,0.3)"}
-          strokeWidth={0.5}
+          stroke={chain === "l1" ? "rgba(99,102,241,0.4)" : "rgba(52,211,153,0.4)"}
+          strokeWidth={0.6}
         >
           <animate
             attributeName="opacity"
-            values="0.3;0.7;0.3"
+            values="0.3;0.8;0.3"
             dur="2s"
             repeatCount="indefinite"
           />
@@ -818,92 +1045,10 @@ export function CrossChainFlowViz({
 
         {/* ══════════════ Layer 5: Particles ══════════════ */}
 
-        {/* Pre-split: User -> Aggregator (large gold particles) */}
-        <ParticleStream
-          pathData={PATHS.userToAgg}
-          color={COL.gold}
-          active={vizPhase >= 1 && !isComplete}
-          speed={0.6}
-          count={3}
-          particleSize="large"
-        />
-
-        {/* Post-split LOCAL: Aggregator -> L1 AMM (smaller gold, proportional) */}
-        <ParticleStream
-          pathData={PATHS.aggToL1Amm}
-          color={COL.gold}
-          active={vizPhase >= 2 && !isComplete}
-          speed={0.8}
-          count={Math.max(2, Math.round(splitPercent / 25))}
-          particleSize="small"
-        />
-
-        {/* Post-split REMOTE: Aggregator -> Portal (smaller gold) */}
-        <ParticleStream
-          pathData={PATHS.aggToPortalDown}
-          color={COL.gold}
-          active={vizPhase >= 3 && !isComplete}
-          speed={0.7}
-          count={Math.max(2, Math.round((100 - splitPercent) / 25))}
-          particleSize="small"
-        />
-        {/* Portal crossing particles -- cyan during bridge (small) */}
-        <ParticleStream
-          pathData={PATHS.portalToL2Exec}
-          color={portalDownActive ? COL.cyan : COL.gold}
-          active={vizPhase >= 3 && !isComplete}
-          speed={0.9}
-          count={4}
-          particleSize="small"
-        />
-
-        {/* L1 output: L1 AMM -> Output (small blue) */}
-        <ParticleStream
-          pathData={PATHS.l1AmmToOutput}
-          color={COL.blue}
-          active={vizPhase >= 4 && !isComplete}
-          speed={0.8}
-          count={3}
-          particleSize="small"
-        />
-
-        {/* Phase 5: L2 Executor -> L2 AMM (color transition, small) */}
-        <ParticleStream
-          pathData={PATHS.l2ExecToL2Amm}
-          color={COL.gold}
-          active={vizPhase >= 5 && !isComplete}
-          speed={0.8}
-          count={3}
-          particleSize="small"
-        />
-        {/* Overlaid blue particles for transition effect */}
-        <ParticleStream
-          pathData={PATHS.l2ExecToL2Amm}
-          color={COL.blue}
-          active={vizPhase >= 5 && !isComplete}
-          speed={1.1}
-          count={2}
-          particleSize="small"
-        />
-
-        {/* L2 output: L2 AMM -> Portal (up) (small blue) */}
-        <ParticleStream
-          pathData={PATHS.l2AmmToPortalUp}
-          color={portalUpActive ? COL.cyan : COL.blue}
-          active={vizPhase >= 6 && !isComplete}
-          speed={1.0}
-          count={4}
-          particleSize="small"
-        />
-        {/* L2 output: Portal -> Output (small blue) */}
-        <ParticleStream
-          pathData={PATHS.portalToOutput}
-          color={COL.blue}
-          active={vizPhase >= 6 && !isComplete}
-          speed={0.7}
-          count={3}
-          particleSize="small"
-        />
+        {/* Coordinated journey — single particle splits at Aggregator into local
+            and remote branches. Both branches arrive at Output simultaneously.
+            Loops forever, independent of vizPhase. */}
+        <CoordinatedJourney />
 
         {/* Merge pulse at Output node when both streams converge */}
         {vizPhase >= 6 && !isComplete && (
