@@ -58,6 +58,8 @@ export interface AggregatorState {
   l1GasUsed: string | null;
   l2BlockBefore: number | null;
   l2BlockAfter: number | null;
+  l2BlockNumber: number | null;
+  l2TxHashes: string[];
   l1Done: boolean;
   l2Done: boolean;
   // Results
@@ -105,6 +107,8 @@ const INITIAL_STATE: AggregatorState = {
   l1GasUsed: null,
   l2BlockBefore: null,
   l2BlockAfter: null,
+  l2BlockNumber: null,
+  l2TxHashes: [],
   l1Done: false,
   l2Done: false,
   localOutput: null,
@@ -314,18 +318,37 @@ export function useAggregator(
         const wethRaw = results[8] ? decodeUint256Result(results[8] as string) : null;
         const usdcRaw = results[9] ? decodeUint256Result(results[9] as string) : null;
 
+        // Quote handling at extremes — when local or remote amount is 0
+        // (slider at 0%/100% or empty input), we MUST set the corresponding
+        // quote to "0" rather than leaving the stale previous value behind.
+        const l1QuoteFinal =
+          l1QuoteRaw !== null
+            ? formatTokenAmount(l1QuoteRaw, USDC_DECIMALS)
+            : localWei === 0n
+              ? "0"
+              : null;
+        const l2QuoteFinal =
+          l2QuoteRaw !== null
+            ? formatTokenAmount(l2QuoteRaw, USDC_DECIMALS)
+            : remoteWei === 0n
+              ? "0"
+              : null;
+        const singleFinal =
+          singleQuoteRaw !== null
+            ? formatTokenAmount(singleQuoteRaw, USDC_DECIMALS)
+            : totalWei === 0n
+              ? "0"
+              : null;
+
         setState((prev) => ({
           ...prev,
           l1ReserveA: l1ResA !== null ? formatTokenAmount(l1ResA, WETH_DECIMALS) : prev.l1ReserveA,
           l1ReserveB: l1ResB !== null ? formatTokenAmount(l1ResB, USDC_DECIMALS) : prev.l1ReserveB,
           l2ReserveA: l2ResA !== null ? formatTokenAmount(l2ResA, WETH_DECIMALS) : prev.l2ReserveA,
           l2ReserveB: l2ResB !== null ? formatTokenAmount(l2ResB, USDC_DECIMALS) : prev.l2ReserveB,
-          l1Quote: l1QuoteRaw !== null ? formatTokenAmount(l1QuoteRaw, USDC_DECIMALS) : prev.l1Quote,
-          l2Quote: l2QuoteRaw !== null ? formatTokenAmount(l2QuoteRaw, USDC_DECIMALS) : prev.l2Quote,
-          singlePoolQuote:
-            singleQuoteRaw !== null
-              ? formatTokenAmount(singleQuoteRaw, USDC_DECIMALS)
-              : prev.singlePoolQuote,
+          l1Quote: l1QuoteFinal !== null ? l1QuoteFinal : prev.l1Quote,
+          l2Quote: l2QuoteFinal !== null ? l2QuoteFinal : prev.l2Quote,
+          singlePoolQuote: singleFinal !== null ? singleFinal : prev.singlePoolQuote,
           ethBalance: ethRaw !== null ? formatTokenAmount(ethRaw, WETH_DECIMALS) : prev.ethBalance,
           wethBalance:
             wethRaw !== null ? formatTokenAmount(wethRaw, WETH_DECIMALS) : prev.wethBalance,
@@ -466,6 +489,16 @@ export function useAggregator(
       const totalWei = parseTokenAmount(totalAmount, WETH_DECIMALS);
       const localWei = (totalWei * BigInt(splitPercent)) / 100n;
 
+      // Snapshot the predicted quotes BEFORE the swap. The polling loop
+      // updates `state.l1Quote` / `state.l2Quote` / `state.singlePoolQuote`
+      // continuously based on current AMM reserves, so by the time we read
+      // them in the verify phase the reserves have already changed. We need
+      // the BEFORE values for the improvement calculation and for the
+      // L1/L2 output rows in the results card.
+      const l1QuoteSnapshot = stateRef.current.l1Quote;
+      const l2QuoteSnapshot = stateRef.current.l2Quote;
+      const singlePoolSnapshot = stateRef.current.singlePoolQuote;
+
       // Reset execution state
       setState((s) => ({
         ...s,
@@ -477,6 +510,8 @@ export function useAggregator(
         l1GasUsed: null,
         l2BlockBefore: null,
         l2BlockAfter: null,
+        l2BlockNumber: null,
+        l2TxHashes: [],
         l1Done: false,
         l2Done: false,
         localOutput: null,
@@ -713,15 +748,14 @@ export function useAggregator(
       const totalOutputStr = formatTokenAmount(totalOutput > 0n ? totalOutput : 0n, USDC_DECIMALS);
       const usdcAfterStr = formatTokenAmount(usdcAfter, USDC_DECIMALS);
 
-      // Compute improvement vs single pool
-      const singleQuoteStr = stateRef.current.singlePoolQuote;
+      // Use the BEFORE snapshot for the improvement calculation, not the
+      // current polled value (which was computed against post-swap reserves).
       let improvementStr: string | null = null;
-      if (singleQuoteStr && totalOutput > 0n) {
+      if (singlePoolSnapshot && totalOutput > 0n) {
         try {
-          const singleQuoteWei = parseTokenAmount(singleQuoteStr, USDC_DECIMALS);
+          const singleQuoteWei = parseTokenAmount(singlePoolSnapshot, USDC_DECIMALS);
           if (singleQuoteWei > 0n) {
             const diff = totalOutput - singleQuoteWei;
-            // Multiply by 100_000 for 3 decimal places, then divide
             const pctX1000 = (diff * 100000n) / singleQuoteWei;
             const pctFloat = Number(pctX1000) / 1000;
             const sign = pctFloat >= 0 ? "+" : "";
@@ -732,6 +766,48 @@ export function useAggregator(
         }
       }
 
+      // Fetch the SINGLE L2 cross-chain delivery tx and its block. The
+      // builder posts an `executeIncomingCrossChainCall` (selector 0x0f64c845)
+      // tx targeting the CCM that delivers our cross-chain calls. We scan
+      // L2 blocks in [l2BlockBefore+1, l2BlockAfter] for the first such tx.
+      const EXEC_INCOMING_SELECTOR = "0x0f64c845";
+      const ccmL2 = config.ccmL2Address.toLowerCase();
+      let l2TxHash: string | null = null;
+      let l2BlockHit: number | null = null;
+      try {
+        const before = stateRef.current.l2BlockBefore;
+        const after = stateRef.current.l2BlockAfter;
+        if (before !== null && after !== null && after > before && ccmL2) {
+          for (let bn = before + 1; bn <= after && !l2TxHash; bn++) {
+            try {
+              const block = (await rpcCall(config.l2Rpc, "eth_getBlockByNumber", [
+                "0x" + bn.toString(16),
+                true,
+              ])) as {
+                transactions?: Array<{ hash: string; to: string | null; input: string }>;
+              } | null;
+              if (block?.transactions) {
+                for (const tx of block.transactions) {
+                  if (
+                    tx.to?.toLowerCase() === ccmL2 &&
+                    tx.input?.toLowerCase().startsWith(EXEC_INCOMING_SELECTOR)
+                  ) {
+                    l2TxHash = tx.hash;
+                    l2BlockHit = bn;
+                    break;
+                  }
+                }
+              }
+            } catch {
+              /* skip block on error */
+            }
+          }
+        }
+      } catch {
+        /* non-critical */
+      }
+      const l2TxHashes = l2TxHash ? [l2TxHash] : [];
+
       const endTime = Date.now();
 
       fastForwardViz(8);
@@ -739,9 +815,16 @@ export function useAggregator(
       setState((s) => ({
         ...s,
         phase: "complete",
+        // Local/remote outputs are the BEFORE snapshots (the predicted quotes).
+        // For an atomic single-tx swap with no concurrent activity these are
+        // exactly what the AMMs delivered.
+        localOutput: l1QuoteSnapshot,
+        remoteOutput: l2QuoteSnapshot,
         totalOutput: totalOutputStr,
         usdcBalanceAfter: usdcAfterStr,
         improvement: improvementStr,
+        l2TxHashes,
+        l2BlockNumber: l2BlockHit,
         endTime,
       }));
 

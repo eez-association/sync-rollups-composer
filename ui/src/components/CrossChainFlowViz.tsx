@@ -23,15 +23,22 @@ interface CrossChainFlowVizProps {
 
 /* ── Path data ── */
 
+// Box edges with the new 160x64 size:
+//   User    [20-180,  48-112]
+//   Agg     [220-380, 48-112]
+//   L1 AMM  [480-640, 48-112]
+//   Output  [740-900, 48-112]
+//   L2 Exec [260-420, 258-322]
+//   L2 AMM  [520-680, 258-322]
 const PATHS = {
-  userToAgg: "M160,80 L240,80",
-  aggToL1Amm: "M360,80 L500,80",
-  l1AmmToOutput: "M620,80 L760,80",
-  aggToPortalDown: "M300,105 C300,150 300,170 300,190",
-  portalToL2Exec: "M300,210 C300,240 320,270 340,290",
-  l2ExecToL2Amm: "M400,290 L540,290",
-  l2AmmToPortalUp: "M660,290 C700,260 760,230 790,210",
-  portalToOutput: "M790,190 C790,150 810,120 820,105",
+  userToAgg: "M180,80 L220,80",
+  aggToL1Amm: "M380,80 L480,80",
+  l1AmmToOutput: "M640,80 L740,80",
+  aggToPortalDown: "M300,112 C300,150 300,170 300,190",
+  portalToL2Exec: "M300,210 C300,240 320,250 340,258",
+  l2ExecToL2Amm: "M420,290 L520,290",
+  l2AmmToPortalUp: "M680,290 C700,270 770,235 790,210",
+  portalToOutput: "M790,190 C790,150 810,125 820,112",
 } as const;
 
 /* ── Colours ── */
@@ -160,74 +167,14 @@ function SvgDefs() {
   );
 }
 
-/* ── Particle Stream ── */
-
-interface ParticleStreamProps {
-  pathData: string;
-  color: string;
-  active: boolean;
-  count?: number;
-  speed?: number;
-  particleSize?: "small" | "normal" | "large";
-}
-
-/* Size presets: plasma radius, halo radius, core radius */
+/* ── Particle size presets ──
+ * plasma radius, halo radius, core radius
+ * Used by JourneyParticle for the 3-layer particle rendering. */
 const PARTICLE_SIZES = {
   small:  { plasma: 5,  halo: 3, core: 1   },
   normal: { plasma: 7,  halo: 4, core: 1.5 },
   large:  { plasma: 10, halo: 6, core: 2.5 },
 } as const;
-
-function ParticleStream({
-  pathData,
-  color,
-  active,
-  count = 5,
-  speed = 1.0,
-  particleSize = "normal",
-}: ParticleStreamProps) {
-  if (!active) return null;
-  const sz = PARTICLE_SIZES[particleSize];
-  return (
-    <g>
-      {Array.from({ length: count }, (_, i) => {
-        const dur = `${speed + i * 0.15}s`;
-        const begin = `${i * 0.18}s`;
-        return (
-          <g key={i}>
-            {/* Plasma tail — outermost, soft, displaced */}
-            <circle r={sz.plasma} fill={color} opacity={0.12} filter="url(#plasma)">
-              <animateMotion
-                dur={dur}
-                begin={begin}
-                repeatCount="indefinite"
-                path={pathData}
-              />
-            </circle>
-            {/* Color halo — mid-layer glow */}
-            <circle r={sz.halo} fill={color} opacity={0.35} filter="url(#glow)">
-              <animateMotion
-                dur={dur}
-                begin={begin}
-                repeatCount="indefinite"
-                path={pathData}
-              />
-            </circle>
-            {/* White core — crisp center */}
-            <circle r={sz.core} fill={COL.white} opacity={0.9}>
-              <animateMotion
-                dur={dur}
-                begin={begin}
-                repeatCount="indefinite"
-                path={pathData}
-              />
-            </circle>
-          </g>
-        );
-      })}
-    </g>
-  );
-}
 
 /* ── Ambient idle particles — slow drifting specks ── */
 
@@ -246,6 +193,220 @@ function AmbientParticles() {
       <circle r={3} fill={COL.cyan} opacity={0.3} filter="url(#glow)">
         <animateMotion dur="12s" repeatCount="indefinite" path="M250,190 C450,185 650,195 800,190" />
       </circle>
+    </g>
+  );
+}
+
+/* ── Journey Particle ── */
+
+/**
+ * A particle that travels along a single path segment, with a label following it.
+ *
+ * Drives off a master cycle: visible only between [beginOffset, beginOffset+duration]
+ * within each cycle. The animation is restarted by the master cycle's `begin` event,
+ * so the whole sequence loops smoothly forever.
+ */
+interface JourneyParticleProps {
+  path: string;
+  duration: number;
+  beginOffset: number;
+  color: string;
+  label: string;
+  labelColor: string;
+  size?: "small" | "normal" | "large";
+  /** Where to put the label relative to the particle: above (-) or below (+) */
+  labelDy?: number;
+}
+
+// Cycle period in seconds — ALL particles loop in lock-step at this interval.
+// The journey runs from t=0 to t=10, then there's a 2s pause before the next
+// cycle starts at t=12.
+const CYCLE_PERIOD = 12;
+
+// Build a 5-cycle list of begin times so SMIL re-fires reliably even when
+// the browser throttles the cycleClock animation. Indefinite repetition is
+// then driven by the explicit list, not by referencing a single sync source.
+function buildBeginTimes(offset: number, count = 50): string {
+  return Array.from({ length: count }, (_, i) => `${offset + i * CYCLE_PERIOD}s`).join(";");
+}
+
+function JourneyParticle({
+  path,
+  duration,
+  beginOffset,
+  color,
+  label,
+  labelColor,
+  size = "normal",
+  labelDy = -12,
+}: JourneyParticleProps) {
+  const sz = PARTICLE_SIZES[size];
+  // Each segment fires at offset, offset+CYCLE, offset+2*CYCLE, ... for many cycles.
+  // No reliance on cycleClock — direct begin times survive tab throttling.
+  const beginList = buildBeginTimes(beginOffset);
+  const endList = buildBeginTimes(beginOffset + duration);
+  const dur = `${duration}s`;
+
+  return (
+    <g opacity={0}>
+      {/* Master visibility — show during the segment, hide at the end */}
+      <set attributeName="opacity" to="1" begin={beginList} />
+      <set attributeName="opacity" to="0" begin={endList} />
+
+      {/* Plasma tail */}
+      <circle r={sz.plasma} fill={color} opacity={0.18} filter="url(#plasma)">
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
+      </circle>
+      {/* Color halo */}
+      <circle r={sz.halo} fill={color} opacity={0.45} filter="url(#glow)">
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
+      </circle>
+      {/* White core */}
+      <circle r={sz.core} fill={COL.white} opacity={0.95}>
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
+      </circle>
+
+      {/* Label — follows the particle. Thin & elegant: no stroke, no filter.
+          Plain colored text relies on its own brightness against the dark
+          lane backgrounds. */}
+      <text
+        x={0}
+        y={labelDy}
+        fontSize={9}
+        fontWeight={500}
+        fill={labelColor}
+        textAnchor="middle"
+        fontFamily="var(--sans)"
+        letterSpacing="0.05em"
+        opacity={0.95}
+      >
+        {label}
+        <animateMotion dur={dur} begin={beginList} path={path} fill="freeze" />
+      </text>
+    </g>
+  );
+}
+
+/* ── Journey path constants ──
+ *
+ * Combined SVG path strings for each leg of the cross-chain story.
+ * The remote leg is broken into multiple segments to allow per-segment
+ * label changes (WETH → wWETH → wUSDC → USDC).
+ *
+ * Cycle layout (4s total):
+ *   t=0.0 → t=1.0  Pre-split:  User → Aggregator
+ *   t=1.0 → t=4.0  Local:      Aggregator → L1 AMM → Output (3s)
+ *   t=1.0 → t=4.0  Remote:     Aggregator → Portal → L2 Exec → L2 AMM → Portal → Output (3s)
+ *
+ * Both branches end at t=4.0 (Output) so they arrive simultaneously.
+ */
+const JOURNEY_PATHS = {
+  preSplit: "M100,80 L300,80",
+  // Local leg — through L1 AMM center
+  localToL1Amm: "M300,80 L560,80",
+  localToOutput: "M560,80 L820,80",
+  // Remote leg — exit Aggregator from bottom (y=112), enter L2 Executor top (y=258)
+  remoteAggToPortalDown: "M300,112 L300,180",
+  remotePortalToL2Exec: "M300,200 C300,235 320,250 340,258",
+  remoteL2ExecToL2Amm: "M340,290 L600,290",
+  remoteL2AmmToPortalUp: "M600,290 C700,265 770,235 790,200",
+  remotePortalToOutput: "M790,180 L820,112",
+} as const;
+
+/* ── Coordinated Journey ──
+ *
+ * Renders the full cross-chain journey: a single particle splits at the Aggregator
+ * into local and remote branches that arrive at Output simultaneously. Loops forever.
+ */
+function CoordinatedJourney() {
+  // 10-second cycle (CYCLE_PERIOD). Layout:
+  //   t=0   → 2.4   Pre-split: User → Aggregator
+  //   t=2.4 → 10.0  Local:  Agg → L1 AMM (3.8s WETH) → Output (3.8s USDC)
+  //   t=2.4 → 10.0  Remote: Agg → Portal Down → L2 Exec → L2 AMM → Portal Up → Output
+  //
+  // No master cycleClock — each segment has its own explicit list of begin times
+  // (built by buildBeginTimes), so the loop survives browser tab throttling.
+  return (
+    <g>
+      {/* ── Phase A: Pre-split (t=0 → 2.4) ── */}
+      <JourneyParticle
+        path={JOURNEY_PATHS.preSplit}
+        duration={2.4}
+        beginOffset={0}
+        color={COL.gold}
+        label="WETH"
+        labelColor={COL.gold}
+        size="large"
+        labelDy={-15}
+      />
+
+      {/* ── Phase B Local: Agg → L1 AMM → Output (t=2.4 → 10.0) ── */}
+      <JourneyParticle
+        path={JOURNEY_PATHS.localToL1Amm}
+        duration={3.8}
+        beginOffset={2.4}
+        color={COL.gold}
+        label="WETH"
+        labelColor={COL.gold}
+        labelDy={-14}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.localToOutput}
+        duration={3.8}
+        beginOffset={6.2}
+        color={COL.blue}
+        label="USDC"
+        labelColor={COL.blue}
+        labelDy={-14}
+      />
+
+      {/* ── Phase B Remote: Agg → Portal → L2 Exec → L2 AMM → Portal → Output ──
+          5 segments totaling 7.6s, same wall-clock as local branch. */}
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteAggToPortalDown}
+        duration={1.3}
+        beginOffset={2.4}
+        color={COL.gold}
+        label="WETH"
+        labelColor={COL.gold}
+        labelDy={-12}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remotePortalToL2Exec}
+        duration={1.3}
+        beginOffset={3.7}
+        color={COL.cyan}
+        label="wWETH"
+        labelColor={COL.cyan}
+        labelDy={-12}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteL2ExecToL2Amm}
+        duration={1.6}
+        beginOffset={5.0}
+        color={COL.cyan}
+        label="wWETH"
+        labelColor={COL.cyan}
+        labelDy={16}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remoteL2AmmToPortalUp}
+        duration={1.7}
+        beginOffset={6.6}
+        color={COL.cyan}
+        label="wUSDC"
+        labelColor={COL.cyan}
+        labelDy={-12}
+      />
+      <JourneyParticle
+        path={JOURNEY_PATHS.remotePortalToOutput}
+        duration={1.7}
+        beginOffset={8.3}
+        color={COL.blue}
+        label="USDC"
+        labelColor={COL.blue}
+        labelDy={-12}
+      />
     </g>
   );
 }
@@ -353,29 +514,52 @@ interface LiquidPoolProps {
   reserveB: string | null;
   chain: "l1" | "l2";
   active: boolean;
+  /** Liquid fill 0.15–0.85; how full the container is (bigger = more TVL) */
+  fillRatio?: number;
 }
 
-function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps) {
-  const a = reserveA ? parseFloat(reserveA) : 0;
-  const b = reserveB ? parseFloat(reserveB) : 0;
-  const total = a + b;
-  const ratioA = total > 0 ? a / total : 0.5;
+function LiquidPool({ x, y, reserveA, reserveB, chain, active, fillRatio = 0.7 }: LiquidPoolProps) {
+  // In a Uniswap V2 AMM, both sides always have equal VALUE (that's the
+  // invariant). So the visual split is always 50/50.
+  //
+  // BOTH pool containers have the SAME size. What changes is how full each
+  // container is — the LIQUID LEVEL reflects the relative liquidity. A pool
+  // with 2x more TVL than another will be visibly more full.
+  // Pool container size matches FlowNode (160x64) so the schema is uniform
+  const poolW = 160;
+  const poolH = 64;
+  const poolX = x - poolW / 2;
+  const poolY = y - poolH / 2;
+  const padding = 3;
+  const innerW = poolW - padding * 2;
+  const innerH = poolH - padding * 2;
 
-  // Pool inner height is 46px (50 - 4px for padding visual), liquid fills from bottom
-  const innerH = 46;
-  const liquidAHeight = ratioA * innerH;
-  const liquidBHeight = (1 - ratioA) * innerH;
+  const halfW = innerW / 2;
+  const leftWidth = halfW;
+  const rightWidth = halfW;
+  const dividerX = poolX + padding + halfW;
 
-  const poolX = x - 60;
-  const poolY = y - 25;
-  const poolW = 120;
+  // Liquid level — how full this pool is (clamped to keep something visible)
+  const ratio = Math.max(0.12, Math.min(0.92, fillRatio));
+  const liquidH = innerH * ratio;
+  const liquidTop = poolY + padding + (innerH - liquidH);
 
   const borderColor = chain === "l1"
     ? (active ? "rgba(99,102,241,0.6)" : "rgba(99,102,241,0.25)")
     : (active ? "rgba(52,211,153,0.6)" : "rgba(52,211,153,0.25)");
 
-  // Wave path for the liquid surface
-  const waveY = poolY + 2 + liquidBHeight;
+  const tokenALabel = chain === "l1" ? "WETH" : "wWETH";
+  const tokenBLabel = chain === "l1" ? "USDC" : "wUSDC";
+
+  // Visibility thresholds — hide labels on very narrow sides
+  const showLeftLabel = leftWidth >= 25;
+  const showRightLabel = rightWidth >= 25;
+
+  // Surface wave Y — sit slightly INSIDE the liquid so wave crests just touch
+  // the visual top of the liquid rect. The wave path then oscillates around
+  // this Y, so half the wave is above (touching liquidTop) and half below.
+  const waveAmp = 1.5;
+  const surfaceY = liquidTop + waveAmp;
 
   return (
     <g>
@@ -384,33 +568,44 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         x={poolX}
         y={poolY}
         width={poolW}
-        height={50}
+        height={poolH}
         rx={6}
         fill="rgba(18,18,28,0.6)"
         stroke={borderColor}
         strokeWidth={active ? 1.4 : 0.8}
       />
 
-      {/* Token B fill — top portion (gradient) */}
+      {/* Left side — Token A liquid fill (70% from bottom) */}
       <rect
-        x={poolX + 2}
-        y={poolY + 2}
-        width={poolW - 4}
-        height={liquidBHeight}
-        rx={4}
-        fill="url(#liquidB)"
-        opacity={0.2}
+        x={poolX + padding}
+        y={liquidTop}
+        width={leftWidth}
+        height={liquidH}
+        rx={3}
+        fill="url(#liquidA)"
+        opacity={0.38}
       />
 
-      {/* Token A fill — bottom portion (gradient) */}
+      {/* Right side — Token B liquid fill (70% from bottom) */}
       <rect
-        x={poolX + 2}
-        y={poolY + 2 + liquidBHeight}
-        width={poolW - 4}
-        height={liquidAHeight}
-        rx={4}
-        fill="url(#liquidA)"
-        opacity={0.25}
+        x={dividerX}
+        y={liquidTop}
+        width={rightWidth}
+        height={liquidH}
+        rx={3}
+        fill="url(#liquidB)"
+        opacity={0.38}
+      />
+
+      {/* Vertical divider line — spans the FULL container height (top to bottom) */}
+      <line
+        x1={dividerX}
+        y1={poolY + padding}
+        x2={dividerX}
+        y2={poolY + poolH - padding}
+        stroke={chain === "l1" ? "rgba(129,140,248,0.7)" : "rgba(52,211,153,0.7)"}
+        strokeWidth={1}
+        opacity={0.8}
       />
 
       {/* Glass reflection — subtle white gradient at top */}
@@ -421,84 +616,156 @@ function LiquidPool({ x, y, reserveA, reserveB, chain, active }: LiquidPoolProps
         height={4}
         rx={2}
         fill="white"
-        opacity={0.06}
+        opacity={0.07}
       />
 
-      {/* Animated wave surface at the A/B boundary */}
-      <g opacity={0.5}>
-        <path
-          d={`M${poolX + 2},${waveY} q15,-3 30,0 t30,0 t30,0 t30,0`}
-          fill="none"
-          stroke="#818cf8"
-          strokeWidth={0.8}
-          opacity={0.6}
-        >
-          <animateTransform
-            attributeName="transform"
-            type="translate"
-            values="0,0; -15,0; 0,0"
-            dur="3s"
-            repeatCount="indefinite"
-          />
-        </path>
-        <path
-          d={`M${poolX + 2},${waveY + 1} q12,2 24,0 t24,0 t24,0 t24,0 t24,0`}
-          fill="none"
-          stroke="#34d399"
-          strokeWidth={0.5}
-          opacity={0.4}
-        >
-          <animateTransform
-            attributeName="transform"
-            type="translate"
-            values="0,0; -10,0; 0,0"
-            dur="4.5s"
-            repeatCount="indefinite"
-          />
-        </path>
-      </g>
+      {/* Build a symmetric sine-like wave path centered on yCenter.
+          Each "cycle" is 12px wide and oscillates ±waveAmp around yCenter,
+          so crests touch (yCenter - waveAmp) and valleys reach (yCenter + waveAmp). */}
+      {(() => {
+        const buildWave = (xStart: number, xEnd: number, yCenter: number) => {
+          const cycleW = 12;
+          const halfCycle = cycleW / 2;
+          let d = `M${xStart},${yCenter}`;
+          // Extend slightly past xEnd so the animateTransform translate doesn't reveal a gap
+          const extEnd = xEnd + cycleW;
+          let x = xStart;
+          let goingUp = true;
+          while (x < extEnd) {
+            const nextX = x + halfCycle;
+            const peakY = goingUp ? yCenter - waveAmp : yCenter + waveAmp;
+            const cx = x + halfCycle / 2;
+            // Quadratic curve: control point at midpoint with peak Y, end point at next baseline
+            d += ` Q${cx},${peakY} ${nextX},${yCenter}`;
+            x = nextX;
+            goingUp = !goingUp;
+          }
+          return d;
+        };
 
-      {/* Reserve labels */}
-      {reserveA !== null && (
-        <text
-          x={poolX + 8}
-          y={y + 18}
-          fill="#818cf8"
-          fontSize={7}
-          fontFamily="var(--mono)"
-          opacity={0.7}
-        >
-          {chain === "l1" ? "WETH" : "wWETH"}: {formatReserve(reserveA)}
-        </text>
+        return (
+          <>
+            {/* LEFT side wave */}
+            {leftWidth > 12 && (
+              <path
+                d={buildWave(poolX + padding, poolX + padding + leftWidth, surfaceY)}
+                fill="none"
+                stroke="#a5b4fc"
+                strokeWidth={0.8}
+                opacity={0.7}
+                strokeLinecap="round"
+                clipPath={`path('M${poolX + padding},${liquidTop} h${leftWidth} v${liquidH} h-${leftWidth} Z')`}
+              >
+                <animateTransform
+                  attributeName="transform"
+                  type="translate"
+                  values="0,0; -12,0; 0,0"
+                  dur="3s"
+                  repeatCount="indefinite"
+                />
+              </path>
+            )}
+            {/* RIGHT side wave */}
+            {rightWidth > 12 && (
+              <path
+                d={buildWave(dividerX, dividerX + rightWidth, surfaceY)}
+                fill="none"
+                stroke="#6ee7b7"
+                strokeWidth={0.8}
+                opacity={0.7}
+                strokeLinecap="round"
+                clipPath={`path('M${dividerX},${liquidTop} h${rightWidth} v${liquidH} h-${rightWidth} Z')`}
+              >
+                <animateTransform
+                  attributeName="transform"
+                  type="translate"
+                  values="0,0; -12,0; 0,0"
+                  dur="3.6s"
+                  repeatCount="indefinite"
+                />
+              </path>
+            )}
+          </>
+        );
+      })()}
+
+      {/* Left token label + amount (centered in left half, inside the liquid) */}
+      {showLeftLabel && (
+        <>
+          <text
+            x={poolX + padding + leftWidth / 2}
+            y={liquidTop + liquidH / 2 - 1}
+            textAnchor="middle"
+            fill="#c7d2fe"
+            fontSize={10}
+            fontWeight={700}
+            fontFamily="var(--mono)"
+            opacity={0.95}
+          >
+            {tokenALabel}
+          </text>
+          {reserveA !== null && (
+            <text
+              x={poolX + padding + leftWidth / 2}
+              y={liquidTop + liquidH / 2 + 11}
+              textAnchor="middle"
+              fill="#a5b4fc"
+              fontSize={9}
+              fontFamily="var(--mono)"
+              opacity={0.8}
+            >
+              {formatReserve(reserveA)}
+            </text>
+          )}
+        </>
       )}
-      {reserveB !== null && (
-        <text
-          x={x + 8}
-          y={y + 18}
-          fill="#34d399"
-          fontSize={7}
-          fontFamily="var(--mono)"
-          opacity={0.7}
-        >
-          {chain === "l1" ? "USDC" : "wUSDC"}: {formatReserve(reserveB)}
-        </text>
+
+      {/* Right token label + amount (centered in right half, inside the liquid) */}
+      {showRightLabel && (
+        <>
+          <text
+            x={dividerX + rightWidth / 2}
+            y={liquidTop + liquidH / 2 - 1}
+            textAnchor="middle"
+            fill="#a7f3d0"
+            fontSize={10}
+            fontWeight={700}
+            fontFamily="var(--mono)"
+            opacity={0.95}
+          >
+            {tokenBLabel}
+          </text>
+          {reserveB !== null && (
+            <text
+              x={dividerX + rightWidth / 2}
+              y={liquidTop + liquidH / 2 + 11}
+              textAnchor="middle"
+              fill="#6ee7b7"
+              fontSize={9}
+              fontFamily="var(--mono)"
+              opacity={0.8}
+            >
+              {formatReserve(reserveB)}
+            </text>
+          )}
+        </>
       )}
 
       {/* Shimmer overlay when active */}
       {active && (
         <rect
-          x={poolX + 2}
-          y={poolY + 2}
-          width={poolW - 4}
-          height={46}
+          x={poolX + padding}
+          y={poolY + padding}
+          width={innerW}
+          height={innerH}
           rx={4}
           fill="none"
-          stroke={chain === "l1" ? "rgba(99,102,241,0.3)" : "rgba(52,211,153,0.3)"}
-          strokeWidth={0.5}
+          stroke={chain === "l1" ? "rgba(99,102,241,0.4)" : "rgba(52,211,153,0.4)"}
+          strokeWidth={0.6}
         >
           <animate
             attributeName="opacity"
-            values="0.3;0.7;0.3"
+            values="0.3;0.8;0.3"
             dur="2s"
             repeatCount="indefinite"
           />
@@ -534,18 +801,21 @@ function FlowNode({ x, y, label, sublabel, chain, active }: FlowNodeProps) {
   const activeStroke = chain === "l1"
     ? "var(--accent)"
     : "var(--green)";
+  // Box dimensions enlarged so the schema fills the wider 3/4 column
+  const w = 160;
+  const h = 64;
 
   return (
     <g>
       <rect
-        x={x - 60}
-        y={y - 25}
-        width={120}
-        height={50}
-        rx={8}
+        x={x - w / 2}
+        y={y - h / 2}
+        width={w}
+        height={h}
+        rx={10}
         fill="var(--bg-card)"
         stroke={active ? activeStroke : stroke}
-        strokeWidth={active ? 1.5 : 0.8}
+        strokeWidth={active ? 1.6 : 0.9}
         filter={active ? "url(#nodeGlow)" : undefined}
       />
       <text
@@ -553,19 +823,20 @@ function FlowNode({ x, y, label, sublabel, chain, active }: FlowNodeProps) {
         y={y - 4}
         textAnchor="middle"
         fill="var(--text)"
-        fontSize={11}
-        fontWeight={600}
+        fontSize={14}
+        fontWeight={700}
         fontFamily="var(--sans)"
+        letterSpacing="-0.01em"
       >
         {label}
       </text>
       {sublabel && (
         <text
           x={x}
-          y={y + 12}
+          y={y + 14}
           textAnchor="middle"
           fill="var(--text-dim)"
-          fontSize={9}
+          fontSize={10}
           fontFamily="var(--mono)"
         >
           {sublabel}
@@ -621,6 +892,17 @@ export function CrossChainFlowViz({
   const isComplete = vizPhase === 8;
   const localWidth = (splitPercent / 100) * 3 + 0.5;
   const remoteWidth = ((100 - splitPercent) / 100) * 3 + 0.5;
+
+  // Both pool containers are the SAME size. The LIQUID LEVEL inside differs
+  // proportionally to relative liquidity — bigger TVL = more full container.
+  const l1Liq = l1ReserveA ? parseFloat(l1ReserveA) : 0;
+  const l2Liq = l2ReserveA ? parseFloat(l2ReserveA) : 0;
+  const maxLiq = Math.max(l1Liq, l2Liq, 1);
+  // The pool with the most liquidity fills to ~85% of the container.
+  // Smaller pool fills proportionally (linear ratio).
+  const MAX_FILL = 0.85;
+  const l1Fill = (l1Liq / maxLiq) * MAX_FILL;
+  const l2Fill = (l2Liq / maxLiq) * MAX_FILL;
 
   // Determine which nodes are active based on phase
   const activeNodes = useMemo(() => {
@@ -801,6 +1083,7 @@ export function CrossChainFlowViz({
           reserveB={l1ReserveB}
           chain="l1"
           active={vizPhase >= 2 && vizPhase <= 4}
+          fillRatio={l1Fill}
         />
         <LiquidPool
           x={600}
@@ -809,6 +1092,7 @@ export function CrossChainFlowViz({
           reserveB={l2ReserveB}
           chain="l2"
           active={vizPhase >= 5 && vizPhase <= 6}
+          fillRatio={l2Fill}
         />
 
         {/* ══════════════ Layer 4: Bridge Portals ══════════════ */}
@@ -816,94 +1100,7 @@ export function CrossChainFlowViz({
         <Portal x={300} y={190} active={portalDownActive} />
         <Portal x={790} y={190} active={portalUpActive} />
 
-        {/* ══════════════ Layer 5: Particles ══════════════ */}
-
-        {/* Pre-split: User -> Aggregator (large gold particles) */}
-        <ParticleStream
-          pathData={PATHS.userToAgg}
-          color={COL.gold}
-          active={vizPhase >= 1 && !isComplete}
-          speed={0.6}
-          count={3}
-          particleSize="large"
-        />
-
-        {/* Post-split LOCAL: Aggregator -> L1 AMM (smaller gold, proportional) */}
-        <ParticleStream
-          pathData={PATHS.aggToL1Amm}
-          color={COL.gold}
-          active={vizPhase >= 2 && !isComplete}
-          speed={0.8}
-          count={Math.max(2, Math.round(splitPercent / 25))}
-          particleSize="small"
-        />
-
-        {/* Post-split REMOTE: Aggregator -> Portal (smaller gold) */}
-        <ParticleStream
-          pathData={PATHS.aggToPortalDown}
-          color={COL.gold}
-          active={vizPhase >= 3 && !isComplete}
-          speed={0.7}
-          count={Math.max(2, Math.round((100 - splitPercent) / 25))}
-          particleSize="small"
-        />
-        {/* Portal crossing particles -- cyan during bridge (small) */}
-        <ParticleStream
-          pathData={PATHS.portalToL2Exec}
-          color={portalDownActive ? COL.cyan : COL.gold}
-          active={vizPhase >= 3 && !isComplete}
-          speed={0.9}
-          count={4}
-          particleSize="small"
-        />
-
-        {/* L1 output: L1 AMM -> Output (small blue) */}
-        <ParticleStream
-          pathData={PATHS.l1AmmToOutput}
-          color={COL.blue}
-          active={vizPhase >= 4 && !isComplete}
-          speed={0.8}
-          count={3}
-          particleSize="small"
-        />
-
-        {/* Phase 5: L2 Executor -> L2 AMM (color transition, small) */}
-        <ParticleStream
-          pathData={PATHS.l2ExecToL2Amm}
-          color={COL.gold}
-          active={vizPhase >= 5 && !isComplete}
-          speed={0.8}
-          count={3}
-          particleSize="small"
-        />
-        {/* Overlaid blue particles for transition effect */}
-        <ParticleStream
-          pathData={PATHS.l2ExecToL2Amm}
-          color={COL.blue}
-          active={vizPhase >= 5 && !isComplete}
-          speed={1.1}
-          count={2}
-          particleSize="small"
-        />
-
-        {/* L2 output: L2 AMM -> Portal (up) (small blue) */}
-        <ParticleStream
-          pathData={PATHS.l2AmmToPortalUp}
-          color={portalUpActive ? COL.cyan : COL.blue}
-          active={vizPhase >= 6 && !isComplete}
-          speed={1.0}
-          count={4}
-          particleSize="small"
-        />
-        {/* L2 output: Portal -> Output (small blue) */}
-        <ParticleStream
-          pathData={PATHS.portalToOutput}
-          color={COL.blue}
-          active={vizPhase >= 6 && !isComplete}
-          speed={0.7}
-          count={3}
-          particleSize="small"
-        />
+        {/* ══════════════ Layer 5: Particles (background ambient only) ══════════════ */}
 
         {/* Merge pulse at Output node when both streams converge */}
         {vizPhase >= 6 && !isComplete && (
@@ -941,35 +1138,37 @@ export function CrossChainFlowViz({
         {/* Pool labels on top of LiquidPool */}
         <text
           x={560}
-          y={57}
+          y={42}
           textAnchor="middle"
           fill="var(--text)"
-          fontSize={11}
-          fontWeight={600}
+          fontSize={13}
+          fontWeight={700}
           fontFamily="var(--sans)"
+          letterSpacing="-0.01em"
         >
           L1 AMM
         </text>
         <text
           x={600}
-          y={267}
+          y={252}
           textAnchor="middle"
           fill="var(--text)"
-          fontSize={11}
-          fontWeight={600}
+          fontSize={13}
+          fontWeight={700}
           fontFamily="var(--sans)"
+          letterSpacing="-0.01em"
         >
           L2 AMM
         </text>
 
-        {/* Aggregator breathing effect when idle */}
+        {/* Aggregator breathing effect when idle — match the new node size */}
         {vizPhase === 0 && (
           <rect
-            x={240}
-            y={55}
-            width={120}
-            height={50}
-            rx={8}
+            x={220}
+            y={48}
+            width={160}
+            height={64}
+            rx={10}
             fill="none"
             stroke="var(--accent)"
             strokeWidth={0.8}
@@ -1264,6 +1463,11 @@ export function CrossChainFlowViz({
             opacity={0.15}
           />
         ))}
+
+        {/* ══════════════ Layer 8: Coordinated journey (TOPMOST) ══════════════
+            Particles + labels render LAST so they always paint on top of nodes,
+            pools, and pool labels. */}
+        <CoordinatedJourney />
       </svg>
     </div>
   );

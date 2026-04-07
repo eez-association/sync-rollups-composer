@@ -26,14 +26,25 @@ export function useWallet(log: Logger) {
       rpcCall(config.l2Rpc, "eth_getBalance", [address, "latest"]),
     ]);
 
-    const l1Bal =
-      l1Result.status === "fulfilled"
-        ? (parseInt(l1Result.value as string, 16) / 1e18).toFixed(4)
-        : null;
-    const l2Bal =
-      l2Result.status === "fulfilled"
-        ? (parseInt(l2Result.value as string, 16) / 1e18).toFixed(4)
-        : null;
+    // Use BigInt for precision — parseInt + /1e18 loses precision for
+    // values above ~2^53 wei (which includes the CCM's 1M ETH genesis pre-mint).
+    const formatEth = (hex: string): string => {
+      try {
+        const wei = BigInt(hex);
+        const ONE_ETH = 10n ** 18n;
+        const whole = wei / ONE_ETH;
+        // Cap unreasonable balances (e.g. CCM with 1M ETH pre-mint)
+        if (whole > 10n ** 9n) return "∞";
+        const frac = wei % ONE_ETH;
+        const fracStr = frac.toString().padStart(18, "0").slice(0, 4);
+        return `${whole.toString()}.${fracStr}`;
+      } catch {
+        return "—";
+      }
+    };
+
+    const l1Bal = l1Result.status === "fulfilled" ? formatEth(l1Result.value as string) : null;
+    const l2Bal = l2Result.status === "fulfilled" ? formatEth(l2Result.value as string) : null;
 
     setState((s) => ({ ...s, l1Balance: l1Bal, l2Balance: l2Bal }));
   }, []);

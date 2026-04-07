@@ -35,6 +35,10 @@ interface AggregatorState {
   l1TxStatus: number | null;
   l1BlockNumber: number | null;
   l1GasUsed: string | null;
+  l2BlockBefore: number | null;
+  l2BlockAfter: number | null;
+  l2BlockNumber: number | null;
+  l2TxHashes: string[];
   l1Done: boolean;
   l2Done: boolean;
   localOutput: string | null;
@@ -78,15 +82,6 @@ function IconX({ size = 16 }: { size?: number }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
-    </svg>
-  );
-}
-
-function IconArrowRight({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <line x1="5" y1="12" x2="19" y2="12" />
-      <polyline points="12 5 19 12 12 19" />
     </svg>
   );
 }
@@ -387,15 +382,9 @@ function ResultsCard({ state }: { state: AggregatorState }) {
           <div className={styles.resultRow}>
             <span className={styles.resultLabel}>Improvement</span>
             <span className={styles.resultValue}>
-              <span className={styles.quoteImprovement}>+{state.improvement}%</span>
+              <span className={styles.quoteImprovement}>{state.improvement}</span>
               <span style={{ marginLeft: 4, fontSize: 10, color: "var(--text-dim)" }}>vs single pool</span>
             </span>
-          </div>
-        )}
-        {state.l1GasUsed && (
-          <div className={styles.resultRow}>
-            <span className={styles.resultLabel}>Gas Used</span>
-            <span className={styles.resultValue}>{state.l1GasUsed} gas</span>
           </div>
         )}
         {state.l1BlockNumber !== null && (
@@ -411,6 +400,22 @@ function ResultsCard({ state }: { state: AggregatorState }) {
             <span className={styles.resultLabel}>L1 Transaction</span>
             <span className={styles.resultValue}>
               <TxLink hash={state.txHash} chain="l1" short={false} />
+            </span>
+          </div>
+        )}
+        {state.l2BlockNumber !== null && (
+          <div className={styles.resultRow}>
+            <span className={styles.resultLabel}>L2 Block</span>
+            <span className={styles.resultValue}>
+              <ExplorerLink value={state.l2BlockNumber.toString()} type="block" chain="l2" label={`#${state.l2BlockNumber}`} />
+            </span>
+          </div>
+        )}
+        {state.l2TxHashes[0] && (
+          <div className={styles.resultRow}>
+            <span className={styles.resultLabel}>L2 Transaction</span>
+            <span className={styles.resultValue}>
+              <TxLink hash={state.l2TxHashes[0]} chain="l2" short={false} />
             </span>
           </div>
         )}
@@ -436,62 +441,129 @@ function ResultsCard({ state }: { state: AggregatorState }) {
   );
 }
 
-/* ── Under the Hood expandable ── */
+/* ── Under the Hood — visual explainer ── */
 function UnderTheHood() {
-  const [open, setOpen] = useState(false);
+  const hops: Array<{
+    num: number;
+    label: string;
+    chain: "L1" | "L2" | "L1→L2" | "L2→L1";
+    title: string;
+    body: React.ReactNode;
+  }> = [
+    {
+      num: 1,
+      label: "Local Swap",
+      chain: "L1",
+      title: "Aggregator splits your WETH",
+      body: (
+        <>
+          Your wallet sends <strong>WETH</strong> to the <strong>Aggregator</strong> contract on L1.
+          It forwards the <em>local</em> portion to the L1 AMM for an immediate WETH→USDC swap,
+          and approves the <em>remote</em> portion for the Bridge.
+        </>
+      ),
+    },
+    {
+      num: 2,
+      label: "Bridge L1→L2",
+      chain: "L1→L2",
+      title: "Cross-chain call to L2",
+      body: (
+        <>
+          The Aggregator calls <code>Bridge.bridgeTokens()</code> and then invokes the
+          <code> L2Executor</code> proxy with <code>swapAndBridgeBack()</code>. The L1 composer
+          RPC traces the transaction, queues <strong>cross-chain entries</strong> on the L2 execution
+          table, and includes them in the next L2 block — all in the same atomic tx.
+        </>
+      ),
+    },
+    {
+      num: 3,
+      label: "Remote Swap",
+      chain: "L2",
+      title: "L2 Executor runs the swap",
+      body: (
+        <>
+          On L2, the <strong>L2Executor</strong> receives <strong>wWETH</strong>, approves
+          the <strong>L2 AMM</strong>, and executes a wWETH→wUSDC swap. The L2 AMM is a
+          separate liquidity pool with its own price, giving you access to <em>two markets at once</em>.
+        </>
+      ),
+    },
+    {
+      num: 4,
+      label: "Bridge L2→L1",
+      chain: "L2→L1",
+      title: "Bounce-back to L1",
+      body: (
+        <>
+          The L2Executor immediately calls <code>Bridge.bridgeTokens()</code> to send the
+          <strong> wUSDC</strong> back to L1. This is a <strong>scope-navigation return call</strong> —
+          part of the same atomic cross-chain scope. The Aggregator on L1 receives the wrapped
+          USDC as <strong>real USDC</strong> and forwards the combined output to your wallet.
+        </>
+      ),
+    },
+  ];
+
+  const facts: Array<{ value: string; label: string }> = [
+    { value: "1", label: "atomic tx" },
+    { value: "2", label: "cross-chain hops" },
+    { value: "2", label: "AMM pools" },
+    { value: "0", label: "trust assumptions" },
+  ];
 
   return (
     <div className={styles.underHood}>
-      <button
-        className={styles.underHoodHeader}
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-      >
+      <div className={styles.underHoodHeader}>
         <span className={styles.underHoodIcon}>
           <IconSplit size={16} />
         </span>
         <span className={styles.underHoodTitle}>Under the Hood</span>
-        <span className={styles.underHoodChevron} data-open={open ? "true" : "false"}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
+        <span className={styles.underHoodSubtitle}>
+          How a single transaction orchestrates a cross-chain swap
         </span>
-      </button>
-      {open && (
-        <div className={styles.underHoodBody}>
-          <div className={styles.underHoodText}>
-            <p>
-              <strong>3 cross-chain hops, 2 AMMs, depth 7, 1 atomic transaction.</strong>
-            </p>
-            <p style={{ marginTop: 8 }}>
-              The aggregator splits your WETH swap across two liquidity pools on different chains
-              to achieve better execution than either pool alone. Here is what happens inside:
-            </p>
-            <ol style={{ marginTop: 8, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 4 }}>
-              <li>
-                <strong>Hop 1 (L1):</strong> The Aggregator contract receives your WETH, sends a portion
-                to the L1 AMM for a local swap (WETH to USDC), and bridges the remaining portion to L2
-                via <code>bridgeTokens</code>.
-              </li>
-              <li>
-                <strong>Hop 2 (L1 to L2):</strong> The cross-chain composer detects the bridge call, creates
-                execution table entries, and the builder includes them in the next L2 block. The L2Executor
-                receives wrapped WETH on L2 and swaps it through the L2 AMM.
-              </li>
-              <li>
-                <strong>Hop 3 (L2 to L1):</strong> The L2 AMM output (wrapped USDC) is bridged back to L1
-                via a scope-navigation return call. The aggregator receives both the local and remote USDC
-                outputs and forwards the total to you.
-              </li>
-            </ol>
-            <p style={{ marginTop: 8 }}>
-              The entire flow executes atomically: if any hop fails, the whole transaction reverts.
-              No funds are ever at risk. The depth-7 call trace includes: user call, aggregator dispatch,
-              L1 AMM swap, bridge out, L2 executor, L2 AMM swap, and bridge return.
-            </p>
-          </div>
+      </div>
+
+      <div className={styles.underHoodBody}>
+        <p className={styles.underHoodIntro}>
+          Cross-chain DeFi composability usually means <strong>multiple transactions</strong>,
+          bridging delays, and partial execution risk. The <strong>sync rollup protocol</strong>
+          collapses the whole flow into a <strong>single atomic L1 transaction</strong> —
+          either everything succeeds, or nothing happens.
+        </p>
+
+        <div className={styles.hopGrid}>
+          {hops.map((hop) => (
+            <div key={hop.num} className={styles.hopCard} data-chain={hop.chain}>
+              <div className={styles.hopHeader}>
+                <span className={styles.hopNum}>{hop.num}</span>
+                <span className={styles.hopChainBadge} data-chain={hop.chain}>
+                  {hop.chain}
+                </span>
+                <span className={styles.hopLabel}>{hop.label}</span>
+              </div>
+              <div className={styles.hopTitle}>{hop.title}</div>
+              <div className={styles.hopBody}>{hop.body}</div>
+            </div>
+          ))}
         </div>
-      )}
+
+        <div className={styles.factsRow}>
+          {facts.map((f) => (
+            <div key={f.label} className={styles.factItem}>
+              <div className={styles.factValue}>{f.value}</div>
+              <div className={styles.factLabel}>{f.label}</div>
+            </div>
+          ))}
+        </div>
+
+        <p className={styles.underHoodFooter}>
+          If any hop reverts, the whole scope unwinds — no leftover state on L1 or L2,
+          no tokens stranded in a bridge. That is what makes this pattern impossible on
+          traditional cross-chain messaging stacks.
+        </p>
+      </div>
     </div>
   );
 }
@@ -508,7 +580,6 @@ export function AggregatorPanel({
   walletConnected,
   walletAddress: _walletAddress,
 }: AggregatorPanelProps) {
-  const [showRouteDuel, setShowRouteDuel] = useState(false);
   const [wrapAmount, setWrapAmount] = useState("0.1");
   const [unwrapAmount, setUnwrapAmount] = useState("0.1");
 
@@ -538,99 +609,66 @@ export function AggregatorPanel({
 
   return (
     <div className={styles.panel}>
-      {/* Hero + Visualization — single card */}
-      <div className={styles.vizContainer}>
-        {/* Hero section — inside the card, above the SVG */}
-        <div className={styles.hero}>
-          <div className={styles.heroBadge}>
-            <IconSplit size={12} />
-            Cross-Chain Aggregator
+      {/* Combined card: header strip + visualization + swap form */}
+      <div className={styles.mainCard}>
+        {/* Compact header strip: badge + title + stats + balances */}
+        <div className={styles.mainHeader}>
+          <div className={styles.mainHeaderLeft}>
+            <span className={styles.heroBadge}>
+              <IconSplit size={11} />
+              Cross-Chain Aggregator
+            </span>
+            <span className={styles.mainHeaderTitle}>Split. Swap. Atomic.</span>
+            <span className={styles.mainHeaderStats}>
+              <span>2 hops</span><span className={styles.dot}>·</span>
+              <span>2 AMMs</span><span className={styles.dot}>·</span>
+              <span>1 tx</span>
+            </span>
           </div>
-          <h2 className={styles.heroTitle}>Split. Swap. Atomic.</h2>
-          <div className={styles.heroStats}>
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>3</span>
-              <span className={styles.heroStatLabel}>Hops</span>
-            </div>
-            <div className={styles.heroStatDivider} />
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>2</span>
-              <span className={styles.heroStatLabel}>AMMs</span>
-            </div>
-            <div className={styles.heroStatDivider} />
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>7</span>
-              <span className={styles.heroStatLabel}>Depth</span>
-            </div>
-            <div className={styles.heroStatDivider} />
-            <div className={styles.heroStat}>
-              <span className={styles.heroStatValue}>1</span>
-              <span className={styles.heroStatLabel}>Transaction</span>
-            </div>
+          <div className={styles.mainHeaderRight}>
+            <span className={styles.headerBalance}>
+              <span className={styles.headerBalanceLabel}>ETH</span>
+              <span className={styles.headerBalanceValue}>
+                {state.ethBalance !== null ? parseFloat(state.ethBalance).toFixed(2) : "—"}
+              </span>
+            </span>
+            <span className={styles.headerBalance}>
+              <span className={styles.headerBalanceLabel}>WETH</span>
+              <span className={styles.headerBalanceValue}>
+                {state.wethBalance !== null ? parseFloat(state.wethBalance).toFixed(2) : "—"}
+              </span>
+            </span>
+            <span className={styles.headerBalance}>
+              <span className={styles.headerBalanceLabel}>USDC</span>
+              <span className={styles.headerBalanceValue}>
+                {state.usdcBalance !== null ? parseFloat(state.usdcBalance).toFixed(2) : "—"}
+              </span>
+            </span>
           </div>
         </div>
 
-        {/* SVG visualization below hero */}
-        <div className={styles.vizInner}>
-          <button
-            className={styles.compareBtn}
-            data-active={showRouteDuel ? "true" : "false"}
-            onClick={() => setShowRouteDuel(!showRouteDuel)}
-            title="Toggle route comparison"
-          >
-            {showRouteDuel ? "Hide" : "Compare"}
-          </button>
-          <CrossChainFlowViz
-            vizPhase={state.vizPhase}
-            splitPercent={state.splitPercent}
-            l1ReserveA={state.l1ReserveA}
-            l1ReserveB={state.l1ReserveB}
-            l2ReserveA={state.l2ReserveA}
-            l2ReserveB={state.l2ReserveB}
-            showRouteDuel={showRouteDuel}
-            improvement={state.improvement}
-          />
-        </div>
-      </div>
-
-      {/* Contract Lanes */}
-      <ContractLanes
-        loading={state.loading}
-        deployed={state.contractsDeployed}
-        l1Contracts={l1Contracts}
-        l2Contracts={l2Contracts}
-      />
-
-      {/* Swap Section */}
-      <div className={styles.swapSection}>
-        <div className={styles.sectionTitle}>Aggregated Swap</div>
-        <div className={styles.sectionDesc}>
-          Split your WETH across L1 and L2 AMMs for better execution. Adjust the split ratio to optimize output.
-        </div>
-
-        {/* Balance row */}
-        <div className={styles.balanceRow}>
-          <div className={styles.balanceItem}>
-            <span className={styles.balanceLabel}>ETH</span>
-            <span className={styles.balanceValue}>
-              {state.ethBalance !== null ? parseFloat(state.ethBalance).toFixed(4) : "--"}
-            </span>
+        {/* Body grid: viz + swap side by side on desktop, stacked on mobile */}
+        <div className={styles.mainBody}>
+          {/* SVG visualization */}
+          <div className={styles.vizInner}>
+            <CrossChainFlowViz
+              vizPhase={state.vizPhase}
+              splitPercent={state.splitPercent}
+              l1ReserveA={state.l1ReserveA}
+              l1ReserveB={state.l1ReserveB}
+              l2ReserveA={state.l2ReserveA}
+              l2ReserveB={state.l2ReserveB}
+              improvement={state.improvement}
+            />
           </div>
-          <div className={styles.balanceSep} />
-          <div className={styles.balanceItem}>
-            <span className={styles.balanceLabel}>WETH</span>
-            <span className={styles.balanceValue}>
-              {state.wethBalance !== null ? parseFloat(state.wethBalance).toFixed(4) : "--"}
-            </span>
-          </div>
-          <div className={styles.balanceSep} />
-          <div className={styles.balanceItem}>
-            <span className={styles.balanceLabel}>USDC</span>
-            <span className={styles.balanceValue}>
-              {state.usdcBalance !== null ? parseFloat(state.usdcBalance).toFixed(4) : "--"}
-            </span>
-          </div>
-          <div className={styles.wrapGroup}>
+
+          {/* Swap form — right column on desktop, below viz on mobile */}
+          <div className={styles.swapInline}>
+
+        {/* Always-visible Wrap / Unwrap mini-section */}
+        <div className={styles.wrapBar}>
+          <span className={styles.wrapBarLabel}>Wrap / Unwrap ETH</span>
+          <div className={styles.wrapBarRow}>
             <input
               type="text"
               className={styles.wrapInput}
@@ -639,8 +677,10 @@ export function AggregatorPanel({
               placeholder="0.1"
             />
             <button className={styles.wrapBtn} onClick={() => onWrapEth(wrapAmount)}>
-              Wrap <IconArrowRight size={10} />
+              ETH → WETH
             </button>
+          </div>
+          <div className={styles.wrapBarRow}>
             <input
               type="text"
               className={styles.wrapInput}
@@ -649,32 +689,51 @@ export function AggregatorPanel({
               placeholder="0.1"
             />
             <button className={styles.wrapBtn} onClick={() => onUnwrapWeth(unwrapAmount)}>
-              <IconArrowRight size={10} /> Unwrap
+              WETH → ETH
             </button>
           </div>
         </div>
 
-        {/* Amount input */}
-        <div className={styles.inputGroup}>
-          <label className={styles.inputLabel} htmlFor="agg-amount">Amount (WETH)</label>
-          <input
-            id="agg-amount"
-            type="text"
-            className={styles.amountInput}
-            value={state.totalAmount}
-            onChange={(e) => onSetAmount(e.target.value)}
-            placeholder="1.0"
-          />
+        {/* FROM box (Uniswap-style) */}
+        <div className={styles.swapBox}>
+          <div className={styles.swapBoxHeader}>
+            <span className={styles.swapBoxLabel}>You pay</span>
+            <span className={styles.swapBoxBalance}>
+              Balance: {state.wethBalance !== null ? parseFloat(state.wethBalance).toFixed(4) : "—"}
+              {state.wethBalance !== null && parseFloat(state.wethBalance) > 0 && (
+                <button
+                  className={styles.maxBtn}
+                  onClick={() => onSetAmount(state.wethBalance!)}
+                >
+                  MAX
+                </button>
+              )}
+            </span>
+          </div>
+          <div className={styles.swapBoxRow}>
+            <input
+              type="text"
+              className={styles.swapAmountInput}
+              value={state.totalAmount}
+              onChange={(e) => onSetAmount(e.target.value)}
+              placeholder="0.0"
+            />
+            <span className={styles.swapTokenChip}>
+              <span className={styles.swapTokenDot} data-token="weth" />
+              WETH
+            </span>
+          </div>
         </div>
 
-        {/* Split slider */}
+        {/* Split slider — compact */}
         <div className={styles.splitGroup}>
           <div className={styles.splitLabels}>
             <span className={styles.splitLabel} data-net="L1">
-              L1 Local: {state.splitPercent}%
+              L1 {state.splitPercent}%
             </span>
+            <span className={styles.splitLabelMid}>Route split</span>
             <span className={styles.splitLabel} data-net="L2">
-              L2 Remote: {100 - state.splitPercent}%
+              L2 {100 - state.splitPercent}%
             </span>
           </div>
           <input
@@ -687,43 +746,41 @@ export function AggregatorPanel({
           />
         </div>
 
-        {/* Quote preview */}
-        <div className={styles.quotePreview}>
-          <div className={styles.quoteRow}>
-            <span className={styles.quoteLabel}>L1 AMM</span>
-            <span className={styles.quoteValue}>
-              {state.l1Quote !== null ? `${state.l1Quote} USDC` : "--"}
+        {/* TO box — receive */}
+        <div className={styles.swapBox} data-receive="true">
+          <div className={styles.swapBoxHeader}>
+            <span className={styles.swapBoxLabel}>You receive</span>
+            <span className={styles.swapBoxRoute}>
+              {state.l1Quote !== null && (
+                <span className={styles.routeChip} data-net="L1">
+                  L1 {parseFloat(state.l1Quote).toFixed(2)}
+                </span>
+              )}
+              {state.l2Quote !== null && (
+                <span className={styles.routeChip} data-net="L2">
+                  L2 {parseFloat(state.l2Quote).toFixed(2)}
+                </span>
+              )}
             </span>
           </div>
-          <div className={styles.quoteRow}>
-            <span className={styles.quoteLabel}>L2 AMM</span>
-            <span className={styles.quoteValue}>
-              {state.l2Quote !== null ? `${state.l2Quote} USDC` : "--"}
-            </span>
-          </div>
-          <div className={styles.quoteDivider} />
-          <div className={styles.quoteRow}>
-            <span className={styles.quoteLabel}>Total</span>
-            <span className={styles.quoteValue}>
+          <div className={styles.swapBoxRow}>
+            <span className={styles.swapAmountOutput}>
               {state.l1Quote !== null && state.l2Quote !== null
-                ? `${(parseFloat(state.l1Quote) + parseFloat(state.l2Quote)).toFixed(4)} USDC`
-                : "--"}
+                ? (parseFloat(state.l1Quote) + parseFloat(state.l2Quote)).toFixed(4)
+                : "—"}
+            </span>
+            <span className={styles.swapTokenChip}>
+              <span className={styles.swapTokenDot} data-token="usdc" />
+              USDC
             </span>
           </div>
           {state.singlePoolQuote !== null && state.improvement !== null && (
-            <>
-              <div className={styles.quoteDivider} />
-              <div className={styles.quoteRow}>
-                <span className={styles.quoteLabel}>vs Single Pool</span>
-                <span className={styles.quoteValue}>
-                  {state.singlePoolQuote} USDC
-                  <span className={styles.quoteImprovement} style={{ marginLeft: 8 }}>+{state.improvement}%</span>
-                </span>
-              </div>
-            </>
+            <div className={styles.improvementRow}>
+              vs single pool ({parseFloat(state.singlePoolQuote).toFixed(2)} USDC):
+              <span className={styles.quoteImprovement}>+{state.improvement}%</span>
+            </div>
           )}
         </div>
-
         {/* Execute button */}
         <button
           className={styles.executeBtn}
@@ -736,18 +793,25 @@ export function AggregatorPanel({
             <><IconSplit size={15} /> Aggregate Swap</>
           )}
         </button>
+          </div>
+        </div>
       </div>
 
-      {/* Step tracker */}
-      {showSteps && (
-        <div className={styles.trackerCard}>
-          <div className={styles.trackerTitle}>Execution Progress</div>
-          <StepTracker steps={steps} />
-          {(complete || failed) && (
-            <button className={styles.resetBtn} onClick={onReset}>
-              Reset
-            </button>
+      {/* Execution Progress + Aggregation Results — side by side row */}
+      {(showSteps || complete) && (
+        <div className={styles.progressRow}>
+          {showSteps && (
+            <div className={styles.trackerCard}>
+              <div className={styles.trackerTitle}>Execution Progress</div>
+              <StepTracker steps={steps} />
+              {(complete || failed) && (
+                <button className={styles.resetBtn} onClick={onReset}>
+                  Reset
+                </button>
+              )}
+            </div>
           )}
+          <ResultsCard state={state} />
         </div>
       )}
 
@@ -756,8 +820,13 @@ export function AggregatorPanel({
         <div className={styles.errorBanner}>{state.error}</div>
       )}
 
-      {/* Results card */}
-      <ResultsCard state={state} />
+      {/* Contract Lanes (deployed contracts reference — least important) */}
+      <ContractLanes
+        loading={state.loading}
+        deployed={state.contractsDeployed}
+        l1Contracts={l1Contracts}
+        l2Contracts={l2Contracts}
+      />
 
       {/* Under the Hood */}
       <UnderTheHood />
