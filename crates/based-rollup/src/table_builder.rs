@@ -317,10 +317,36 @@ pub fn build_continuation_entries(
     //                 [REVERT_CONTINUE→CALL_B(scope=[1])],
     //                 [RESULT_B→RESULT(terminal)]
     //   - L1 entries remain simple: [CALL_A→RESULT_A], [CALL_B→RESULT_B]
+    // ── Partial revert detection ──
+    //
+    // True partial revert (try/catch in user L1 code) requires:
+    //   1. Mix of in_reverted_frame=true/false among L1→L2 calls
+    //   2. NO L2→L1 children of any L1→L2 call
+    //
+    // Rationale: in true partial revert (revertContinue pattern), the reverted
+    // call reverts immediately on L2 delivery — it never executes anything that
+    // would call back to L1, so it has no L2→L1 children.
+    //
+    // In contrast, multi-directional/reentrant patterns (aggregator with bounce-back,
+    // reentrantCrossChainCalls) have L2→L1 children. The `in_reverted_frame=true`
+    // for those L1→L2 calls is a SIMULATION ARTIFACT: the call appears to revert
+    // during simulation because the bounce-back entry is missing, but in production
+    // (with all entries loaded) it succeeds.
+    //
+    // Without this guard, multi-directional patterns get falsely classified as
+    // partial revert, triggering l1_independent_entries=true → currentState
+    // override → ExecutionNotFound when the second executeCrossChainCall runs
+    // because the chain is broken.
     let has_partial_revert = {
         let any_reverted = l1_to_l2_calls.iter().any(|(_, c)| c.in_reverted_frame);
         let any_non_reverted = l1_to_l2_calls.iter().any(|(_, c)| !c.in_reverted_frame);
-        any_reverted && any_non_reverted
+        let has_l2_to_l1_children = l1_to_l2_calls.iter().any(|(parent_idx, _)| {
+            calls.iter().any(|c| {
+                c.parent_call_index == Some(*parent_idx)
+                    && c.direction == CallDirection::L2ToL1
+            })
+        });
+        any_reverted && any_non_reverted && !has_l2_to_l1_children
     };
 
     if has_partial_revert {

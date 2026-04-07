@@ -3982,7 +3982,9 @@ async fn trace_and_detect_internal_calls(
             in_reverted_frame = c.in_reverted_frame,
             call_success = c.call_success,
             trace_depth = c.trace_depth,
-            "FINAL detected_calls after in_reverted_frame correction"
+            target_rollup_id = c.target_rollup_id,
+            parent = ?c.parent_call_index,
+            "FINAL detected_calls before queue_execution_table"
         );
     }
 

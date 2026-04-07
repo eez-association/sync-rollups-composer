@@ -545,8 +545,35 @@ async fn recurse_children(
             // A child is in a reverted frame if the parent already is,
             // or if the CHILD ITSELF has an "error" field (meaning its
             // descendants will be inside a reverted context).
-            let child_reverted =
-                in_reverted_frame || child.get("error").and_then(|v| v.as_str()).is_some();
+            let child_self_error = child.get("error").and_then(|v| v.as_str());
+            let child_reverted = in_reverted_frame || child_self_error.is_some();
+            // Diagnostic log: when a child becomes reverted because of its OWN
+            // error (not just inherited), log the to/from/error so we can tell
+            // which call is poisoning the descendants.
+            if !in_reverted_frame && child_self_error.is_some() {
+                let child_to = child
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let child_from = child
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let child_input = child
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(10).collect::<String>())
+                    .unwrap_or_default();
+                tracing::debug!(
+                    target: "based_rollup::trace",
+                    parent_depth = depth,
+                    child_to,
+                    child_from,
+                    child_sel = %child_input,
+                    child_error = %child_self_error.unwrap_or("?"),
+                    "child node has error — descendants will be in_reverted_frame"
+                );
+            }
             Box::pin(walk_trace_tree_inner(
                 child,
                 manager_addresses,
