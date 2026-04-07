@@ -495,7 +495,7 @@ function UnderTheHood() {
 
   const facts: Array<{ value: string; label: string }> = [
     { value: "1", label: "atomic tx" },
-    { value: "3", label: "cross-chain hops" },
+    { value: "2", label: "cross-chain hops" },
     { value: "7", label: "call depth" },
     { value: "2", label: "AMM pools" },
     { value: "0", label: "trust assumptions" },
@@ -570,7 +570,6 @@ export function AggregatorPanel({
 }: AggregatorPanelProps) {
   const [wrapAmount, setWrapAmount] = useState("0.1");
   const [unwrapAmount, setUnwrapAmount] = useState("0.1");
-  const [wrapOpen, setWrapOpen] = useState(false);
 
   const busy =
     state.phase !== "idle" &&
@@ -609,7 +608,7 @@ export function AggregatorPanel({
             </span>
             <span className={styles.mainHeaderTitle}>Split. Swap. Atomic.</span>
             <span className={styles.mainHeaderStats}>
-              <span>3 hops</span><span className={styles.dot}>·</span>
+              <span>2 hops</span><span className={styles.dot}>·</span>
               <span>2 AMMs</span><span className={styles.dot}>·</span>
               <span>depth 7</span><span className={styles.dot}>·</span>
               <span>1 tx</span>
@@ -634,17 +633,6 @@ export function AggregatorPanel({
                 {state.usdcBalance !== null ? parseFloat(state.usdcBalance).toFixed(2) : "—"}
               </span>
             </span>
-            <button
-              className={styles.wrapToggleBtn}
-              onClick={() => setWrapOpen(!wrapOpen)}
-              title="Wrap ETH ↔ WETH"
-              aria-expanded={wrapOpen}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M7 16V4M7 4L3 8M7 4l4 4M17 8v12M17 20l4-4M17 20l-4-4" />
-              </svg>
-              Wrap ETH ↔ WETH
-            </button>
           </div>
         </div>
 
@@ -666,37 +654,34 @@ export function AggregatorPanel({
           {/* Swap form — right column on desktop, below viz on mobile */}
           <div className={styles.swapInline}>
 
-        {/* Wrap/Unwrap drawer (collapsed by default) */}
-        {wrapOpen && (
-          <div className={styles.wrapDrawer}>
-            <div className={styles.wrapField}>
-              <input
-                type="text"
-                className={styles.wrapInput}
-                value={wrapAmount}
-                onChange={(e) => setWrapAmount(e.target.value)}
-                placeholder="0.1"
-              />
-              <span className={styles.wrapFieldLabel}>ETH</span>
-              <button className={styles.wrapBtn} onClick={() => onWrapEth(wrapAmount)}>
-                Wrap → WETH
-              </button>
-            </div>
-            <div className={styles.wrapField}>
-              <input
-                type="text"
-                className={styles.wrapInput}
-                value={unwrapAmount}
-                onChange={(e) => setUnwrapAmount(e.target.value)}
-                placeholder="0.1"
-              />
-              <span className={styles.wrapFieldLabel}>WETH</span>
-              <button className={styles.wrapBtn} onClick={() => onUnwrapWeth(unwrapAmount)}>
-                Unwrap → ETH
-              </button>
-            </div>
+        {/* Always-visible Wrap / Unwrap mini-section */}
+        <div className={styles.wrapBar}>
+          <span className={styles.wrapBarLabel}>ETH ↔ WETH</span>
+          <div className={styles.wrapBarRow}>
+            <input
+              type="text"
+              className={styles.wrapInput}
+              value={wrapAmount}
+              onChange={(e) => setWrapAmount(e.target.value)}
+              placeholder="0.1"
+            />
+            <button className={styles.wrapBtn} onClick={() => onWrapEth(wrapAmount)}>
+              Wrap →
+            </button>
           </div>
-        )}
+          <div className={styles.wrapBarRow}>
+            <input
+              type="text"
+              className={styles.wrapInput}
+              value={unwrapAmount}
+              onChange={(e) => setUnwrapAmount(e.target.value)}
+              placeholder="0.1"
+            />
+            <button className={styles.wrapBtn} onClick={() => onUnwrapWeth(unwrapAmount)}>
+              ← Unwrap
+            </button>
+          </div>
+        </div>
 
         {/* FROM box (Uniswap-style) */}
         <div className={styles.swapBox}>
