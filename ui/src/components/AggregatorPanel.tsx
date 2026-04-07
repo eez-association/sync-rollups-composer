@@ -485,9 +485,8 @@ function UnderTheHood() {
         <>
           The L2Executor immediately calls <code>Bridge.bridgeTokens()</code> to send the
           <strong> wUSDC</strong> back to L1. This is a <strong>scope-navigation return call</strong> —
-          part of the same atomic cross-chain scope, depth 7 in the call trace. The Aggregator
-          on L1 receives the wrapped USDC as <strong>real USDC</strong> and forwards the combined
-          output to your wallet.
+          part of the same atomic cross-chain scope. The Aggregator on L1 receives the wrapped
+          USDC as <strong>real USDC</strong> and forwards the combined output to your wallet.
         </>
       ),
     },
@@ -496,7 +495,6 @@ function UnderTheHood() {
   const facts: Array<{ value: string; label: string }> = [
     { value: "1", label: "atomic tx" },
     { value: "2", label: "cross-chain hops" },
-    { value: "7", label: "call depth" },
     { value: "2", label: "AMM pools" },
     { value: "0", label: "trust assumptions" },
   ];
@@ -610,7 +608,6 @@ export function AggregatorPanel({
             <span className={styles.mainHeaderStats}>
               <span>2 hops</span><span className={styles.dot}>·</span>
               <span>2 AMMs</span><span className={styles.dot}>·</span>
-              <span>depth 7</span><span className={styles.dot}>·</span>
               <span>1 tx</span>
             </span>
           </div>

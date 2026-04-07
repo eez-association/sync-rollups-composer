@@ -314,18 +314,37 @@ export function useAggregator(
         const wethRaw = results[8] ? decodeUint256Result(results[8] as string) : null;
         const usdcRaw = results[9] ? decodeUint256Result(results[9] as string) : null;
 
+        // Quote handling at extremes — when local or remote amount is 0
+        // (slider at 0%/100% or empty input), we MUST set the corresponding
+        // quote to "0" rather than leaving the stale previous value behind.
+        const l1QuoteFinal =
+          l1QuoteRaw !== null
+            ? formatTokenAmount(l1QuoteRaw, USDC_DECIMALS)
+            : localWei === 0n
+              ? "0"
+              : null;
+        const l2QuoteFinal =
+          l2QuoteRaw !== null
+            ? formatTokenAmount(l2QuoteRaw, USDC_DECIMALS)
+            : remoteWei === 0n
+              ? "0"
+              : null;
+        const singleFinal =
+          singleQuoteRaw !== null
+            ? formatTokenAmount(singleQuoteRaw, USDC_DECIMALS)
+            : totalWei === 0n
+              ? "0"
+              : null;
+
         setState((prev) => ({
           ...prev,
           l1ReserveA: l1ResA !== null ? formatTokenAmount(l1ResA, WETH_DECIMALS) : prev.l1ReserveA,
           l1ReserveB: l1ResB !== null ? formatTokenAmount(l1ResB, USDC_DECIMALS) : prev.l1ReserveB,
           l2ReserveA: l2ResA !== null ? formatTokenAmount(l2ResA, WETH_DECIMALS) : prev.l2ReserveA,
           l2ReserveB: l2ResB !== null ? formatTokenAmount(l2ResB, USDC_DECIMALS) : prev.l2ReserveB,
-          l1Quote: l1QuoteRaw !== null ? formatTokenAmount(l1QuoteRaw, USDC_DECIMALS) : prev.l1Quote,
-          l2Quote: l2QuoteRaw !== null ? formatTokenAmount(l2QuoteRaw, USDC_DECIMALS) : prev.l2Quote,
-          singlePoolQuote:
-            singleQuoteRaw !== null
-              ? formatTokenAmount(singleQuoteRaw, USDC_DECIMALS)
-              : prev.singlePoolQuote,
+          l1Quote: l1QuoteFinal !== null ? l1QuoteFinal : prev.l1Quote,
+          l2Quote: l2QuoteFinal !== null ? l2QuoteFinal : prev.l2Quote,
+          singlePoolQuote: singleFinal !== null ? singleFinal : prev.singlePoolQuote,
           ethBalance: ethRaw !== null ? formatTokenAmount(ethRaw, WETH_DECIMALS) : prev.ethBalance,
           wethBalance:
             wethRaw !== null ? formatTokenAmount(wethRaw, WETH_DECIMALS) : prev.wethBalance,
