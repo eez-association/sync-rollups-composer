@@ -37,6 +37,7 @@ interface AggregatorState {
   l1GasUsed: string | null;
   l2BlockBefore: number | null;
   l2BlockAfter: number | null;
+  l2BlockNumber: number | null;
   l2TxHashes: string[];
   l1Done: boolean;
   l2Done: boolean;
@@ -402,15 +403,19 @@ function ResultsCard({ state }: { state: AggregatorState }) {
             </span>
           </div>
         )}
-        {state.l2TxHashes.length > 0 && (
+        {state.l2BlockNumber !== null && (
           <div className={styles.resultRow}>
-            <span className={styles.resultLabel}>
-              L2 {state.l2TxHashes.length === 1 ? "Transaction" : "Transactions"}
+            <span className={styles.resultLabel}>L2 Block</span>
+            <span className={styles.resultValue}>
+              <ExplorerLink value={state.l2BlockNumber.toString()} type="block" chain="l2" label={`#${state.l2BlockNumber}`} />
             </span>
-            <span className={styles.resultValue} style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
-              {state.l2TxHashes.map((h) => (
-                <TxLink key={h} hash={h} chain="l2" short={false} />
-              ))}
+          </div>
+        )}
+        {state.l2TxHashes[0] && (
+          <div className={styles.resultRow}>
+            <span className={styles.resultLabel}>L2 Transaction</span>
+            <span className={styles.resultValue}>
+              <TxLink hash={state.l2TxHashes[0]} chain="l2" short={false} />
             </span>
           </div>
         )}

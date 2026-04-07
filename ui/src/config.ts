@@ -49,6 +49,8 @@ export const config = {
   reverseExecutorL1: params.get("reverseExecutorL1") || "",
   /** Faucet address — loaded from /shared/rollup.env or URL param */
   faucetAddress: params.get("faucetAddress") || "",
+  /** L2 CrossChainManager address — loaded from rollup.env */
+  ccmL2Address: params.get("ccmL2") || "",
   /** Aggregator contract addresses (loaded from rollup.env) */
   aggWeth: params.get("aggWeth") || "",
   aggUsdc: params.get("aggUsdc") || "",

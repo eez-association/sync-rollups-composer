@@ -58,6 +58,7 @@ export interface AggregatorState {
   l1GasUsed: string | null;
   l2BlockBefore: number | null;
   l2BlockAfter: number | null;
+  l2BlockNumber: number | null;
   l2TxHashes: string[];
   l1Done: boolean;
   l2Done: boolean;
@@ -106,6 +107,7 @@ const INITIAL_STATE: AggregatorState = {
   l1GasUsed: null,
   l2BlockBefore: null,
   l2BlockAfter: null,
+  l2BlockNumber: null,
   l2TxHashes: [],
   l1Done: false,
   l2Done: false,
@@ -508,6 +510,7 @@ export function useAggregator(
         l1GasUsed: null,
         l2BlockBefore: null,
         l2BlockAfter: null,
+        l2BlockNumber: null,
         l2TxHashes: [],
         l1Done: false,
         l2Done: false,
@@ -763,26 +766,35 @@ export function useAggregator(
         }
       }
 
-      // Fetch L2 protocol transactions in the affected blocks. The cross-chain
-      // delivery txs are protocol txs from the builder address (dev#0) targeting
-      // the CCM. We grab all txs in the range [l2BlockBefore+1, l2BlockAfter]
-      // whose `from` matches the builder.
-      const BUILDER_ADDR = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
-      const l2TxHashes: string[] = [];
+      // Fetch the SINGLE L2 cross-chain delivery tx and its block. The
+      // builder posts an `executeIncomingCrossChainCall` (selector 0x0f64c845)
+      // tx targeting the CCM that delivers our cross-chain calls. We scan
+      // L2 blocks in [l2BlockBefore+1, l2BlockAfter] for the first such tx.
+      const EXEC_INCOMING_SELECTOR = "0x0f64c845";
+      const ccmL2 = config.ccmL2Address.toLowerCase();
+      let l2TxHash: string | null = null;
+      let l2BlockHit: number | null = null;
       try {
         const before = stateRef.current.l2BlockBefore;
         const after = stateRef.current.l2BlockAfter;
-        if (before !== null && after !== null && after > before) {
-          for (let bn = before + 1; bn <= after; bn++) {
+        if (before !== null && after !== null && after > before && ccmL2) {
+          for (let bn = before + 1; bn <= after && !l2TxHash; bn++) {
             try {
               const block = (await rpcCall(config.l2Rpc, "eth_getBlockByNumber", [
                 "0x" + bn.toString(16),
                 true,
-              ])) as { transactions?: Array<{ hash: string; from: string }> } | null;
+              ])) as {
+                transactions?: Array<{ hash: string; to: string | null; input: string }>;
+              } | null;
               if (block?.transactions) {
                 for (const tx of block.transactions) {
-                  if (tx.from?.toLowerCase() === BUILDER_ADDR) {
-                    l2TxHashes.push(tx.hash);
+                  if (
+                    tx.to?.toLowerCase() === ccmL2 &&
+                    tx.input?.toLowerCase().startsWith(EXEC_INCOMING_SELECTOR)
+                  ) {
+                    l2TxHash = tx.hash;
+                    l2BlockHit = bn;
+                    break;
                   }
                 }
               }
@@ -794,6 +806,7 @@ export function useAggregator(
       } catch {
         /* non-critical */
       }
+      const l2TxHashes = l2TxHash ? [l2TxHash] : [];
 
       const endTime = Date.now();
 
@@ -811,6 +824,7 @@ export function useAggregator(
         usdcBalanceAfter: usdcAfterStr,
         improvement: improvementStr,
         l2TxHashes,
+        l2BlockNumber: l2BlockHit,
         endTime,
       }));
 

@@ -56,6 +56,8 @@ export function useConfigLoader() {
             setConfig({ reverseExecutorL1: env["REVERSE_EXECUTOR_L1"] });
           if (!config.faucetAddress && env["FAUCET_ADDRESS"])
             setConfig({ faucetAddress: env["FAUCET_ADDRESS"] });
+          if (!config.ccmL2Address && env["CROSS_CHAIN_MANAGER_ADDRESS"])
+            setConfig({ ccmL2Address: env["CROSS_CHAIN_MANAGER_ADDRESS"] });
           // Aggregator addresses
           if (!config.aggWeth && env["AGG_WETH_ADDRESS"])
             setConfig({ aggWeth: env["AGG_WETH_ADDRESS"] });
