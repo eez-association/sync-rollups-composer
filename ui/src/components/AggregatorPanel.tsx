@@ -648,21 +648,23 @@ export function AggregatorPanel({
           </div>
         </div>
 
-        {/* SVG visualization */}
-        <div className={styles.vizInner}>
-          <CrossChainFlowViz
-            vizPhase={state.vizPhase}
-            splitPercent={state.splitPercent}
-            l1ReserveA={state.l1ReserveA}
-            l1ReserveB={state.l1ReserveB}
-            l2ReserveA={state.l2ReserveA}
-            l2ReserveB={state.l2ReserveB}
-            improvement={state.improvement}
-          />
-        </div>
+        {/* Body grid: viz + swap side by side on desktop, stacked on mobile */}
+        <div className={styles.mainBody}>
+          {/* SVG visualization */}
+          <div className={styles.vizInner}>
+            <CrossChainFlowViz
+              vizPhase={state.vizPhase}
+              splitPercent={state.splitPercent}
+              l1ReserveA={state.l1ReserveA}
+              l1ReserveB={state.l1ReserveB}
+              l2ReserveA={state.l2ReserveA}
+              l2ReserveB={state.l2ReserveB}
+              improvement={state.improvement}
+            />
+          </div>
 
-        {/* Swap form — same card, separated by a thin divider */}
-        <div className={styles.swapInline}>
+          {/* Swap form — right column on desktop, below viz on mobile */}
+          <div className={styles.swapInline}>
 
         {/* Wrap/Unwrap drawer (collapsed by default) */}
         {wrapOpen && (
@@ -795,6 +797,7 @@ export function AggregatorPanel({
             <><IconSplit size={15} /> Aggregate Swap</>
           )}
         </button>
+          </div>
         </div>
       </div>
 

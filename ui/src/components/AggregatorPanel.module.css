@@ -94,13 +94,25 @@
   letter-spacing: 0.08em;
 }
 
-.vizInner {
-  position: relative;
+/* Body grid: viz on left, swap form on right (desktop). Stacks on mobile. */
+.mainBody {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr);
+  gap: 0;
+  align-items: stretch;
 }
 
-/* Inline swap form inside the merged card — no border, just a top divider */
+.vizInner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+/* Inline swap form — right column on desktop, below viz on mobile */
 .swapInline {
-  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
   padding: 14px 18px 16px;
   display: flex;
   flex-direction: column;
@@ -110,6 +122,17 @@
     transparent 0%,
     rgba(99, 102, 241, 0.025) 100%
   );
+  min-width: 0;
+}
+
+@media (max-width: 1024px) {
+  .mainBody {
+    grid-template-columns: 1fr;
+  }
+  .swapInline {
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
 }
 
 .compareBtn {
