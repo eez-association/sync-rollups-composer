@@ -39,7 +39,7 @@
 //! can build on it without retrofitting.
 
 use crate::cross_chain::{
-    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, RollupId,
+    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, RollupId, ScopePath,
     build_cross_chain_call_entries, build_l2_to_l1_call_entries,
 };
 use crate::table_builder::{
@@ -183,7 +183,7 @@ fn detected_l1_to_l2(
             failed: false,
             source_address,
             source_rollup: RollupId::MAINNET, // MAINNET
-            scope: vec![],
+            scope: ScopePath::root(),
         },
         parent_call_index: None,
         is_continuation,
@@ -191,7 +191,7 @@ fn detected_l1_to_l2(
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     }
@@ -217,7 +217,7 @@ fn detected_l2_to_l1(
             failed: false,
             source_address,
             source_rollup: RollupId::new(U256::from(L2_ROLLUP_ID)),
-            scope: vec![],
+            scope: ScopePath::root(),
         },
         parent_call_index,
         is_continuation: false,
@@ -225,7 +225,7 @@ fn detected_l2_to_l1(
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     }

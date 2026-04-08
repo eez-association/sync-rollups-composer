@@ -1,5 +1,5 @@
 use super::*;
-use crate::cross_chain::{CrossChainStateDelta, RollupId};
+use crate::cross_chain::{CrossChainStateDelta, RollupId, ScopePath};
 use alloy_primitives::address;
 
 #[test]
@@ -21,7 +21,7 @@ fn test_entry_to_serializable_roundtrip() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::new(U256::from(2)),
-            scope: vec![U256::from(1), U256::from(2)],
+            scope: ScopePath::from_parts(vec![U256::from(1), U256::from(2)]),
         },
     };
 
@@ -99,7 +99,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 

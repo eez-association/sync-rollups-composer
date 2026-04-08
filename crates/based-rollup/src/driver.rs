@@ -1733,7 +1733,7 @@ where
                         next_action_type = ?e.next_action.action_type,
                         next_action_rollup_id = %e.next_action.rollup_id,
                         next_action_dest = %e.next_action.destination,
-                        next_action_scope = ?e.next_action.scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                        next_action_scope = ?e.next_action.scope.as_slice().iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
                         next_action_data_hex = %format!("0x{}", hex::encode(&e.next_action.data)),
                         next_action_failed = e.next_action.failed,
                         current_state = %e.state_deltas.first().map(|d| format!("{}", d.current_state)).unwrap_or_default(),
@@ -4108,7 +4108,8 @@ where
                         new_scope_len = trigger_scope.len(),
                         "overriding trigger scope for REVERT pattern"
                     );
-                    trigger.next_action.scope = trigger_scope.clone();
+                    trigger.next_action.scope =
+                        crate::cross_chain::ScopePath::from_parts(trigger_scope.clone());
                 }
             }
 

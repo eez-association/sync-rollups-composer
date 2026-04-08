@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cross_chain::{
     CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    ICrossChainManagerL2, RollupId,
+    ICrossChainManagerL2, RollupId, ScopePath,
 };
 
 /// Direction of a cross-chain call.
@@ -70,7 +70,7 @@ pub struct DetectedCall {
     /// Computed as accumulated_prefix ++ local_tree_path.
     /// Used by table_builder instead of hardcoded vec![U256::ZERO].
     #[serde(default)]
-    pub scope: Vec<U256>,
+    pub scope: ScopePath,
     /// Iterative discovery iteration when this call was first detected.
     /// 0 = initial trace / same iteration as parent. >0 = discovered in a
     /// later iteration (reentrant: child's L1 execution triggered this call).
@@ -215,7 +215,7 @@ fn result_void(rollup_id: RollupId) -> CrossChainAction {
         failed: false,
         source_address: alloy_primitives::Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     }
 }
 
@@ -408,7 +408,7 @@ pub fn build_continuation_entries(
                         failed: false,
                         source_address: next.call_action.source_address,
                         source_rollup: mainnet_rollup_id,
-                        scope: vec![U256::ZERO],
+                        scope: ScopePath::from_index(U256::ZERO),
                     }
                 } else if child.delivery_return_data.is_empty() && !child.l2_delivery_failed {
                     l1_result_void.clone()
@@ -422,7 +422,7 @@ pub fn build_continuation_entries(
                         failed: child.l2_delivery_failed,
                         source_address: Address::ZERO,
                         source_rollup: RollupId::MAINNET,
-                        scope: vec![],
+                        scope: ScopePath::root(),
                     }
                 };
                 l2_entries.push(CrossChainExecutionEntry {
@@ -458,7 +458,7 @@ pub fn build_continuation_entries(
                         failed: current_call.l2_delivery_failed,
                         source_address: Address::ZERO,
                         source_rollup: RollupId::MAINNET,
-                        scope: vec![],
+                        scope: ScopePath::root(),
                     }
                 } else {
                     l2_result_void.clone()
@@ -491,7 +491,7 @@ pub fn build_continuation_entries(
                             failed: false,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     } else {
                         CrossChainAction {
@@ -503,7 +503,7 @@ pub fn build_continuation_entries(
                             failed: child.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     }
                 } else {
@@ -555,7 +555,7 @@ pub fn build_continuation_entries(
                             failed: child.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     };
                 l2_entries.push(CrossChainExecutionEntry {
@@ -577,7 +577,7 @@ pub fn build_continuation_entries(
                         failed: current_call.l2_delivery_failed,
                         source_address: Address::ZERO,
                         source_rollup: RollupId::MAINNET,
-                        scope: vec![],
+                        scope: ScopePath::root(),
                     }
                 } else {
                     l2_result_void.clone()
@@ -656,13 +656,15 @@ pub fn build_continuation_entries(
                     .iter()
                     .position(|(_, c)| c.in_reverted_frame)
                     .unwrap_or(0);
-                l2_entries[idx].next_action =
-                    revert_action(our_rollup_id, vec![U256::from(first_reverted_pos)]);
+                l2_entries[idx].next_action = revert_action(
+                    our_rollup_id,
+                    ScopePath::from_index(U256::from(first_reverted_pos)),
+                );
 
                 // Build the continuation CALL with scope=[non_rev_pos] so _resolveScopes
                 // navigates to the correct sibling scope after the revert.
                 let mut scoped_continuation = continuation_call;
-                scoped_continuation.scope = vec![U256::from(non_rev_pos)];
+                scoped_continuation.scope = ScopePath::from_index(U256::from(non_rev_pos));
 
                 // Insert REVERT_CONTINUE → continuation_call(scope=[non_rev_pos])
                 l2_entries.insert(
@@ -698,7 +700,7 @@ pub fn build_continuation_entries(
                         next_action_type = ?e.next_action.action_type,
                         next_action_dest = %e.next_action.destination,
                         next_action_rollup_id = %e.next_action.rollup_id,
-                        next_action_scope = ?e.next_action.scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                        next_action_scope = ?e.next_action.scope.as_slice().iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
                         next_action_failed = e.next_action.failed,
                         "L1→L2 partial revert: L2 entry AFTER transformation"
                     );
@@ -781,7 +783,7 @@ pub fn build_continuation_entries(
                             failed: detected.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     } else {
                         l2_result_void.clone()
@@ -796,7 +798,7 @@ pub fn build_continuation_entries(
                 let first_child = &children[0].1;
                 let mut scoped_child_action = first_child.call_action.clone();
                 scoped_child_action.scope = if first_child.scope.is_empty() {
-                    vec![U256::ZERO]
+                    ScopePath::from_index(U256::ZERO)
                 } else {
                     first_child.scope.clone()
                 };
@@ -833,7 +835,7 @@ pub fn build_continuation_entries(
                             failed: child.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     } else {
                         result_void(child_target_rollup)
@@ -851,7 +853,7 @@ pub fn build_continuation_entries(
                             failed: detected.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     } else {
                         l2_result_void.clone()
@@ -900,7 +902,7 @@ pub fn build_continuation_entries(
                             failed: detected.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     } else {
                         l2_result_void.clone()
@@ -914,7 +916,7 @@ pub fn build_continuation_entries(
                 let first_child = &children[0].1;
                 let mut scoped_child_action = first_child.call_action.clone();
                 scoped_child_action.scope = if first_child.scope.is_empty() {
-                    vec![U256::ZERO]
+                    ScopePath::from_index(U256::ZERO)
                 } else {
                     first_child.scope.clone()
                 };
@@ -937,7 +939,7 @@ pub fn build_continuation_entries(
                                 failed: child.l2_delivery_failed,
                                 source_address: Address::ZERO,
                                 source_rollup: RollupId::MAINNET,
-                                scope: vec![],
+                                scope: ScopePath::root(),
                             }
                         } else {
                             result_void(child_target_rollup)
@@ -955,7 +957,7 @@ pub fn build_continuation_entries(
                                 failed: detected.l2_delivery_failed,
                                 source_address: Address::ZERO,
                                 source_rollup: RollupId::MAINNET,
-                                scope: vec![],
+                                scope: ScopePath::root(),
                             }
                         } else {
                             l2_result_void.clone()
@@ -1012,7 +1014,7 @@ pub struct L1DetectedCall {
     pub target_rollup_id: Option<u64>,
     /// Accumulated scope for this call's delivery action.
     #[serde(default)]
-    pub scope: Vec<U256>,
+    pub scope: ScopePath,
     /// Iterative discovery iteration when this call was first detected.
     /// 0 = initial trace, 1+ = discovered during iterative expansion.
     /// Used to distinguish reentrant (calls across multiple iterations)
@@ -1080,7 +1082,7 @@ pub fn analyze_continuation_calls(
                     failed: false,
                     source_address: call.source_address,
                     source_rollup: our_rollup, // source = our L2 rollup
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 };
 
                 DetectedCall {
@@ -1107,7 +1109,7 @@ pub fn analyze_continuation_calls(
                     failed: false,
                     source_address: call.source_address,
                     source_rollup: mainnet_rollup,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 };
 
                 let is_continuation = l1_to_l2_count > 0;
@@ -1123,7 +1125,7 @@ pub fn analyze_continuation_calls(
                     delivery_return_data: vec![],
                     l2_return_data: call.l2_return_data.clone(),
                     l2_delivery_failed: !call.call_success,
-                    scope: vec![], // L1→L2 root calls start with empty scope
+                    scope: ScopePath::root(), // L1→L2 root calls start with empty scope
                     discovery_iteration: call.discovery_iteration,
                     in_reverted_frame: call.in_reverted_frame,
                 }
@@ -1156,7 +1158,7 @@ pub struct L2DetectedCall {
     /// Accumulated scope for this call's L1 delivery CALL action.
     /// Includes accumulated prefix from parent hops + local trace depth.
     #[serde(default)]
-    pub scope: Vec<U256>,
+    pub scope: ScopePath,
     /// Whether this call is inside a reverted frame on L2 (try/catch that reverts).
     /// Used for partial revert patterns where some calls need REVERT/REVERT_CONTINUE.
     #[serde(default)]
@@ -1190,7 +1192,7 @@ pub struct L2ReturnCall {
     pub l2_delivery_failed: bool,
     /// Accumulated scope for this return call. Inherited from parent + local trace depth.
     #[serde(default)]
-    pub scope: Vec<U256>,
+    pub scope: ScopePath,
 }
 
 /// Output of `build_l2_to_l1_continuation_entries`: L2 table entries and L1 deferred entries.
@@ -1248,7 +1250,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
             failed: false,
             source_address: call.source_address,
             source_rollup: our_rollup,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
 
         result.push(DetectedCall {
@@ -1289,7 +1291,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
                 failed: false,
                 source_address: rc.source_address,
                 source_rollup: mainnet_rollup, // L1 — return call originates from L1
-                scope: vec![],
+                scope: ScopePath::root(),
             };
 
             tracing::debug!(
@@ -1409,7 +1411,7 @@ fn push_reentrant_child_entries(
             failed: false,
             source_address: trigger_source,
             source_rollup: RollupId::MAINNET, // L1
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let child_trigger_hash = compute_action_hash(&child_trigger);
 
@@ -1449,7 +1451,7 @@ fn push_reentrant_child_entries(
                     failed: child_failed,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
             tracing::debug!(
@@ -1469,7 +1471,7 @@ fn push_reentrant_child_entries(
             // plus recursive reentrant entries, plus scope resolution.
             // This mirrors the "subsequent call WITH children" pattern for root calls.
             let child_scope = if child.scope.is_empty() {
-                vec![U256::ZERO]
+                ScopePath::from_index(U256::ZERO)
             } else {
                 child.scope.clone()
             };
@@ -1541,7 +1543,7 @@ fn push_reentrant_child_entries(
                     failed: child_scope_failed,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
             let scope_result_hash = compute_action_hash(&child_scope_result);
@@ -1751,7 +1753,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 )
             };
             let first_child_scope = if first_child.scope.is_empty() {
-                vec![U256::ZERO]
+                ScopePath::from_index(U256::ZERO)
             } else {
                 first_child.scope.clone()
             };
@@ -1803,9 +1805,9 @@ pub fn build_l2_to_l1_continuation_entries(
                 // Sibling scope: use child's pre-computed scope if available,
                 // otherwise fall back to simple positional index.
                 let sibling_scope = if child.scope.is_empty() {
-                    vec![U256::from(child_pos)]
+                    ScopePath::from_index(U256::from(child_pos))
                 } else {
-                    child.scope.to_vec()
+                    child.scope.clone()
                 };
                 let child_call_return = CrossChainAction {
                     action_type: CrossChainActionType::Call,
@@ -1850,7 +1852,7 @@ pub fn build_l2_to_l1_continuation_entries(
                             failed: prev_child.l2_delivery_failed,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: vec![],
+                            scope: ScopePath::root(),
                         }
                     };
                 let l2_result_hash = compute_action_hash(&prev_l2_result);
@@ -1887,7 +1889,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: last_child_l2_failed,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
             let l2_result_hash = compute_action_hash(&l2_scope_result);
@@ -1915,7 +1917,7 @@ pub fn build_l2_to_l1_continuation_entries(
                         failed: call.l2_delivery_failed,
                         source_address: Address::ZERO,
                         source_rollup: RollupId::MAINNET,
-                        scope: vec![],
+                        scope: ScopePath::root(),
                     }
                 };
             l2_entries.push(CrossChainExecutionEntry {
@@ -1958,7 +1960,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: call.l2_delivery_failed,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
             l2_entries.push(CrossChainExecutionEntry {
@@ -2042,20 +2044,21 @@ pub fn build_l2_to_l1_continuation_entries(
         // - Pure simple siblings: scope=[sibling_index] for routing within executeL2TX
         // - Any nested pattern: scope=[] (sequential chaining, no scope navigation)
         // - Single call: scope from trace depth
-        let call_scope_for_delivery = if use_sibling_scopes {
+        let call_scope_for_delivery: Vec<U256> = if use_sibling_scopes {
             // For simple siblings at depth 1: scope=[root_pos]
             // For deep siblings: scope=[0,...,root_pos]
             if l2_call.scope.is_empty() {
                 vec![U256::from(root_pos)]
             } else {
-                let mut s = l2_call.scope[..l2_call.scope.len().saturating_sub(1)].to_vec();
+                let l2_scope = l2_call.scope.as_slice();
+                let mut s = l2_scope[..l2_scope.len().saturating_sub(1)].to_vec();
                 s.push(U256::from(root_pos));
                 s
             }
         } else if l2_call.scope.is_empty() {
             vec![] // single call or nested pattern: no scope navigation
         } else if !has_any_nested {
-            l2_call.scope.clone() // single call with trace depth scope
+            l2_call.scope.as_slice().to_vec() // single call with trace depth scope
         } else {
             vec![] // nested multi-call: always scope=[]
         };
@@ -2069,7 +2072,7 @@ pub fn build_l2_to_l1_continuation_entries(
             failed: false,
             source_address: l2_call.call_action.source_address,
             source_rollup: our_rollup_id,
-            scope: call_scope_for_delivery,
+            scope: ScopePath::from_parts(call_scope_for_delivery),
         };
 
         let delivery_ether_delta = if delivery.value.is_zero() {
@@ -2093,7 +2096,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: l2_call.l2_delivery_failed,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
         let delivery_result_hash = compute_action_hash(&delivery_result);
@@ -2109,7 +2112,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             };
             let trigger_hash = compute_action_hash(&trigger);
 
@@ -2163,7 +2166,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: false,
                     source_address: next_call.call_action.source_address,
                     source_rollup: our_rollup_id,
-                    scope: next_scope,
+                    scope: ScopePath::from_parts(next_scope),
                 }
             } else {
                 // §C.6: L2TX terminal RESULT
@@ -2176,7 +2179,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: false,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
 
@@ -2222,7 +2225,7 @@ pub fn build_l2_to_l1_continuation_entries(
                         failed: l2_call.l2_delivery_failed,
                         source_address: Address::ZERO,
                         source_rollup: RollupId::MAINNET,
-                        scope: vec![],
+                        scope: ScopePath::root(),
                     }
                 };
             let scope_result_hash = compute_action_hash(&scope_result);
@@ -2252,7 +2255,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: false,
                     source_address: next_call.call_action.source_address,
                     source_rollup: our_rollup_id,
-                    scope: next_scope,
+                    scope: ScopePath::from_parts(next_scope),
                 }
             } else {
                 // Last call: §C.6 terminal
@@ -2265,7 +2268,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: false,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
             l1_entries.push(CrossChainExecutionEntry {
@@ -2300,7 +2303,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: false,
                     source_address: next_call.call_action.source_address,
                     source_rollup: our_rollup_id,
-                    scope: next_scope,
+                    scope: ScopePath::from_parts(next_scope),
                 }
             } else {
                 // Last call: §C.6 L2TX terminal RESULT
@@ -2313,7 +2316,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     failed: false,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 }
             };
 
@@ -2364,7 +2367,7 @@ pub fn build_l2_to_l1_continuation_entries(
             // Save the terminal for the REVERT_CONTINUE entry
             let terminal = std::mem::replace(
                 &mut last.next_action,
-                revert_action(our_rollup_id, vec![alloy_primitives::U256::ZERO]), // scope=[0]
+                revert_action(our_rollup_id, ScopePath::from_index(alloy_primitives::U256::ZERO)), // scope=[0]
             );
 
             // Append REVERT_CONTINUE → terminal RESULT
@@ -2438,12 +2441,11 @@ pub fn build_l2_to_l1_continuation_entries(
             // The non-reverted call's scope is computed identically to the main loop's
             // sibling scope logic: last element = root_pos.
             let first_non_reverted = l2_to_l1_calls[non_rev_pos].1;
-            let expected_scope = if first_non_reverted.scope.is_empty() {
+            let expected_scope: Vec<U256> = if first_non_reverted.scope.is_empty() {
                 vec![U256::from(non_rev_pos)]
             } else {
-                let mut s = first_non_reverted.scope
-                    [..first_non_reverted.scope.len().saturating_sub(1)]
-                    .to_vec();
+                let s_slice = first_non_reverted.scope.as_slice();
+                let mut s = s_slice[..s_slice.len().saturating_sub(1)].to_vec();
                 s.push(U256::from(non_rev_pos));
                 s
             };
@@ -2454,7 +2456,7 @@ pub fn build_l2_to_l1_continuation_entries(
             );
             let boundary_idx = l1_entries.iter().position(|e| {
                 e.next_action.action_type == CrossChainActionType::Call
-                    && e.next_action.scope == expected_scope
+                    && e.next_action.scope.as_slice() == expected_scope.as_slice()
             });
 
             if let Some(idx) = boundary_idx {
@@ -2462,8 +2464,10 @@ pub fn build_l2_to_l1_continuation_entries(
                 let continuation_call = l1_entries[idx].next_action.clone();
 
                 // Replace with REVERT(scope=[0])
-                l1_entries[idx].next_action =
-                    revert_action(our_rollup_id, vec![alloy_primitives::U256::ZERO]);
+                l1_entries[idx].next_action = revert_action(
+                    our_rollup_id,
+                    ScopePath::from_index(alloy_primitives::U256::ZERO),
+                );
 
                 // Insert REVERT_CONTINUE → continuation_call
                 l1_entries.insert(
@@ -2494,7 +2498,7 @@ pub fn build_l2_to_l1_continuation_entries(
                         next_action_type = ?e.next_action.action_type,
                         next_action_dest = %e.next_action.destination,
                         next_action_rollup_id = %e.next_action.rollup_id,
-                        next_action_scope = ?e.next_action.scope.iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                        next_action_scope = ?e.next_action.scope.as_slice().iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
                         next_action_failed = e.next_action.failed,
                         next_action_data_hex = %format!("0x{}", hex::encode(&e.next_action.data)),
                         "partial revert: L1 entry AFTER transformation"

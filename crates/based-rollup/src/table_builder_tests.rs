@@ -20,7 +20,7 @@ fn make_l1_to_l2_call(
         failed: false,
         source_address,
         source_rollup: RollupId::MAINNET, // MAINNET
-        scope: vec![],
+        scope: ScopePath::root(),
     }
 }
 
@@ -40,7 +40,7 @@ fn make_l2_to_l1_call(
         failed: false,
         source_address,
         source_rollup: l2_rollup_id,
-        scope: vec![],
+        scope: ScopePath::root(),
     }
 }
 
@@ -67,7 +67,7 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     };
@@ -136,7 +136,7 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     };
@@ -153,7 +153,7 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     };
@@ -169,7 +169,7 @@ fn test_flash_loan_continuation_entries() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     };
@@ -302,8 +302,8 @@ fn test_flash_loan_continuation_entries() {
         "L1[1] nextAction sourceRollup should be L2"
     );
     assert_eq!(
-        l1_e2.next_action.scope,
-        vec![U256::ZERO],
+        l1_e2.next_action.scope.as_slice(),
+        &[U256::ZERO][..],
         "L1[1] nextAction scope should be [0]"
     );
 
@@ -340,7 +340,7 @@ fn test_action_hash_determinism() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
 
     let hash1 = compute_action_hash(&action);
@@ -369,7 +369,7 @@ fn test_two_continuations_no_children() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     };
@@ -382,7 +382,7 @@ fn test_two_continuations_no_children() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     };
@@ -435,7 +435,7 @@ fn make_l2_to_l1_detected(
             failed: false,
             source_address,
             source_rollup: l2_rollup_id,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
         parent_call_index,
         is_continuation: false,
@@ -443,7 +443,7 @@ fn make_l2_to_l1_detected(
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     }
@@ -516,7 +516,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l2_result_void = CrossChainAction {
         action_type: CrossChainActionType::Result,
@@ -527,7 +527,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l1_result_hash = compute_action_hash(&l1_result_void);
     let l2_result_hash = compute_action_hash(&l2_result_void);
@@ -574,8 +574,8 @@ fn test_l2_to_l1_depth2_entry_generation() {
         "L2[1] callReturn.source_address must be CALL_C.destination"
     );
     assert_eq!(
-        l2_e1.next_action.scope,
-        vec![U256::ZERO],
+        l2_e1.next_action.scope.as_slice(),
+        &[U256::ZERO][..],
         "L2[1] callReturn scope must be [0]"
     );
 
@@ -617,8 +617,8 @@ fn test_l2_to_l1_depth2_entry_generation() {
         "L2[3] callReturn.source_address must be CALL_D.destination"
     );
     assert_eq!(
-        l2_e3.next_action.scope,
-        vec![U256::ZERO],
+        l2_e3.next_action.scope.as_slice(),
+        &[U256::ZERO][..],
         "L2[3] scope must be [0] — each reentrant call starts fresh"
     );
 
@@ -659,7 +659,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let child_trigger_c = CrossChainAction {
         action_type: CrossChainActionType::Call,
@@ -670,7 +670,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         failed: false,
         source_address: dest_c,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let child_trigger_d = CrossChainAction {
         action_type: CrossChainActionType::Call,
@@ -681,7 +681,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         failed: false,
         source_address: dest_d,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
     let child_trigger_c_hash = compute_action_hash(&child_trigger_c);
@@ -709,8 +709,8 @@ fn test_l2_to_l1_depth2_entry_generation() {
         CrossChainActionType::Call
     );
     assert_eq!(
-        entries_l2tx[0].next_action.scope,
-        vec![] as Vec<U256>,
+        entries_l2tx[0].next_action.scope.as_slice(),
+        &[U256::ZERO; 0][..],
         "nested pattern: delivery scope must be [] (no sibling routing)"
     );
     assert_eq!(entries_l2tx[0].next_action.destination, dest_a);
@@ -729,7 +729,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         entries_c[0].next_action.action_type,
         CrossChainActionType::Call
     );
-    assert_eq!(entries_c[0].next_action.scope, vec![U256::ZERO]);
+    assert_eq!(entries_c[0].next_action.scope.as_slice(), &[U256::ZERO][..]);
 
     // child_trigger_D → RESULT(L1, void) — leaf grandchild must NOT be orphaned
     let entries_d = find_l1(child_trigger_d_hash);
@@ -864,7 +864,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
         failed: false,
         source_address: dest_grand,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let grandchild_trigger_hash = compute_action_hash(&grandchild_trigger);
 
@@ -945,7 +945,7 @@ fn test_l2_to_l1_depth1_regression() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l2_result_void = CrossChainAction {
         action_type: CrossChainActionType::Result,
@@ -956,7 +956,7 @@ fn test_l2_to_l1_depth1_regression() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l1_result_hash = compute_action_hash(&l1_result_void);
     let l2_result_hash = compute_action_hash(&l2_result_void);
@@ -990,8 +990,8 @@ fn test_l2_to_l1_depth1_regression() {
         "L2[1] callReturn.destination must be CALL_C.source_address"
     );
     assert_eq!(
-        l2_e1.next_action.scope,
-        vec![U256::ZERO],
+        l2_e1.next_action.scope.as_slice(),
+        &[U256::ZERO][..],
         "L2[1] scope must be [0]"
     );
 
@@ -1030,7 +1030,7 @@ fn test_l2_to_l1_depth1_regression() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let child_trigger_c = CrossChainAction {
         action_type: CrossChainActionType::Call,
@@ -1041,7 +1041,7 @@ fn test_l2_to_l1_depth1_regression() {
         failed: false,
         source_address: dest_c,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
     let child_trigger_c_hash = compute_action_hash(&child_trigger_c);
@@ -1055,8 +1055,8 @@ fn test_l2_to_l1_depth1_regression() {
         "L1[0] next = CALL"
     );
     assert_eq!(
-        l1_e0.next_action.scope,
-        vec![] as Vec<U256>,
+        l1_e0.next_action.scope.as_slice(),
+        &[U256::ZERO; 0][..],
         "L1[0] scope=[]"
     );
     assert_eq!(l1_e0.next_action.destination, dest_a, "L1[0] dest = A");
@@ -1073,8 +1073,8 @@ fn test_l2_to_l1_depth1_regression() {
         "L1[1] next = CALL (chained)"
     );
     assert_eq!(
-        l1_e1.next_action.scope,
-        vec![] as Vec<U256>,
+        l1_e1.next_action.scope.as_slice(),
+        &[U256::ZERO; 0][..],
         "L1[1] scope=[]"
     );
     assert_eq!(l1_e1.next_action.destination, dest_b, "L1[1] dest = B");
@@ -1124,7 +1124,7 @@ fn test_all_entries_have_empty_state_deltas() {
         delivery_return_data: vec![],
         l2_return_data: vec![],
         l2_delivery_failed: false,
-        scope: vec![],
+        scope: ScopePath::root(),
         discovery_iteration: 0,
         in_reverted_frame: false,
     };
@@ -1181,7 +1181,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
                 failed: false,
                 source_address: logger_l2,
                 source_rollup: l2_id,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: None,
             is_continuation: false,
@@ -1189,7 +1189,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
             delivery_return_data: counter_return.clone(), // L1 delivery also returns the counter value
             l2_return_data: vec![],
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1204,7 +1204,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
                 failed: false,
                 source_address: logger_l1,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: Some(0),
             is_continuation: false,
@@ -1212,7 +1212,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
             delivery_return_data: vec![],
             l2_return_data: counter_return.clone(),
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1242,7 +1242,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let expected_hash = compute_action_hash(&expected_result);
     assert_eq!(
@@ -1291,7 +1291,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 failed: false,
                 source_address: parent,
                 source_rollup: l2_id,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: None,
             is_continuation: false,
@@ -1299,7 +1299,7 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: root_delivery_return.clone(),
             l2_return_data: vec![],
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1315,7 +1315,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 failed: false,
                 source_address: parent,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: Some(0),
             is_continuation: false,
@@ -1323,7 +1323,7 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: vec![],
             l2_return_data: vec![], // void
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1339,7 +1339,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 failed: false,
                 source_address: parent,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: Some(0),
             is_continuation: false,
@@ -1347,7 +1347,7 @@ fn test_l2_mixed_void_nonvoid_children() {
             delivery_return_data: vec![],
             l2_return_data: child_b_return.clone(),
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1375,7 +1375,7 @@ fn test_l2_mixed_void_nonvoid_children() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let nonvoid_hash = compute_action_hash(&nonvoid_result);
     assert_eq!(
@@ -1421,7 +1421,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
                 failed: false,
                 source_address: parent,
                 source_rollup: l2_id,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: None,
             is_continuation: false,
@@ -1429,7 +1429,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
             delivery_return_data: delivery_data.clone(), // L1 delivery returns data
             l2_return_data: vec![],
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1444,7 +1444,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
                 failed: false,
                 source_address: parent,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: Some(0),
             is_continuation: false,
@@ -1452,7 +1452,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
             delivery_return_data: vec![0xCA, 0xFE], // child also has delivery data
             l2_return_data: vec![],
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1512,7 +1512,7 @@ fn test_void_children_still_use_result_void() {
                 failed: false,
                 source_address: parent,
                 source_rollup: l2_id,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: None,
             is_continuation: false,
@@ -1520,7 +1520,7 @@ fn test_void_children_still_use_result_void() {
             delivery_return_data: vec![], // void
             l2_return_data: vec![],
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1535,7 +1535,7 @@ fn test_void_children_still_use_result_void() {
                 failed: false,
                 source_address: parent,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
             parent_call_index: Some(0),
             is_continuation: false,
@@ -1543,7 +1543,7 @@ fn test_void_children_still_use_result_void() {
             delivery_return_data: vec![], // void
             l2_return_data: vec![],       // void
             l2_delivery_failed: false,
-            scope: vec![],
+            scope: ScopePath::root(),
             discovery_iteration: 0,
             in_reverted_frame: false,
         },
@@ -1610,7 +1610,7 @@ fn mk_reorder_entry(hash_byte: u8, seq: u64) -> CrossChainExecutionEntry {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     }
 }

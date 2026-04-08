@@ -15,8 +15,8 @@ use alloy_sol_types::{SolCall, SolValue, sol};
 use based_rollup::config::RollupConfig;
 use based_rollup::cross_chain::{
     self, CROSS_CHAIN_MANAGER_L2_ADDRESS, CrossChainAction, CrossChainActionType,
-    CrossChainExecutionEntry, ICrossChainManagerL2, RollupId, build_aggregate_block_entry,
-    encode_block_calldata, encode_post_batch_calldata,
+    CrossChainExecutionEntry, ICrossChainManagerL2, RollupId, ScopePath,
+    build_aggregate_block_entry, encode_block_calldata, encode_post_batch_calldata,
 };
 use based_rollup::derivation::DerivationPipeline;
 use based_rollup::execution_planner::build_entries_from_encoded;
@@ -5211,7 +5211,7 @@ async fn test_cross_chain_action_hash_matches_solidity() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -5321,7 +5321,7 @@ async fn test_cross_chain_multiple_entries_single_batch() {
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
         };
         entries.push(entry);
@@ -6029,7 +6029,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let result_action_hash = keccak256(
         <ICrossChainManagerL2::Action as alloy_sol_types::SolType>::abi_encode(
@@ -6055,7 +6055,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
         failed: false,
         source_address,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let call_action_hash = keccak256(
         <ICrossChainManagerL2::Action as alloy_sol_types::SolType>::abi_encode(

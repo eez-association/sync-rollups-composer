@@ -15,7 +15,7 @@
 //!
 //! Users point MetaMask at this proxy for transparent synchronous composability.
 
-use crate::cross_chain::{RollupId, filter_new_by_count};
+use crate::cross_chain::{RollupId, ScopePath, filter_new_by_count};
 use alloy_primitives::{Address, U256};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes as HyperBytes;
@@ -822,7 +822,7 @@ async fn simulate_l1_to_l2_call_on_l2(
         failed: false,
         source_address,
         source_rollup: RollupId::MAINNET, // L1 = rollup 0
-        scope: l2_scope.to_vec(),
+        scope: ScopePath::from_parts(l2_scope.to_vec()),
     };
     let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
 
@@ -1001,7 +1001,7 @@ async fn simulate_l1_to_l2_call_on_l2(
         failed: !inner_success,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let result_hash = crate::table_builder::compute_action_hash(&result_action);
     let result_entry = crate::cross_chain::CrossChainExecutionEntry {
@@ -1187,7 +1187,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
         failed: false,
         source_address,
         source_rollup: RollupId::MAINNET,
-        scope: l2_scope.to_vec(),
+        scope: ScopePath::from_parts(l2_scope.to_vec()),
     };
     let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
 
@@ -1202,7 +1202,7 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let void_hash = crate::table_builder::compute_action_hash(&void_result);
     let void_entry = crate::cross_chain::CrossChainExecutionEntry {
@@ -1914,9 +1914,9 @@ async fn build_and_run_l1_postbatch_trace(
                 None
             },
             scope: if c.trace_depth <= 1 {
-                vec![]
+                ScopePath::root()
             } else {
-                vec![U256::ZERO; c.trace_depth]
+                ScopePath::from_parts(vec![U256::ZERO; c.trace_depth])
             },
             discovery_iteration: c.discovery_iteration,
             l1_trace_depth: c.trace_depth,
@@ -2686,7 +2686,7 @@ async fn trace_and_detect_internal_calls(
                     failed: !final_success,
                     source_address: Address::ZERO,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 };
                 let result_hash = crate::table_builder::compute_action_hash(&result_action);
                 prior_result_entries.push(crate::cross_chain::CrossChainExecutionEntry {
@@ -2705,7 +2705,7 @@ async fn trace_and_detect_internal_calls(
                     failed: false,
                     source_address: call_source,
                     source_rollup: RollupId::MAINNET,
-                    scope: vec![],
+                    scope: ScopePath::root(),
                 };
                 let exec_cd =
                     crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
@@ -3071,7 +3071,7 @@ async fn trace_and_detect_internal_calls(
                                 failed: !prior.call_success,
                                 source_address: Address::ZERO,
                                 source_rollup: RollupId::MAINNET,
-                                scope: vec![],
+                                scope: ScopePath::root(),
                             };
                             let result_hash =
                                 crate::table_builder::compute_action_hash(&result_action);
@@ -3091,7 +3091,7 @@ async fn trace_and_detect_internal_calls(
                                 failed: false,
                                 source_address: prior.source_address,
                                 source_rollup: RollupId::MAINNET,
-                                scope: vec![],
+                                scope: ScopePath::root(),
                             };
                             let exec_cd = crate::cross_chain::encode_execute_incoming_call_calldata(
                                 &sim_action,
@@ -3176,7 +3176,7 @@ async fn trace_and_detect_internal_calls(
                                 failed: !final_success,
                                 source_address: Address::ZERO,
                                 source_rollup: RollupId::MAINNET,
-                                scope: vec![],
+                                scope: ScopePath::root(),
                             };
                             let result_hash =
                                 crate::table_builder::compute_action_hash(&result_action);
@@ -3196,7 +3196,7 @@ async fn trace_and_detect_internal_calls(
                                 failed: false,
                                 source_address: call.source_address,
                                 source_rollup: RollupId::MAINNET,
-                                scope: vec![],
+                                scope: ScopePath::root(),
                             };
                             let exec_cd = crate::cross_chain::encode_execute_incoming_call_calldata(
                                 &sim_action,
@@ -3780,9 +3780,12 @@ async fn trace_and_detect_internal_calls(
                                             None
                                         },
                                         scope: if c.trace_depth <= 1 {
-                                            vec![]
+                                            ScopePath::root()
                                         } else {
-                                            vec![U256::ZERO; c.trace_depth]
+                                            ScopePath::from_parts(vec![
+                                                U256::ZERO;
+                                                c.trace_depth
+                                            ])
                                         },
                                         discovery_iteration: c.discovery_iteration,
                                         l1_trace_depth: c.trace_depth,
@@ -3865,7 +3868,7 @@ async fn trace_and_detect_internal_calls(
                                 failed: false,
                                 source_address: call_source,
                                 source_rollup: RollupId::MAINNET,
-                                scope: vec![],
+                                scope: ScopePath::root(),
                             };
                             let exec_calldata =
                                 crate::cross_chain::encode_execute_incoming_call_calldata(

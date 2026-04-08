@@ -19,7 +19,7 @@ impl Proposer {
 }
 
 use super::*;
-use crate::cross_chain::RollupId;
+use crate::cross_chain::{RollupId, ScopePath};
 
 /// Helper to build a minimal RollupConfig for tests.
 fn test_config() -> RollupConfig {
@@ -293,7 +293,7 @@ fn test_post_batch_calldata_encoding() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -333,7 +333,7 @@ fn test_post_batch_calldata_multiple_entries() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -371,7 +371,7 @@ fn test_post_batch_calldata_empty_proof_vs_nonempty_proof() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -425,7 +425,7 @@ fn test_post_batch_calldata_roundtrip_with_proof() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -516,7 +516,7 @@ fn test_post_batch_calldata_with_negative_ether_delta() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -558,7 +558,7 @@ fn test_post_batch_calldata_with_large_scope() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: large_scope.clone(),
+            scope: ScopePath::from_parts(large_scope.clone()),
         },
     };
 
@@ -596,7 +596,7 @@ fn test_post_batch_calldata_with_failed_action() {
             failed: true,
             source_address: Address::with_last_byte(0x88),
             source_rollup: RollupId::new(U256::from(1)),
-            scope: vec![U256::from(0), U256::from(1)],
+            scope: ScopePath::from_parts(vec![U256::from(0), U256::from(1)]),
         },
     };
 
@@ -722,7 +722,7 @@ fn test_cross_chain_batch_calldata_gas_with_many_large_entries() {
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::new(U256::from(2)),
-                scope: vec![],
+                scope: ScopePath::root(),
             },
         })
         .collect();

@@ -866,7 +866,7 @@ where
                 call_success: c.call_success,
                 parent_call_index: c.parent_call_index,
                 target_rollup_id: c.target_rollup_id,
-                scope: c.scope.clone(),
+                scope: crate::cross_chain::ScopePath::from_parts(c.scope.clone()),
                 discovery_iteration: c.discovery_iteration,
                 l1_trace_depth: c.l1_trace_depth,
                 in_reverted_frame: c.in_reverted_frame,
@@ -1014,7 +1014,7 @@ where
                 source_address: c.source_address,
                 delivery_return_data: c.delivery_return_data.to_vec(),
                 delivery_failed: c.delivery_failed,
-                scope: c.scope.clone(),
+                scope: crate::cross_chain::ScopePath::from_parts(c.scope.clone()),
                 in_reverted_frame: c.in_reverted_frame,
             })
             .collect();
@@ -1034,7 +1034,7 @@ where
                     .map(|b| b.to_vec())
                     .unwrap_or_default(),
                 l2_delivery_failed: c.l2_delivery_failed,
-                scope: c.scope.clone(),
+                scope: crate::cross_chain::ScopePath::from_parts(c.scope.clone()),
             })
             .collect();
 
@@ -1272,7 +1272,7 @@ fn action_to_serializable(action: &CrossChainAction) -> SerializableAction {
         failed: action.failed,
         source_address: action.source_address,
         source_rollup: action.source_rollup.as_u256(),
-        scope: action.scope.clone(),
+        scope: action.scope.as_slice().to_vec(),
     }
 }
 

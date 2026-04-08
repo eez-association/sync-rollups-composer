@@ -314,6 +314,133 @@ impl std::fmt::Display for RollupId {
     }
 }
 
+// ──────────────────────────────────────────────
+//  ScopePath newtype (refactor PLAN step 1.1c)
+//
+//  A zero-cost wrapper over `Vec<U256>` that makes a cross-chain
+//  execution scope a distinct type at the compile-time level. The
+//  protocol (`_resolveScopes` in `CrossChainManagerL2`) represents a
+//  scope as the indexed path taken into a call tree — each element is
+//  a child index, `[]` means "root", `[0]` means "first child of the
+//  root", `[0, 1]` means "second child of the first child", and so
+//  on. Treating this as a generic `Vec<U256>` made it easy to pass a
+//  scope where a plain list was expected (and vice versa); the newtype
+//  closes that at the type level.
+//
+//  **Helpers `enter` / `exit` carry zero current callers in the
+//  codebase** — every scope is built as a literal or cloned by value.
+//  They are included per PLAN §8 step 1.1c spec because the protocol
+//  (and future builder refactors in 1.9b / 3.x) treats a scope as a
+//  tree-walk stack. Having domain-named `enter` / `exit` available
+//  when those call sites land avoids a mid-refactor API expansion.
+// ──────────────────────────────────────────────
+
+/// Scope path for a cross-chain execution entry — the indexed path
+/// from the root of a call tree to a specific descendant. Wraps a
+/// `Vec<U256>` with domain semantics so arbitrary `Vec<U256>` values
+/// cannot be passed where a scope is expected.
+///
+/// Construction:
+/// - [`ScopePath::root`] — empty path, the root of a call tree.
+/// - [`ScopePath::from_index`] — single child index, e.g. `[0]`.
+/// - [`ScopePath::from_parts`] — at ABI / deserialization boundaries.
+///
+/// Mutation (tree-walk semantics, per PLAN §8 step 1.1c):
+/// - [`ScopePath::enter`] — push a child index (enter a subtree).
+/// - [`ScopePath::exit`] — pop the current child index (return to
+///   parent).
+///
+/// Borrow / conversion:
+/// - [`ScopePath::as_slice`] — read-only view as `&[U256]`, used at
+///   ABI encode boundaries and inside equality checks.
+/// - [`ScopePath::into_inner`] — owning conversion back to
+///   `Vec<U256>` for wire-format types and sol! structs that still
+///   hold a raw `Vec<U256>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct ScopePath(Vec<U256>);
+
+impl ScopePath {
+    /// The root of a call tree — an empty scope path.
+    pub fn root() -> Self {
+        Self(Vec::new())
+    }
+
+    /// A single-element scope path `[idx]`. Shorthand for the very
+    /// common "first child of the root" pattern that shows up in
+    /// almost every L2→L1 / L1→L2 continuation entry.
+    pub fn from_index(idx: U256) -> Self {
+        Self(vec![idx])
+    }
+
+    /// Construct a scope from a raw `Vec<U256>` at a boundary — ABI
+    /// decode, JSON deserialization, sol! → Rust conversion. Every
+    /// non-literal construction from an untyped value must go
+    /// through here so auditors can `grep ScopePath::from_parts` to
+    /// list every entry point.
+    pub fn from_parts(parts: Vec<U256>) -> Self {
+        Self(parts)
+    }
+
+    /// Enter a subtree by pushing a child index onto the path.
+    ///
+    /// Currently has no callers — see the module comment above. This
+    /// helper exists per PLAN §8 step 1.1c spec so future builder
+    /// refactors do not need to expand the public API mid-refactor.
+    pub fn enter(&mut self, idx: U256) {
+        self.0.push(idx);
+    }
+
+    /// Exit the current subtree by popping the last index from the
+    /// path. Returns the popped index, or `None` if already at the
+    /// root. Currently has no callers (see `enter`).
+    pub fn exit(&mut self) -> Option<U256> {
+        self.0.pop()
+    }
+
+    /// Borrow the scope as a raw slice — used at ABI encode
+    /// boundaries (`to_sol_action`, `abi_encode`) and inside internal
+    /// equality / length checks.
+    pub fn as_slice(&self) -> &[U256] {
+        &self.0
+    }
+
+    /// Consume the scope and return the inner `Vec<U256>`. Used
+    /// when crossing into wire-format types (`SerializableAction`,
+    /// `ICrossChainManagerL2::Action`) that still hold a raw
+    /// `Vec<U256>`.
+    pub fn into_inner(self) -> Vec<U256> {
+        self.0
+    }
+
+    /// Number of elements in the scope path. Zero means "root".
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// `true` if this is the root path (no children entered).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for ScopePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            write!(f, "root")
+        } else {
+            write!(f, "[")?;
+            for (i, idx) in self.0.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", idx)?;
+            }
+            write!(f, "]")
+        }
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {
@@ -335,7 +462,7 @@ pub struct CrossChainAction {
     pub failed: bool,
     pub source_address: Address,
     pub source_rollup: RollupId,
-    pub scope: Vec<U256>,
+    pub scope: ScopePath,
 }
 
 /// A state delta for a rollup (Rust mirror of Solidity `StateDelta` struct).
@@ -384,7 +511,7 @@ impl CrossChainAction {
             failed: self.failed,
             sourceAddress: self.source_address,
             sourceRollup: self.source_rollup.as_u256(),
-            scope: self.scope.clone(),
+            scope: self.scope.as_slice().to_vec(),
         }
     }
 }
@@ -398,7 +525,7 @@ impl CrossChainAction {
 /// Signals scope revert on L1. The `scope` determines which `newScope` level
 /// catches the `ScopeReverted` error. Fields match spec §D.12 and
 /// `IntegrationTest.t.sol:Scenario 5`.
-pub fn revert_action(rollup_id: RollupId, scope: Vec<U256>) -> CrossChainAction {
+pub fn revert_action(rollup_id: RollupId, scope: ScopePath) -> CrossChainAction {
     CrossChainAction {
         action_type: CrossChainActionType::Revert,
         rollup_id,
@@ -427,7 +554,7 @@ pub fn revert_continue_action(rollup_id: RollupId) -> CrossChainAction {
         failed: true,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     }
 }
 
@@ -682,7 +809,7 @@ pub fn build_block_entries(
                         failed: false,
                         source_address: Address::ZERO,
                         source_rollup: RollupId::MAINNET,
-                        scope: vec![],
+                        scope: ScopePath::root(),
                     },
                 }
             },
@@ -716,7 +843,7 @@ pub fn build_aggregate_block_entry(
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     }
 }
@@ -745,7 +872,7 @@ pub fn encode_execute_incoming_call_calldata(action: &CrossChainAction) -> Bytes
         data: action.data.clone().into(),
         sourceAddress: action.source_address,
         sourceRollup: action.source_rollup.as_u256(),
-        scope: action.scope.clone(),
+        scope: action.scope.as_slice().to_vec(),
     };
     Bytes::from(call.abi_encode())
 }
@@ -788,7 +915,7 @@ impl CrossChainAction {
             failed: sol.failed,
             source_address: sol.sourceAddress,
             source_rollup: RollupId::from_abi_boundary(sol.sourceRollup),
-            scope: sol.scope.clone(),
+            scope: ScopePath::from_parts(sol.scope.clone()),
         })
     }
 }
@@ -858,7 +985,7 @@ pub fn build_cross_chain_call_entries(
         failed: false,
         source_address,
         source_rollup,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
 
     // Build RESULT action: loaded into L2 execution table, consumed when
@@ -873,7 +1000,7 @@ pub fn build_cross_chain_call_entries(
         failed: !call_success,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
 
     let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
@@ -973,7 +1100,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address,
         source_rollup: rollup_id_typed,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l2_result_action = CrossChainAction {
         action_type: CrossChainActionType::Result,
@@ -984,7 +1111,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: delivery_failed,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
 
     let l2_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
@@ -1031,7 +1158,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET, // MAINNET_ROLLUP_ID = 0
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l1_trigger_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l1_trigger_action.to_sol_action(),
@@ -1071,7 +1198,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address, // L2 initiator is the source on L1
         source_rollup: rollup_id_typed,
-        scope: effective_scope.clone(),
+        scope: ScopePath::from_parts(effective_scope.clone()),
     };
 
     // Entry 2 action_hash: matches what _processCallAtScope builds after executing
@@ -1091,7 +1218,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: delivery_failed,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let l1_delivery_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l1_delivery_result.to_sol_action(),
@@ -1109,7 +1236,7 @@ pub fn build_l2_to_l1_call_entries(
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
 
     // Nested format: [trigger CALL entry, delivery RESULT entry]
@@ -1145,7 +1272,7 @@ pub fn build_l2_to_l1_call_entries(
         // within the scope, regardless of delivery depth.
         // Evidence: both revertCounterL2 (delivery=[0]) and deepScopeRevert
         // (delivery=[0,0]) use REVERT(scope=[0]).
-        let revert_next = revert_action(rollup_id_typed, vec![U256::ZERO]);
+        let revert_next = revert_action(rollup_id_typed, ScopePath::from_index(U256::ZERO));
         let revert_continue_hash = compute_revert_continue_hash(rollup_id_typed);
         vec![
             CrossChainExecutionEntry {
@@ -1490,7 +1617,7 @@ pub fn reconstruct_continuation_l2_entries(
             failed: call_c_scoped.failed,
             source_address: call_c_scoped.source_address,
             source_rollup: call_c_scoped.source_rollup,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let call_c_unscoped_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
             &call_c_unscoped.to_sol_action(),
@@ -1527,7 +1654,7 @@ pub fn reconstruct_continuation_l2_entries(
             failed: inner_failed,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let scope_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
             &scope_result_for_lookup.to_sol_action(),
@@ -1569,7 +1696,7 @@ pub fn reconstruct_continuation_l2_entries(
             failed: inner_failed,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let result_our_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
             &result_our_rollup.to_sol_action(),
@@ -1595,7 +1722,7 @@ pub fn reconstruct_continuation_l2_entries(
             failed: inner_failed,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         continuation_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
@@ -1617,7 +1744,7 @@ pub fn reconstruct_continuation_l2_entries(
             failed: delivery_failed,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         continuation_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
@@ -1735,7 +1862,7 @@ pub fn parse_execution_consumed_logs(logs: &[Log]) -> ConsumedMap {
                             failed: false,
                             source_address: Address::ZERO,
                             source_rollup: RollupId::MAINNET,
-                            scope: Vec::new(),
+                            scope: ScopePath::root(),
                         });
                     }
                 }
@@ -1759,7 +1886,7 @@ pub fn parse_execution_consumed_logs(logs: &[Log]) -> ConsumedMap {
                         failed: false,
                         source_address: Address::ZERO,
                         source_rollup: RollupId::MAINNET,
-                        scope: Vec::new(),
+                        scope: ScopePath::root(),
                     });
                 }
             }

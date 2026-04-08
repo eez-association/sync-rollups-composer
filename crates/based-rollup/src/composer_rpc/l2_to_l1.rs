@@ -19,7 +19,7 @@
 //! The proxy listens on a configurable port (default: disabled) and forwards
 //! to `127.0.0.1:{reth_rpc_port}` (default: 8545).
 
-use crate::cross_chain::{RollupId, filter_new_by_count};
+use crate::cross_chain::{RollupId, ScopePath, filter_new_by_count};
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolCall;
 use http_body_util::{BodyExt, Full};
@@ -1763,7 +1763,7 @@ async fn simulate_l1_delivery(
                 source_address: _trigger_user,
                 delivery_return_data: final_return_data.clone(),
                 delivery_failed: final_delivery_failed,
-                scope: root_scope.to_vec(),
+                scope: ScopePath::from_parts(root_scope.to_vec()),
                 in_reverted_frame: false,
             };
 
@@ -2608,7 +2608,7 @@ async fn simulate_l1_combined_delivery(
                     source_address: call.source_address,
                     delivery_return_data: per_call_return_data[i].clone(),
                     delivery_failed: per_call_delivery_failed[i],
-                    scope: call_scope.clone(),
+                    scope: ScopePath::from_parts(call_scope.clone()),
                     in_reverted_frame: false,
                 };
 
@@ -3198,7 +3198,7 @@ struct DetectedReturnCall {
     l2_delivery_failed: bool,
     /// Accumulated scope for this return call's entries.
     /// = parent call's scope ++ [0; trace_depth on L1].
-    scope: Vec<U256>,
+    scope: ScopePath,
 }
 
 /// Maximum number of iterative discovery rounds in `simulate_l1_delivery`.
@@ -3355,7 +3355,7 @@ async fn extract_l1_to_l2_return_calls(
                         parent_call_index: None,
                         l2_return_data: vec![],
                         l2_delivery_failed: false,
-                        scope: accumulated,
+                        scope: ScopePath::from_parts(accumulated),
                     })
                 }
                 _ => None, // Not targeting our rollup — skip (forward call or other rollup)
@@ -4321,7 +4321,7 @@ async fn trace_and_detect_l2_internal_calls(
                 source_address: c.source_address,
                 delivery_return_data: c.delivery_return_data.clone(),
                 delivery_failed: c.delivery_failed,
-                scope: vec![U256::ZERO; c.trace_depth.max(1)],
+                scope: ScopePath::from_parts(vec![U256::ZERO; c.trace_depth.max(1)]),
                 in_reverted_frame: c.in_reverted_frame,
             })
             .collect();

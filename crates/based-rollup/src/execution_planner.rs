@@ -7,7 +7,7 @@
 use crate::config::RollupConfig;
 use crate::cross_chain::{
     CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    ICrossChainManagerL2, RollupId,
+    ICrossChainManagerL2, RollupId, ScopePath,
 };
 use crate::evm_config::RollupEvmConfig;
 use crate::rpc::{SimulationResult, entry_to_serializable};
@@ -147,7 +147,7 @@ where
             failed: !success,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -291,7 +291,7 @@ pub fn build_entries_for_block(
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     }]
 }
@@ -330,7 +330,7 @@ pub fn build_entries_from_encoded(
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     }]
 }
@@ -372,7 +372,7 @@ pub fn build_state_only_entry(
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     }]
 }

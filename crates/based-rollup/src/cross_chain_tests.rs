@@ -19,7 +19,7 @@ fn test_execution_entry_serialization_roundtrip() {
             failed: false,
             source_address: Address::with_last_byte(0x02),
             source_rollup: RollupId::new(U256::from(2)),
-            scope: vec![U256::from(0), U256::from(1)],
+            scope: ScopePath::from_parts(vec![U256::from(0), U256::from(1)]),
         },
     };
     let json = serde_json::to_string(&entry).unwrap();
@@ -175,7 +175,7 @@ fn test_encode_load_execution_table_roundtrip() {
             failed: false,
             source_address: Address::with_last_byte(0x01),
             source_rollup: RollupId::new(U256::from(1)),
-            scope: vec![U256::from(0)],
+            scope: ScopePath::from_index(U256::from(0)),
         },
     }];
     let calldata = encode_load_execution_table_calldata(&entries);
@@ -202,7 +202,7 @@ fn test_encode_execute_incoming_call_roundtrip() {
         failed: false,
         source_address: Address::with_last_byte(0xBB),
         source_rollup: RollupId::new(U256::from(2)),
-        scope: vec![U256::from(0), U256::from(1)],
+        scope: ScopePath::from_parts(vec![U256::from(0), U256::from(1)]),
     };
     let calldata = encode_execute_incoming_call_calldata(&action);
     let decoded =
@@ -235,7 +235,7 @@ fn test_encode_load_execution_table_multiple_entries() {
                 failed: false,
                 source_address: Address::with_last_byte(0x0A),
                 source_rollup: RollupId::new(U256::from(5)),
-                scope: vec![U256::from(100)],
+                scope: ScopePath::from_index(U256::from(100)),
             },
         },
         CrossChainExecutionEntry {
@@ -263,7 +263,7 @@ fn test_encode_load_execution_table_multiple_entries() {
                 failed: true,
                 source_address: Address::with_last_byte(0x0B),
                 source_rollup: RollupId::new(U256::from(10)),
-                scope: vec![U256::from(1), U256::from(2)],
+                scope: ScopePath::from_parts(vec![U256::from(1), U256::from(2)]),
             },
         },
         CrossChainExecutionEntry {
@@ -278,7 +278,7 @@ fn test_encode_load_execution_table_multiple_entries() {
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
         },
     ];
@@ -340,7 +340,7 @@ fn test_from_sol_action_roundtrip() {
         failed: false,
         source_address: Address::with_last_byte(0xCD),
         source_rollup: RollupId::new(U256::from(7)),
-        scope: vec![U256::from(1), U256::from(2)],
+        scope: ScopePath::from_parts(vec![U256::from(1), U256::from(2)]),
     };
     let sol = action.to_sol_action();
     let back = CrossChainAction::from_sol(&sol).expect("valid action");
@@ -366,7 +366,7 @@ fn test_from_sol_execution_entry_roundtrip() {
             failed: true,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
     let sol = entry.to_sol();
@@ -1076,7 +1076,7 @@ fn test_encode_post_batch_calldata_selector_matches() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -1120,7 +1120,7 @@ fn test_encode_post_batch_calldata_multiple_entries() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
 
@@ -1163,7 +1163,7 @@ fn test_encode_post_batch_calldata_roundtrip_decode() {
             failed: false,
             source_address: Address::with_last_byte(0x01),
             source_rollup: RollupId::new(U256::from(7)),
-            scope: vec![U256::from(1), U256::from(2)],
+            scope: ScopePath::from_parts(vec![U256::from(1), U256::from(2)]),
         },
     };
 
@@ -1546,7 +1546,7 @@ fn test_action_hash_matches_integration_test_solidity() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let rust_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &rust_result.to_sol_action(),
@@ -1565,7 +1565,7 @@ fn test_action_hash_matches_integration_test_solidity() {
         failed: false,
         source_address: counter_and_proxy,
         source_rollup: RollupId::new(mainnet_rollup_id),
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let rust_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &rust_call.to_sol_action(),
@@ -1726,7 +1726,7 @@ fn test_action_hash_matches_nested_integration_test() {
         failed: false,
         source_address: counter_and_proxy,
         source_rollup: RollupId::new(l2_rollup_id),
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     assert_eq!(
         keccak256(ICrossChainManagerL2::Action::abi_encode(
@@ -1744,7 +1744,7 @@ fn test_action_hash_matches_nested_integration_test() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     assert_eq!(
         keccak256(ICrossChainManagerL2::Action::abi_encode(
@@ -2058,7 +2058,7 @@ fn test_decode_post_batch_calldata_roundtrip() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     };
     let block_data =
@@ -2443,7 +2443,8 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
     // L1 entry 0 nextAction (delivery CALL) must carry the deep scope.
     let l1_entry_0_deep = &entries_deep.l1_deferred_entries[0];
     assert_eq!(
-        l1_entry_0_deep.next_action.scope, deep_scope,
+        l1_entry_0_deep.next_action.scope.as_slice(),
+        deep_scope.as_slice(),
         "L1 delivery CALL must have scope=[0,0] for deep nesting"
     );
     assert_eq!(
@@ -2509,7 +2510,7 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
 fn test_revert_action_canonical_fields() {
     let rollup_id = RollupId::new(U256::from(42069));
     let scope = vec![U256::ZERO];
-    let action = revert_action(rollup_id, scope.clone());
+    let action = revert_action(rollup_id, ScopePath::from_parts(scope.clone()));
 
     assert_eq!(action.action_type, CrossChainActionType::Revert);
     assert_eq!(action.rollup_id, rollup_id);
@@ -2519,7 +2520,7 @@ fn test_revert_action_canonical_fields() {
     assert!(!action.failed, "REVERT.failed must be false (spec §D.12)");
     assert_eq!(action.source_address, Address::ZERO);
     assert_eq!(action.source_rollup, RollupId::MAINNET);
-    assert_eq!(action.scope, scope);
+    assert_eq!(action.scope.as_slice(), scope.as_slice());
 
     // Verify Solidity ABI conversion
     let sol = action.to_sol_action();
@@ -2592,7 +2593,7 @@ fn test_revert_continue_hash_matches_manual_abi_encode() {
         failed: true,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let manual_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &action.to_sol_action(),
@@ -2655,7 +2656,8 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
         "L1 Entry 0 nextAction must be CALL (delivery)"
     );
     assert_eq!(
-        e0.next_action.scope, delivery_scope,
+        e0.next_action.scope.as_slice(),
+        delivery_scope.as_slice(),
         "delivery CALL scope must match"
     );
     assert_eq!(
@@ -2676,8 +2678,8 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
         "REVERT rollupId must be our L2 rollup"
     );
     assert_eq!(
-        e1.next_action.scope,
-        vec![U256::ZERO],
+        e1.next_action.scope.as_slice(),
+        &[U256::ZERO][..],
         "REVERT scope must always be [0] (first child of _resolveScopes)"
     );
     assert!(
@@ -2815,7 +2817,7 @@ fn test_attach_generic_state_deltas_revert_group() {
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
         },
         CrossChainExecutionEntry {
@@ -2826,7 +2828,7 @@ fn test_attach_generic_state_deltas_revert_group() {
                 ether_delta: I256::ZERO,
             }],
             action_hash: B256::with_last_byte(0xBB),
-            next_action: revert_action(rollup_id_u256, vec![]),
+            next_action: revert_action(rollup_id_u256, ScopePath::root()),
         },
         CrossChainExecutionEntry {
             state_deltas: vec![CrossChainStateDelta {
@@ -2845,7 +2847,7 @@ fn test_attach_generic_state_deltas_revert_group() {
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
         },
     ];
@@ -2906,7 +2908,7 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
         },
         CrossChainExecutionEntry {
@@ -2926,7 +2928,7 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
                 failed: false,
                 source_address: Address::ZERO,
                 source_rollup: RollupId::MAINNET,
-                scope: vec![],
+                scope: ScopePath::root(),
             },
         },
     ];
@@ -3022,7 +3024,7 @@ fn mk_trigger_entry(our_rollup_id: RollupId, dest: Address) -> CrossChainExecuti
         failed: false,
         source_address: Address::with_last_byte(0xAA),
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
     CrossChainExecutionEntry {
@@ -3046,7 +3048,7 @@ fn mk_continuation_entry(our_rollup_id: RollupId) -> CrossChainExecutionEntry {
         failed: false,
         source_address: Address::with_last_byte(0xAA),
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     CrossChainExecutionEntry {
         state_deltas: vec![],
@@ -3069,7 +3071,7 @@ fn mk_foreign_entry(our_rollup_id: RollupId) -> CrossChainExecutionEntry {
         failed: false,
         source_address: Address::with_last_byte(0xAA),
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
     CrossChainExecutionEntry {

@@ -7,7 +7,7 @@ use alloy_primitives::{Address, B256, Bytes as AlloBytes, U256, keccak256};
 use based_rollup::config::RollupConfig;
 use based_rollup::cross_chain::{
     CROSS_CHAIN_MANAGER_L2_ADDRESS, CrossChainAction, CrossChainActionType,
-    CrossChainExecutionEntry, ICrossChainManagerL2, RollupId,
+    CrossChainExecutionEntry, ICrossChainManagerL2, RollupId, ScopePath,
 };
 use based_rollup::evm_config::RollupEvmConfig;
 use reth_chainspec::{ChainSpecBuilder, EthereumHardfork, ForkCondition, MAINNET};
@@ -514,7 +514,7 @@ fn test_cross_chain_incoming_call_executes_counter() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &result_action.to_sol_action(),
@@ -537,7 +537,7 @@ fn test_cross_chain_incoming_call_executes_counter() {
         failed: false,
         source_address: COUNTER_AND_PROXY_ADDRESS,
         source_rollup: RollupId::MAINNET, // from L1 (mainnet)
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &call_action.to_sol_action(),
@@ -839,7 +839,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
         failed: false,
         source_address: cap_address,
         source_rollup: RollupId::from_abi_boundary(U256::from(1u64)),
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let inner_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &inner_call.to_sol_action(),
@@ -859,7 +859,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
 
     let inner_entry = CrossChainExecutionEntry {
@@ -879,7 +879,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let outer_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &outer_result.to_sol_action(),
@@ -901,7 +901,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
         failed: false,
         source_address: Address::with_last_byte(0xAA), // some L1 address
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let trigger_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &trigger_call.to_sol_action(),
@@ -1042,7 +1042,7 @@ fn test_cross_chain_multi_entry_batch_three_increments() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
             &result_action.to_sol_action(),
@@ -1064,7 +1064,7 @@ fn test_cross_chain_multi_entry_batch_three_increments() {
             failed: false,
             source_address: source_addr,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
             &call_action.to_sol_action(),
@@ -1195,7 +1195,7 @@ fn test_cross_chain_multi_entry_different_destinations() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
             &result_action.to_sol_action(),
@@ -1216,7 +1216,7 @@ fn test_cross_chain_multi_entry_different_destinations() {
             failed: false,
             source_address: source_addr,
             source_rollup: RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
         let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
             &call_action.to_sol_action(),
@@ -1329,7 +1329,7 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
         failed: false,
         source_address: Address::ZERO,
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &result_action.to_sol_action(),
@@ -1345,7 +1345,7 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
         failed: false,
         source_address: Address::with_last_byte(0xD1),
         source_rollup: RollupId::MAINNET,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &call_action.to_sol_action(),
@@ -1362,7 +1362,7 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
         failed: false,
         source_address: Address::with_last_byte(0xF1),
         source_rollup: RollupId::from_abi_boundary(U256::from(1u64)),
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let extra_1_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &extra_1.to_sol_action(),
@@ -1377,7 +1377,7 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
         failed: false,
         source_address: Address::with_last_byte(0xF2),
         source_rollup: RollupId::from_abi_boundary(U256::from(1u64)),
-        scope: vec![],
+        scope: ScopePath::root(),
     };
     let extra_2_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
         &extra_2.to_sol_action(),

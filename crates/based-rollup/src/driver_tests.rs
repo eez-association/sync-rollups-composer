@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_chain::ScopePath;
 
 #[test]
 fn test_forkchoice_empty_deque() {
@@ -2864,7 +2865,7 @@ fn test_builder_assigns_entries_only_to_last_block_in_batch() {
             failed: false,
             source_address: Address::ZERO,
             source_rollup: crate::cross_chain::RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     }];
     let effective_target = 10u64;
@@ -3337,7 +3338,7 @@ fn test_clear_pending_state_before_rewind_prevents_stale_entries() {
             failed: false,
             source_address: alloy_primitives::Address::ZERO,
             source_rollup: crate::cross_chain::RollupId::MAINNET,
-            scope: vec![],
+            scope: ScopePath::root(),
         },
     });
 
