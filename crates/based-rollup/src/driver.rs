@@ -127,17 +127,10 @@ pub struct Driver<P, Pool> {
     /// Queue for L2→L1 calls. The RPC pushes here; the driver drains
     /// into builder_execution_entries alongside L1→L2 entries (unified intermediate roots).
     queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedL2ToL1Call>>>,
-    /// All pending L1 deferred entries, in submission order.
-    /// Entries are already in L1 format (no pair conversion needed).
-    pending_l1_entries: Vec<CrossChainExecutionEntry>,
-    /// Index of the first entry in each trigger group within `pending_l1_entries`.
-    pending_l1_group_starts: Vec<usize>,
-    /// Per-group mode: `Independent` means entries in this group are not
-    /// chained state deltas. Used for L1→L2 partial revert.
-    pending_l1_independent: Vec<crate::cross_chain::EntryGroupMode>,
-    /// Trigger metadata for groups that need L1 trigger txs (`executeL2TX`).
-    /// Indexed by group. `None` for protocol-triggered groups (deposits).
-    pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>,
+    /// Pending L1 deferred entries + their trigger groups, as a
+    /// single atomic unit. See [`PendingL1SubmissionQueue`] for the
+    /// structural rationale (closes invariant #11).
+    pending_l1: PendingL1SubmissionQueue,
     /// The L2 head at the time of the last health status update (for staleness tracking).
     prev_health_l2_head: u64,
     /// Timestamp of the last time `l2_head` advanced (for health staleness check).
@@ -204,6 +197,185 @@ pub struct TriggerMetadata {
     pub rlp_encoded_tx: Vec<u8>,
     /// Number of `executeL2TX` calls needed for this trigger group.
     pub trigger_count: usize,
+}
+
+// ──────────────────────────────────────────────
+//  PendingL1SubmissionQueue (refactor PLAN step 1.5)
+//
+//  Consolidates four parallel vectors on `Driver` into a single
+//  struct:
+//
+//      pending_l1_entries: Vec<CrossChainExecutionEntry>
+//      pending_l1_group_starts: Vec<usize>
+//      pending_l1_independent: Vec<EntryGroupMode>
+//      pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>
+//
+//  Pre-1.5, every append, truncate, take, and clear had to touch
+//  all four vectors together, and any site that forgot one of them
+//  would silently desync the queue. The single-struct design makes
+//  the 4-tuple an atomic unit: `append_group` grows all four at
+//  once, `truncate_to` / `clear` drop them all at once, and
+//  `std::mem::take(&mut self.pending_l1)` moves the whole unit by
+//  value.
+//
+//  ## Closes invariant #11
+//
+//  PLAN §6 invariant #11 ("Deposits + withdrawals can coexist in
+//  same block — removed mutual exclusion") is closed here by
+//  exposing a typed [`BlockEntryMix`] classifier. The enum
+//  documents the four possible mixes and makes `Mixed` a
+//  first-class valid state, grep-able and discriminable by the
+//  compiler. Any future code that wants to reintroduce a mutual
+//  exclusion check will have to `match` on `BlockEntryMix` and
+//  confront the `Mixed` variant explicitly.
+// ──────────────────────────────────────────────
+
+/// A single trigger group inside [`PendingL1SubmissionQueue`].
+///
+/// A group is a contiguous run of L1 deferred entries that share a
+/// single trigger (either a protocol-initiated postBatch-only path,
+/// or a user-initiated `executeL2TX` call). Groups are created by
+/// the driver as it drains the `QueuedCrossChainCall` queue and by
+/// the L2→L1 path as it drains withdrawal triggers.
+#[derive(Debug, Clone)]
+pub struct PendingL1Group {
+    /// Index of the first entry in this group within
+    /// [`PendingL1SubmissionQueue::entries`]. The last entry of
+    /// group `k` is the one at index `groups[k+1].start - 1`
+    /// (or `entries.len() - 1` for the last group).
+    pub start: usize,
+    /// Chaining mode for this group's state deltas.
+    pub mode: crate::cross_chain::EntryGroupMode,
+    /// Trigger metadata. `Some` for user-initiated L2→L1 groups
+    /// (withdrawals, multi-call L2→L1); `None` for
+    /// protocol-triggered groups (deposits, L1→L2 continuations).
+    pub trigger: Option<TriggerMetadata>,
+}
+
+/// Classification of the entry mix in a
+/// [`PendingL1SubmissionQueue`]. Returned by
+/// [`PendingL1SubmissionQueue::entry_mix`]. Closes invariant #11
+/// by making the "deposits + withdrawals coexist" state an
+/// explicit enum variant (`Mixed`) rather than an implicit "no
+/// mutual exclusion check" runtime invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockEntryMix {
+    /// No entries pending.
+    Empty,
+    /// Only protocol-triggered groups (deposits, L1→L2
+    /// continuations). No `executeL2TX` calls needed.
+    /// Plan name (CLAUDE.md): "OnlyD".
+    OnlyDeposits,
+    /// Only user-initiated L2→L1 groups (withdrawals, multi-call
+    /// L2→L1 continuations). Each group needs one `executeL2TX`
+    /// call on L1. Plan name (CLAUDE.md): "OnlyW".
+    OnlyWithdrawals,
+    /// Mix of protocol-triggered and user-initiated groups. This
+    /// is a **valid** state per invariant #11 — the unified
+    /// intermediate-root chain handles mixed blocks.
+    Mixed,
+}
+
+/// Pending L1 deferred entries awaiting the next `flush_to_l1`
+/// call. See the module comment for the structural rationale.
+#[derive(Debug, Clone, Default)]
+pub struct PendingL1SubmissionQueue {
+    /// All pending L1 deferred entries, in submission order.
+    /// Entries are already in L1 format (no pair conversion
+    /// needed).
+    pub entries: Vec<CrossChainExecutionEntry>,
+    /// Trigger groups, in submission order. `groups[k].start` is
+    /// the index into `entries` where group `k` begins.
+    pub groups: Vec<PendingL1Group>,
+}
+
+impl PendingL1SubmissionQueue {
+    /// Total number of entries across all groups.
+    pub fn len_entries(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Total number of trigger groups.
+    pub fn num_groups(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// `true` iff the queue has no entries pending.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Append a new group atomically. The caller provides the
+    /// entries that belong to the new group (they are appended to
+    /// `entries`), the group's chaining mode, and its trigger
+    /// metadata.
+    pub fn append_group(
+        &mut self,
+        group_entries: impl IntoIterator<Item = CrossChainExecutionEntry>,
+        mode: crate::cross_chain::EntryGroupMode,
+        trigger: Option<TriggerMetadata>,
+    ) {
+        let start = self.entries.len();
+        self.entries.extend(group_entries);
+        self.groups.push(PendingL1Group {
+            start,
+            mode,
+            trigger,
+        });
+    }
+
+    /// Truncate the queue to the given entry count and group count.
+    /// Used for rollback on build failure (preserves the invariant
+    /// that both vectors stay in lock-step).
+    pub fn truncate_to(&mut self, entry_len: usize, group_count: usize) {
+        self.entries.truncate(entry_len);
+        self.groups.truncate(group_count);
+    }
+
+    /// Clear all pending state.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.groups.clear();
+    }
+
+    /// Drain excess entries from the front of the queue when the
+    /// entry count exceeds `max`. Leaves groups untouched — this
+    /// mirrors the pre-1.5 behavior of the backpressure path in
+    /// `step_builder` which trimmed entries without adjusting
+    /// group boundaries (reasoning in that site: the trim is a
+    /// safety valve, not a normal operational path).
+    pub fn trim_entries_from_front(&mut self, max: usize) {
+        if self.entries.len() > max {
+            let excess = self.entries.len() - max;
+            self.entries.drain(..excess);
+        }
+    }
+
+    /// Classification of the current entry mix. Closes
+    /// invariant #11 by surfacing the Mixed case as an explicit
+    /// variant that future code must `match` on.
+    pub fn entry_mix(&self) -> BlockEntryMix {
+        if self.groups.is_empty() {
+            return BlockEntryMix::Empty;
+        }
+        let mut any_proto = false;
+        let mut any_user = false;
+        for g in &self.groups {
+            if g.trigger.is_some() {
+                any_user = true;
+            } else {
+                any_proto = true;
+            }
+        }
+        match (any_proto, any_user) {
+            (true, false) => BlockEntryMix::OnlyDeposits,
+            (false, true) => BlockEntryMix::OnlyWithdrawals,
+            (true, true) => BlockEntryMix::Mixed,
+            // Unreachable: if `groups` is non-empty, at least one
+            // of `any_proto` / `any_user` must be true.
+            (false, false) => BlockEntryMix::Empty,
+        }
+    }
 }
 
 /// Stage ID for the persistent transaction replay journal.
@@ -440,10 +612,7 @@ where
             queued_cross_chain_calls,
             pending_l1_forward_txs,
             queued_l2_to_l1_calls,
-            pending_l1_entries: Vec::new(),
-            pending_l1_group_starts: Vec::new(),
-            pending_l1_independent: Vec::new(),
-            pending_l1_trigger_metadata: Vec::new(),
+            pending_l1: PendingL1SubmissionQueue::default(),
             prev_health_l2_head: 0,
             last_l2_head_advance: std::time::Instant::now(),
             consecutive_flush_mismatches: 0,
@@ -1181,10 +1350,8 @@ where
         // failure and re-push drained entries back to the shared queues. Without
         // this, entries are permanently lost when clear_internal_state() runs
         // during the Sync transition. See issue #237.
-        let pre_drain_l1_len = self.pending_l1_entries.len();
-        let pre_drain_l1_groups = self.pending_l1_group_starts.len();
-        let pre_drain_l1_independent = self.pending_l1_independent.len();
-        let pre_drain_l1_meta = self.pending_l1_trigger_metadata.len();
+        let pre_drain_l1_len = self.pending_l1.len_entries();
+        let pre_drain_l1_groups = self.pending_l1.num_groups();
 
         let mut queued_l1_txs_for_block: Vec<Bytes> = Vec::new();
         // Saved originals for re-push on build failure. These are the
@@ -1227,11 +1394,12 @@ where
                         had_continuation = true;
                     }
 
-                    let group_start = self.pending_l1_entries.len();
                     let group_mode = call.l1_independent_entries();
                     let raw_l1_tx_for_forward = call.raw_l1_tx().clone();
-
-                    match &call {
+                    // Collect the L1 entries for this group locally first,
+                    // then append them atomically via `append_group` so the
+                    // (entries, groups) invariant stays intact.
+                    let group_l1_entries: Vec<CrossChainExecutionEntry> = match &call {
                         crate::rpc::QueuedCrossChainCall::Simple {
                             call_entry,
                             result_entry,
@@ -1261,11 +1429,10 @@ where
                             }
 
                             // Simple deposit: convert CALL+RESULT pair to L1 format
-                            let l1_entry = crate::cross_chain::convert_pairs_to_l1_entries(&[
+                            crate::cross_chain::convert_pairs_to_l1_entries(&[
                                 call_entry.clone(),
                                 result_entry.clone(),
-                            ]);
-                            self.pending_l1_entries.extend(l1_entry);
+                            ])
                         }
                         crate::rpc::QueuedCrossChainCall::WithContinuations {
                             l2_table_entries,
@@ -1280,18 +1447,17 @@ where
                             rpc_entries.extend(l2_table_entries.iter().cloned());
 
                             // Continuation: use pre-built L1 entries directly
-                            self.pending_l1_entries
-                                .extend(l1_entries.iter().cloned());
+                            l1_entries.clone()
                         }
-                    }
+                    };
 
                     if !raw_l1_tx_for_forward.is_empty() {
                         queued_l1_txs_for_block.push(raw_l1_tx_for_forward);
                     }
 
-                    self.pending_l1_group_starts.push(group_start);
-                    self.pending_l1_independent.push(group_mode);
-                    self.pending_l1_trigger_metadata.push(None); // protocol trigger, no L1 executeL2TX needed
+                    // Atomic append: entries + group metadata grow together.
+                    // protocol trigger group → no L1 executeL2TX needed (trigger=None).
+                    self.pending_l1.append_group(group_l1_entries, group_mode, None);
 
                     // Save for re-push on build failure (call is consumed by value)
                     calls_for_repush.push(call);
@@ -1339,19 +1505,20 @@ where
                     // split (base vs RPC) correctly includes them in rpc_entries_for_block.
                     rpc_entry_count_in_builder += w_entry_count;
 
-                    // Populate L1 entry queue
-                    let group_start = self.pending_l1_entries.len();
-                    self.pending_l1_entries
-                        .extend(w.l1_deferred_entries.iter().cloned());
-                    self.pending_l1_group_starts.push(group_start);
-                    self.pending_l1_independent
-                        .push(crate::cross_chain::EntryGroupMode::Chained); // L2→L1 calls are always chained
-                    self.pending_l1_trigger_metadata.push(Some(TriggerMetadata {
-                        user: w.user,
-                        amount: w.amount,
-                        rlp_encoded_tx: w.rlp_encoded_tx.clone(),
-                        trigger_count: w.trigger_count,
-                    }));
+                    // Populate L1 entry queue — L2→L1 groups are always
+                    // `Chained` and always carry user-trigger metadata
+                    // (distinguishing them from protocol-triggered deposits
+                    // in `entry_mix`).
+                    self.pending_l1.append_group(
+                        w.l1_deferred_entries.iter().cloned(),
+                        crate::cross_chain::EntryGroupMode::Chained,
+                        Some(TriggerMetadata {
+                            user: w.user,
+                            amount: w.amount,
+                            rlp_encoded_tx: w.rlp_encoded_tx.clone(),
+                            trigger_count: w.trigger_count,
+                        }),
+                    );
                 }
             }
         }
@@ -1466,11 +1633,7 @@ where
                     );
                     // Re-push drained entries back to shared queues so they are
                     // not lost when clear_internal_state() runs. See issue #237.
-                    self.pending_l1_entries.truncate(pre_drain_l1_len);
-                    self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
-                    self.pending_l1_independent
-                        .truncate(pre_drain_l1_independent);
-                    self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
+                    self.pending_l1.truncate_to(pre_drain_l1_len, pre_drain_l1_groups);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1525,11 +1688,7 @@ where
                     );
                     // Re-push drained entries back to shared queues so they are
                     // not lost when clear_internal_state() runs. See issue #237.
-                    self.pending_l1_entries.truncate(pre_drain_l1_len);
-                    self.pending_l1_group_starts.truncate(pre_drain_l1_groups);
-                    self.pending_l1_independent
-                        .truncate(pre_drain_l1_independent);
-                    self.pending_l1_trigger_metadata.truncate(pre_drain_l1_meta);
+                    self.pending_l1.truncate_to(pre_drain_l1_len, pre_drain_l1_groups);
                     if !calls_for_repush.is_empty() {
                         let mut q = self
                             .queued_cross_chain_calls
@@ -1591,14 +1750,14 @@ where
             // Per-block entries would conflict: Rollups.sol processes entries
             // sequentially, so after the aggregate entry updates the on-chain root,
             // per-block entries' currentState would mismatch.
-            if self.pending_l1_entries.len() > MAX_PENDING_CROSS_CHAIN_ENTRIES {
+            if self.pending_l1.len_entries() > MAX_PENDING_CROSS_CHAIN_ENTRIES {
                 warn!(target: "based_rollup::driver",
-                    count = self.pending_l1_entries.len(),
+                    count = self.pending_l1.len_entries(),
                     max = MAX_PENDING_CROSS_CHAIN_ENTRIES,
                     "pending cross-chain entries exceeded cap, dropping oldest"
                 );
-                let excess = self.pending_l1_entries.len() - MAX_PENDING_CROSS_CHAIN_ENTRIES;
-                self.pending_l1_entries.drain(..excess);
+                self.pending_l1
+                    .trim_entries_from_front(MAX_PENDING_CROSS_CHAIN_ENTRIES);
             }
 
             // Compute unified intermediate state roots for chained cross-chain
@@ -1626,9 +1785,10 @@ where
                 })
                 .count();
             let num_user_triggers = self
-                .pending_l1_trigger_metadata
+                .pending_l1
+                .groups
                 .iter()
-                .filter(|m| m.is_some())
+                .filter(|g| g.trigger.is_some())
                 .count();
             let has_entries = has_rpc_entries || num_user_triggers > 0;
 
@@ -1673,10 +1833,7 @@ where
                         );
                         // Clear entries to prevent submitting with wrong state deltas.
                         // Entries will be re-queued on the next builder cycle.
-                        self.pending_l1_entries.clear();
-                        self.pending_l1_group_starts.clear();
-                        self.pending_l1_independent.clear();
-                        self.pending_l1_trigger_metadata.clear();
+                        self.pending_l1.clear();
                         // No entries → speculative IS clean.
                         crate::cross_chain::CleanStateRoot::new(built.state_root)
                     }
@@ -1687,18 +1844,24 @@ where
 
             // Attach correct state deltas to all pending L1 entries using the
             // intermediate roots from compute_intermediate_roots.
-            if !self.pending_l1_entries.is_empty() && !intermediate_roots.is_empty() {
+            if !self.pending_l1.is_empty() && !intermediate_roots.is_empty() {
+                // `attach_generic_state_deltas` still takes a `&[usize]` of
+                // group start indices — rebuild a temporary view rather than
+                // changing the cross_chain API surface in 1.5.
+                let group_starts: Vec<usize> =
+                    self.pending_l1.groups.iter().map(|g| g.start).collect();
                 crate::cross_chain::attach_generic_state_deltas(
-                    &mut self.pending_l1_entries,
+                    &mut self.pending_l1.entries,
                     &intermediate_roots,
                     self.config.rollup_id,
-                    &self.pending_l1_group_starts,
+                    &group_starts,
                 );
                 info!(
                     target: "based_rollup::driver",
-                    unified_entry_count = self.pending_l1_entries.len(),
-                    groups = self.pending_l1_group_starts.len(),
+                    unified_entry_count = self.pending_l1.len_entries(),
+                    groups = self.pending_l1.num_groups(),
                     roots = intermediate_roots.len(),
+                    entry_mix = ?self.pending_l1.entry_mix(),
                     "attached generic state deltas to unified L1 entries"
                 );
 
@@ -1706,25 +1869,23 @@ where
                 // In independent groups, L1 try/catch rolls back the reverted call's
                 // state, so all entries see the same pre-root. Override ALL entries
                 // in the group to use intermediate_roots[k] as currentState.
-                let num_groups = self.pending_l1_group_starts.len();
+                let num_groups = self.pending_l1.num_groups();
                 for k in 0..num_groups {
-                    if k >= self.pending_l1_independent.len()
-                        || self.pending_l1_independent[k].is_chained()
-                    {
+                    if self.pending_l1.groups[k].mode.is_chained() {
                         continue;
                     }
                     if k >= intermediate_roots.len() {
                         break;
                     }
                     let pre_root = intermediate_roots[k];
-                    let start = self.pending_l1_group_starts[k];
+                    let start = self.pending_l1.groups[k].start;
                     let end = if k + 1 < num_groups {
-                        self.pending_l1_group_starts[k + 1]
+                        self.pending_l1.groups[k + 1].start
                     } else {
-                        self.pending_l1_entries.len()
+                        self.pending_l1.len_entries()
                     };
                     for i in start..end {
-                        if let Some(delta) = self.pending_l1_entries[i].state_deltas.first_mut() {
+                        if let Some(delta) = self.pending_l1.entries[i].state_deltas.first_mut() {
                             delta.current_state = pre_root;
                         }
                     }
@@ -1739,7 +1900,7 @@ where
 
                 // Log composite entry hashes (VerifyL1Batch format) for byte-level debugging.
                 // composite = keccak256(abi.encode(actionHash, keccak256(abi.encode(nextAction))))
-                for (i, e) in self.pending_l1_entries.iter().enumerate() {
+                for (i, e) in self.pending_l1.entries.iter().enumerate() {
                     use alloy_sol_types::SolType as _;
                     let next_action_encoded =
                         crate::cross_chain::ICrossChainManagerL2::Action::abi_encode(
@@ -1830,10 +1991,7 @@ where
                 );
                 self.pending_submissions.clear();
             }
-            self.pending_l1_entries.clear();
-            self.pending_l1_group_starts.clear();
-            self.pending_l1_independent.clear();
-            self.pending_l1_trigger_metadata.clear();
+            self.pending_l1.clear();
             return Ok(());
         };
 
@@ -1844,7 +2002,7 @@ where
         // but no corresponding L2 block, causing orphaned entries with zero
         // state deltas.
 
-        if self.pending_submissions.is_empty() && self.pending_l1_entries.is_empty() {
+        if self.pending_submissions.is_empty() && self.pending_l1.is_empty() {
             return Ok(());
         }
 
@@ -1916,7 +2074,7 @@ where
             }
         };
 
-        if self.pending_submissions.is_empty() && self.pending_l1_entries.is_empty() {
+        if self.pending_submissions.is_empty() && self.pending_l1.is_empty() {
             return Ok(());
         }
 
@@ -1927,7 +2085,7 @@ where
         // derivation filters those txs (§4f), the nonces are wrong. By excluding
         // subsequent blocks from this batch, we ensure they are held until
         // derivation confirms the entry-bearing block.
-        let has_pending_entries = !self.pending_l1_entries.is_empty();
+        let has_pending_entries = !self.pending_l1.is_empty();
         let batch_size = if has_pending_entries {
             // Include ALL pending blocks when entries are present.
             // The entry block is the last one (just built). Earlier blocks are
@@ -2084,24 +2242,35 @@ where
             }
         }
 
-        // Drain L1 entry queues for submission.
-        let l1_entries_owned = std::mem::take(&mut self.pending_l1_entries);
-        let group_starts = std::mem::take(&mut self.pending_l1_group_starts);
-        let independent = std::mem::take(&mut self.pending_l1_independent);
-        let trigger_metadata = std::mem::take(&mut self.pending_l1_trigger_metadata);
+        // Drain L1 entry queue for submission. The whole
+        // `PendingL1SubmissionQueue` moves by value, preserving the
+        // invariant that (entries, groups) stay in lock-step.
+        let pending_l1_owned = std::mem::take(&mut self.pending_l1);
 
         info!(
             target: "based_rollup::driver",
-            l1_entries = l1_entries_owned.len(),
-            groups = group_starts.len(),
+            l1_entries = pending_l1_owned.len_entries(),
+            groups = pending_l1_owned.num_groups(),
+            entry_mix = ?pending_l1_owned.entry_mix(),
             pending_blocks = blocks.len(),
             "flush_to_l1: drained entries and blocks for submission"
         );
 
+        // Extract the per-group trigger metadata the rest of this
+        // function needs (for `send_l2_to_l1_triggers`). Step 2.7
+        // will replace this destructure with a `FlushPlan` typestate
+        // that consumes the queue directly.
+        let trigger_metadata: Vec<Option<TriggerMetadata>> = pending_l1_owned
+            .groups
+            .iter()
+            .map(|g| g.trigger.clone())
+            .collect();
+
         // Entries are already in L1 format with correct state deltas from
         // attach_generic_state_deltas. Clone to preserve ownership for
-        // failure recovery (re-assigned to self.pending_l1_entries).
-        let l1_entries = l1_entries_owned.clone();
+        // failure recovery (`pending_l1_owned` is moved back into
+        // `self.pending_l1` below if submission fails).
+        let l1_entries = pending_l1_owned.entries.clone();
 
         // §4f nonce safety: if this batch includes cross-chain entries, set the
         // hold BEFORE sending to L1. This ensures no new batches are submitted
@@ -2423,10 +2592,9 @@ where
                             for block in blocks.into_iter().rev() {
                                 self.pending_submissions.push_front(block);
                             }
-                            self.pending_l1_entries = l1_entries_owned;
-                            self.pending_l1_group_starts = group_starts;
-                            self.pending_l1_independent = independent;
-                            self.pending_l1_trigger_metadata = trigger_metadata;
+                            // Restore the queue whole (preserving the
+                            // entries/groups lock-step invariant).
+                            self.pending_l1 = pending_l1_owned;
                         }
                         return Ok(());
                     }
@@ -2439,11 +2607,8 @@ where
                 for block in blocks.into_iter().rev() {
                     self.pending_submissions.push_front(block);
                 }
-                // Put entries back
-                self.pending_l1_entries = l1_entries_owned;
-                self.pending_l1_group_starts = group_starts;
-                self.pending_l1_independent = independent;
-                self.pending_l1_trigger_metadata = trigger_metadata;
+                // Restore the queue whole.
+                self.pending_l1 = pending_l1_owned;
             }
         }
 
@@ -2898,10 +3063,7 @@ where
     fn clear_internal_state(&mut self) {
         self.preconfirmed_hashes.clear();
         self.pending_submissions.clear();
-        self.pending_l1_entries.clear();
-        self.pending_l1_group_starts.clear();
-        self.pending_l1_independent.clear();
-        self.pending_l1_trigger_metadata.clear();
+        self.pending_l1.clear();
         self.pending_entry_verification_block = None;
         self.entry_verify_deferrals = 0;
         {
