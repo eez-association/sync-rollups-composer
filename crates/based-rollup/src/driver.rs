@@ -3235,16 +3235,23 @@ where
                         trigger_tx_hashes.push(hash);
                         nonce += 1;
                     }
-                    Err(err) => {
+                    Err(nonce_err) => {
+                        let source_display = nonce_err.source.to_string();
                         warn!(
                             target: "based_rollup::driver",
-                            %err, nonce, user = %w.user,
+                            err = %source_display, nonce, user = %w.user,
                             "executeL2TX trigger failed — resetting nonce and aborting"
                         );
+                        // Discharge the `NonceResetRequired` token by
+                        // handing it to `reset_nonce`. This is the
+                        // compile-time enforcement for invariant #2:
+                        // the token is `#[must_use]` and can only be
+                        // consumed by this call. Clippy + `-D warnings`
+                        // makes it impossible to drop it silently.
                         if let Some(p) = self.proposer.as_mut() {
-                            let _ = p.reset_nonce();
+                            let _ = p.reset_nonce(nonce_err.reset_required);
                         }
-                        return Err(err);
+                        return Err(nonce_err.source);
                     }
                 }
             }
@@ -3252,8 +3259,12 @@ where
 
         // After all triggers sent successfully, reset nonce cache so the next
         // postBatch picks up the correct nonce from L1 (includes the trigger txs).
+        // This is the "unsolicited" path (no failure token) — all trigger
+        // sends succeeded, but alloy's `CachedNonceManager` still needs a
+        // fresh connection so the next postBatch sees the post-trigger
+        // nonces. See `Proposer::reset_nonce_unsolicited`.
         if let Some(p) = self.proposer.as_mut() {
-            let _ = p.reset_nonce();
+            let _ = p.reset_nonce_unsolicited();
         }
 
         Ok(trigger_tx_hashes)
