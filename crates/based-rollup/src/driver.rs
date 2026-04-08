@@ -97,17 +97,12 @@ pub struct Driver<P, Pool> {
     /// If set, the chain should be rewound to this L2 block before the next step.
     /// Set when `verify_local_block_matches_l1` detects a state root or L1 context mismatch.
     pending_rewind_target: Option<u64>,
-    /// When set, an entry-bearing block has been flushed to L1 but derivation has
-    /// not yet confirmed it. `flush_to_l1` will hold off on submitting new batches
-    /// until derivation processes this block (§4f nonce safety). The builder
-    /// HALTS block production during the hold (`step_builder` returns early) to
-    /// avoid accumulating blocks with advancing L1 context that mismatch after rewind.
-    /// Cleared by `verify_local_block_matches_l1` or by `clear_pending_state`.
-    pending_entry_verification_block: Option<u64>,
-    /// Number of times we've deferred entry verification because the consumption
-    /// event hasn't landed on L1 yet (hold-then-forward timing). Reset when the
-    /// hold is cleared. After MAX_ENTRY_VERIFY_DEFERRALS, falls through to rewind.
-    entry_verify_deferrals: u32,
+    /// Entry verification hold — the state machine governing
+    /// "builder halts + submissions pause while an entry-bearing
+    /// block awaits derivation verification". See
+    /// [`EntryVerificationHold`] for the full lifecycle. Closes
+    /// invariants #1 (partial) and #14.
+    hold: EntryVerificationHold,
     /// Last time we saw a new L1 block (for stall detection).
     last_new_l1_block_time: std::time::Instant,
     /// The most recent L1 block number we've seen.
@@ -378,6 +373,201 @@ impl PendingL1SubmissionQueue {
     }
 }
 
+// ──────────────────────────────────────────────
+//  EntryVerificationHold (refactor PLAN step 1.6)
+//
+//  A tiny state machine that replaces the pair
+//
+//      pending_entry_verification_block: Option<u64>
+//      entry_verify_deferrals: u32
+//
+//  on `Driver`. The hold is armed AFTER the proposer sends a
+//  batch that carries cross-chain entries and BEFORE the receipt
+//  lands (§4f nonce safety — see CLAUDE.md "Entry Verification
+//  Hold"). While armed, two things happen:
+//
+//    1. `step_builder` HALTS block production (`is_blocking_build()
+//        → true`) to avoid accumulating blocks with advancing L1
+//        context that would mismatch after a rewind.
+//    2. `flush_to_l1` holds off on submitting new batches until
+//        derivation processes the entry-bearing block.
+//
+//  When derivation verifies the block, the hold is cleared. If the
+//  state root mismatches, the hold defers up to
+//  `MAX_ENTRY_VERIFY_DEFERRALS` times (the consumption event may
+//  land 1–2 L1 blocks after postBatch due to hold-then-forward
+//  timing). After exhaustion, `defer()` returns
+//  `DeferralResult::MustRewind` with the rewind target pre-computed
+//  (`entry_block - 1` per invariant #10).
+//
+//  ## Closes invariant #14
+//
+//  "Builder HALTS block production while hold is active." Pre-1.6,
+//  this was enforced by a `pending_entry_verification_block.is_some()`
+//  check at the top of `step_builder`. With the state machine, the
+//  same check is `self.hold.is_blocking_build()` — a
+//  self-documenting method call whose name makes the intent
+//  obvious, and whose definition lives next to the `arm` / `defer`
+//  / `clear` transitions so future readers see the whole lifecycle
+//  in one place.
+//
+//  ## Closes invariant #1 (partial)
+//
+//  "Hold MUST be set BEFORE `send_to_l1`, not after." The armed
+//  precondition for `flush_to_l1`'s "hold then send" path becomes
+//  more enforceable via step 1.7's `FlushPlan<HoldArmed>`
+//  typestate. Step 1.6 lays the groundwork by giving the hold an
+//  `arm` method that is idempotent and takes the entry block
+//  explicitly.
+// ──────────────────────────────────────────────
+
+/// Maximum number of times `defer()` can be called before
+/// `MustRewind` is returned. Hold-then-forward timing means the
+/// consumption event can land 1–2 L1 blocks after postBatch; 3
+/// deferrals is enough slack for the L1 miner (exponential backoff
+/// gives ~14 s of wall time).
+pub const MAX_ENTRY_VERIFY_DEFERRALS: u32 = 3;
+
+/// Outcome of [`EntryVerificationHold::defer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferralResult {
+    /// The deferral was accepted; retry verification later. The
+    /// payload is the deferral count AFTER the increment (so the
+    /// first deferral yields `Continue(1)`).
+    Continue { deferrals: u32 },
+    /// The deferrals have been exhausted and the caller must
+    /// rewind. `target` is the pre-computed rewind target —
+    /// `entry_block - 1` per invariant #10 ("the entry block
+    /// itself gets re-derived, not skipped").
+    MustRewind { target: u64 },
+    /// `defer()` was called on a `Clear` hold. This is a bug —
+    /// deferral only makes sense when the hold is armed. The
+    /// caller should log and treat it as a no-op.
+    NotArmed,
+}
+
+/// Entry-verification hold. See the module comment for the
+/// full lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntryVerificationHold {
+    /// The hold is not active. `step_builder` may build normally,
+    /// `flush_to_l1` may submit freely.
+    #[default]
+    Clear,
+    /// The hold is active for a specific entry-bearing L2 block.
+    /// Builder production and new submissions are blocked until
+    /// derivation verifies the block or the deferrals exhaust.
+    Armed {
+        /// L2 block number that carries the entries being held.
+        entry_block: u64,
+        /// Number of times `defer()` has been called for this
+        /// armed state. When this reaches
+        /// [`MAX_ENTRY_VERIFY_DEFERRALS`], the next `defer()`
+        /// returns [`DeferralResult::MustRewind`].
+        deferrals: u32,
+    },
+}
+
+impl EntryVerificationHold {
+    /// Arm the hold for a given entry block. **Idempotent**: arming
+    /// with the same block is a no-op (so re-entering `flush_to_l1`
+    /// after a partial failure does not double-arm). Arming with a
+    /// *different* block overwrites the hold and resets the
+    /// deferral counter — this mirrors the pre-1.6 behavior where
+    /// `pending_entry_verification_block = Some(...)` was
+    /// unconditionally assigned and `entry_verify_deferrals` was
+    /// never reset on re-assign.
+    pub fn arm(&mut self, entry_block: u64) {
+        match *self {
+            Self::Armed {
+                entry_block: current,
+                ..
+            } if current == entry_block => {
+                // Idempotent: same block, same hold, no reset.
+            }
+            _ => {
+                *self = Self::Armed {
+                    entry_block,
+                    deferrals: 0,
+                };
+            }
+        }
+    }
+
+    /// Record a deferral (the derivation check saw a mismatch but
+    /// we want to give the consumption event more time to land).
+    /// Returns [`DeferralResult::Continue`] while deferrals remain,
+    /// [`DeferralResult::MustRewind`] once they are exhausted
+    /// (with the target pre-computed as `entry_block - 1` per
+    /// invariant #10), or [`DeferralResult::NotArmed`] if the hold
+    /// is not armed.
+    pub fn defer(&mut self) -> DeferralResult {
+        match self {
+            Self::Clear => DeferralResult::NotArmed,
+            Self::Armed {
+                entry_block,
+                deferrals,
+            } => {
+                *deferrals += 1;
+                if *deferrals < MAX_ENTRY_VERIFY_DEFERRALS {
+                    DeferralResult::Continue {
+                        deferrals: *deferrals,
+                    }
+                } else {
+                    let target = entry_block.saturating_sub(1);
+                    DeferralResult::MustRewind { target }
+                }
+            }
+        }
+    }
+
+    /// Clear the hold. Called by `verify_local_block_matches_l1`
+    /// when derivation confirms the entry-bearing block, and by
+    /// `clear_internal_state` on rewind.
+    pub fn clear(&mut self) {
+        *self = Self::Clear;
+    }
+
+    /// `true` iff the hold is armed (any state other than
+    /// `Clear`). Used by the flush_to_l1 "wait for verification"
+    /// check.
+    pub fn is_armed(&self) -> bool {
+        matches!(self, Self::Armed { .. })
+    }
+
+    /// **Closes invariant #14.** `true` iff `step_builder` must
+    /// halt block production. Currently identical to `is_armed()`,
+    /// but exposed as a separate method so a future refactor that
+    /// distinguishes "block production halt" from "submission halt"
+    /// has a single site to change.
+    pub fn is_blocking_build(&self) -> bool {
+        self.is_armed()
+    }
+
+    /// The entry block the hold is armed for, if any.
+    pub fn armed_for(&self) -> Option<u64> {
+        match self {
+            Self::Clear => None,
+            Self::Armed { entry_block, .. } => Some(*entry_block),
+        }
+    }
+
+    /// Current deferral count. `0` when clear or freshly armed.
+    pub fn deferrals(&self) -> u32 {
+        match self {
+            Self::Clear => 0,
+            Self::Armed { deferrals, .. } => *deferrals,
+        }
+    }
+
+    /// `true` iff this hold is armed for exactly the given block.
+    /// Convenience for the verify path which checks
+    /// `pending_entry_verification_block == Some(block)`.
+    pub fn is_armed_for(&self, block: u64) -> bool {
+        matches!(self, Self::Armed { entry_block, .. } if *entry_block == block)
+    }
+}
+
 /// Stage ID for the persistent transaction replay journal.
 /// Stores user transaction bytes for recovery after rewinds and crashes.
 const TX_JOURNAL_STAGE_ID: StageId = StageId::Other("TxJournal");
@@ -602,8 +792,7 @@ where
             health_status_tx,
             builder_sync_handle: None,
             pending_rewind_target: None,
-            pending_entry_verification_block: None,
-            entry_verify_deferrals: 0,
+            hold: EntryVerificationHold::Clear,
             last_new_l1_block_time: std::time::Instant::now(),
             last_seen_l1_block: 0,
             consecutive_rewind_cycles: 0,
@@ -1316,7 +1505,11 @@ where
         // Check BEFORE draining queues so entries accumulate in the shared
         // queues until the hold clears, avoiding the bug where drained entries
         // are lost on return and held L2 txs execute without loadExecutionTable.
-        if self.pending_entry_verification_block.is_some() {
+        //
+        // Closes invariant #14 — `is_blocking_build` is the typed gate
+        // that replaces the pre-1.6 `.is_some()` check on
+        // `pending_entry_verification_block`.
+        if self.hold.is_blocking_build() {
             return Ok(());
         }
 
@@ -2012,7 +2205,7 @@ where
         // but doesn't post them until derivation verifies the entry block.
         // Once verified (by verify_local_block_matches_l1 or clear_pending_state),
         // the flag is cleared and accumulated blocks are posted normally.
-        if let Some(entry_block) = self.pending_entry_verification_block {
+        if let Some(entry_block) = self.hold.armed_for() {
             info!(
                 target: "based_rollup::driver",
                 entry_block,
@@ -2279,7 +2472,7 @@ where
         // new blocks while waiting for the receipt.
         if !l1_entries.is_empty() {
             if let Some(last_block) = blocks.last() {
-                self.pending_entry_verification_block = Some(last_block.l2_block_number);
+                self.hold.arm(last_block.l2_block_number);
                 info!(
                     target: "based_rollup::driver",
                     l2_block = last_block.l2_block_number,
@@ -2516,8 +2709,7 @@ where
                                         "all entries consumed in postBatch L1 block — \
                                          releasing hold immediately (no deferral needed)"
                                     );
-                                    self.pending_entry_verification_block = None;
-                                    self.entry_verify_deferrals = 0;
+                                    self.hold.clear();
                                 } else {
                                     // Partial consumption — some entries reverted.
                                     // Rewind immediately to rebuild with filtered txs.
@@ -2528,7 +2720,7 @@ where
                                         total = l1_entries.iter().filter(|e| e.action_hash != crate::cross_chain::ActionHash::ZERO).count(),
                                         "partial entry consumption — rewinding immediately"
                                     );
-                                    let entry_block = self.pending_entry_verification_block;
+                                    let entry_block = self.hold.armed_for();
                                     let (rewind_target, rollback_l1_block) =
                                         if let Some(anchor) = self.l1_confirmed_anchor {
                                             let target = entry_block
@@ -3064,8 +3256,7 @@ where
         self.preconfirmed_hashes.clear();
         self.pending_submissions.clear();
         self.pending_l1.clear();
-        self.pending_entry_verification_block = None;
-        self.entry_verify_deferrals = 0;
+        self.hold.clear();
         {
             let mut fwd = self
                 .pending_l1_forward_txs
@@ -3482,7 +3673,7 @@ where
             // ZERO by derivation because entry txs were filtered), release the hold.
             // Without this, the hold would persist indefinitely since the root
             // comparison and hold release logic below are skipped for gap-fill blocks.
-            if self.pending_entry_verification_block == Some(derived.l2_block_number) {
+            if self.hold.is_armed_for(derived.l2_block_number) {
                 info!(
                     target: "based_rollup::driver",
                     l2_block = derived.l2_block_number,
@@ -3490,8 +3681,7 @@ where
                     "entry-bearing block with filtered txs verified (state_root=ZERO) \
                      — releasing submission hold"
                 );
-                self.pending_entry_verification_block = None;
-                self.entry_verify_deferrals = 0;
+                self.hold.clear();
             } else {
                 debug!(
                     target: "based_rollup::driver",
@@ -3516,69 +3706,67 @@ where
             // consumption event time to land on L1.
             //
             // After MAX_ENTRY_VERIFY_DEFERRALS, the entry's bridge tx likely reverted
-            // permanently. We REWIND to re-derive the block with §4f filtering, which
-            // produces the correct root (without unconsumed entry effects) and correct
-            // nonces for subsequent blocks. The rewind target is entry_block - 1 so
-            // the entry block itself gets re-derived with filtered txs.
-            const MAX_ENTRY_VERIFY_DEFERRALS: u32 = 3;
-            if self.pending_entry_verification_block == Some(derived.l2_block_number) {
-                self.entry_verify_deferrals += 1;
-                if self.entry_verify_deferrals < MAX_ENTRY_VERIFY_DEFERRALS {
-                    warn!(
-                        target: "based_rollup::driver",
-                        l2_block = derived.l2_block_number,
-                        deferrals = self.entry_verify_deferrals,
-                        max_deferrals = MAX_ENTRY_VERIFY_DEFERRALS,
-                        %header_root,
-                        l1_state_root = %derived.state_root,
-                        "entry-bearing block state root mismatch — consumption event \
-                         may be in a later L1 block, deferring verification"
-                    );
-                    // Return Err to trigger retry via main loop backoff.
-                    // The exponential backoff (2+4+8=14s for 3 deferrals) gives
-                    // L1 time to mine the user's tx and emit ExecutionConsumed.
-                    return Err(eyre::eyre!(
-                        "entry verification deferred for block {} (attempt {}/{})",
-                        derived.l2_block_number,
-                        self.entry_verify_deferrals,
-                        MAX_ENTRY_VERIFY_DEFERRALS
-                    ));
+            // permanently. `EntryVerificationHold::defer` returns
+            // `DeferralResult::MustRewind` once the counter exhausts, with the target
+            // pre-computed as `entry_block - 1` (invariant #10).
+            if self.hold.is_armed_for(derived.l2_block_number) {
+                match self.hold.defer() {
+                    DeferralResult::Continue { deferrals } => {
+                        warn!(
+                            target: "based_rollup::driver",
+                            l2_block = derived.l2_block_number,
+                            deferrals,
+                            max_deferrals = MAX_ENTRY_VERIFY_DEFERRALS,
+                            %header_root,
+                            l1_state_root = %derived.state_root,
+                            "entry-bearing block state root mismatch — consumption event \
+                             may be in a later L1 block, deferring verification"
+                        );
+                        // Return Err to trigger retry via main loop backoff.
+                        // The exponential backoff (2+4+8=14s for 3 deferrals) gives
+                        // L1 time to mine the user's tx and emit ExecutionConsumed.
+                        return Err(eyre::eyre!(
+                            "entry verification deferred for block {} (attempt {}/{})",
+                            derived.l2_block_number,
+                            deferrals,
+                            MAX_ENTRY_VERIFY_DEFERRALS
+                        ));
+                    }
+                    DeferralResult::MustRewind { target: rewind_target } => {
+                        // Exhausted deferrals — entry likely not consumed (user's L1 tx
+                        // reverted or partial consumption). Rewind to re-derive the block
+                        // with §4f filtering, which produces the correct nonces for
+                        // subsequent blocks. Without rewind, fullnodes diverge permanently.
+                        warn!(
+                            target: "based_rollup::driver",
+                            l2_block = derived.l2_block_number,
+                            deferrals = MAX_ENTRY_VERIFY_DEFERRALS,
+                            %header_root,
+                            l1_state_root = %derived.state_root,
+                            "entry not consumed after max deferrals — rewinding to rebuild \
+                             with §4f-filtered txs and correct nonces"
+                        );
+                        let rollback_l1_block = if let Some(anchor) = self.l1_confirmed_anchor {
+                            anchor.l1_block_number.saturating_sub(1)
+                        } else {
+                            self.config.deployment_l1_block
+                        };
+                        self.clear_internal_state();
+                        self.derivation.set_last_derived_l2_block(rewind_target);
+                        self.derivation.rollback_to(rollback_l1_block);
+                        self.mode = DriverMode::Sync;
+                        self.synced
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        self.consecutive_rewind_cycles =
+                            self.consecutive_rewind_cycles.saturating_add(1);
+                        self.set_rewind_target(rewind_target);
+                        return Ok(());
+                    }
+                    DeferralResult::NotArmed => {
+                        // Unreachable: we checked `is_armed_for(...)` above.
+                        // Fall through to the generic mismatch handling below.
+                    }
                 }
-
-                // Exhausted deferrals — entry likely not consumed (user's L1 tx
-                // reverted or partial consumption). Rewind to re-derive the block
-                // with §4f filtering, which produces the correct nonces for
-                // subsequent blocks. Without rewind, fullnodes diverge permanently.
-                warn!(
-                    target: "based_rollup::driver",
-                    l2_block = derived.l2_block_number,
-                    deferrals = self.entry_verify_deferrals,
-                    %header_root,
-                    l1_state_root = %derived.state_root,
-                    "entry not consumed after max deferrals — rewinding to rebuild \
-                     with §4f-filtered txs and correct nonces"
-                );
-                // Rewind target must be BEFORE the entry block so it gets
-                // re-derived with §4f filtering. The entry block itself needs
-                // to be rebuilt with filtered txs (fewer nonces consumed).
-                let entry_block = derived.l2_block_number;
-                let (rewind_target, rollback_l1_block) =
-                    if let Some(anchor) = self.l1_confirmed_anchor {
-                        // Go one block before the entry block so it gets re-derived
-                        let target = entry_block.saturating_sub(1);
-                        (target, anchor.l1_block_number.saturating_sub(1))
-                    } else {
-                        (0, self.config.deployment_l1_block)
-                    };
-                self.clear_internal_state();
-                self.derivation.set_last_derived_l2_block(rewind_target);
-                self.derivation.rollback_to(rollback_l1_block);
-                self.mode = DriverMode::Sync;
-                self.synced
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                self.consecutive_rewind_cycles = self.consecutive_rewind_cycles.saturating_add(1);
-                self.set_rewind_target(rewind_target);
-                return Ok(());
             }
 
             error!(
@@ -3593,7 +3781,6 @@ where
             self.synced
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             self.consecutive_rewind_cycles = self.consecutive_rewind_cycles.saturating_add(1);
-            self.entry_verify_deferrals = 0;
             self.clear_internal_state();
             self.derivation.rollback_to(derived_l1_number);
             self.set_rewind_target(derived.l2_block_number.saturating_sub(1));
@@ -3607,16 +3794,15 @@ where
         // Clear entry verification hold if this was the pending entry block.
         // Derivation confirmed the block matches — nonces are correct, builder
         // can resume posting accumulated pending blocks.
-        if self.pending_entry_verification_block == Some(derived.l2_block_number) {
+        if self.hold.is_armed_for(derived.l2_block_number) {
             info!(
                 target: "based_rollup::driver",
                 l2_block = derived.l2_block_number,
                 pending_blocks = self.pending_submissions.len(),
-                deferrals = self.entry_verify_deferrals,
+                deferrals = self.hold.deferrals(),
                 "entry-bearing block verified — releasing submission hold"
             );
-            self.pending_entry_verification_block = None;
-            self.entry_verify_deferrals = 0;
+            self.hold.clear();
         }
 
         debug!(
