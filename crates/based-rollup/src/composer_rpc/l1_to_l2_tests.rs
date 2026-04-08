@@ -370,3 +370,49 @@ fn test_bridge_calldata_too_short() {
     short_tokens.resize(100, 0x00); // only 100 bytes
     assert!(short_tokens.len() < 132);
 }
+
+// ──────────────────────────────────────────────
+//  Step 0.6 (refactor) — trace fixture round-trip tests
+//
+//  These tests verify that the canonical L1→L2-flavoured fixtures load
+//  and parse cleanly from this side of the composer. The DSL itself
+//  lives in `crate::test_support::trace_fixtures`. Phase 5 will add
+//  fuzz/proptest harnesses on top; here we only validate the wire-up.
+// ──────────────────────────────────────────────
+
+#[test]
+fn trace_fixtures_l1_to_l2_round_trip() {
+    use crate::test_support::trace_fixtures::{FixtureName, get};
+
+    // The L1→L2-flavoured fixtures we expect to be reachable from this
+    // side of the composer.
+    let l1_to_l2_fixtures = [
+        FixtureName::DepositSimpleL1ToL2,
+        FixtureName::FlashLoan3CallL1ToL2,
+        FixtureName::TopLevelRevert,
+        FixtureName::ChildContinuation,
+        FixtureName::MultiCallCallTwice,
+    ];
+
+    for name in l1_to_l2_fixtures {
+        let fx = get(name).unwrap_or_else(|| panic!("fixture {:?} not registered", name));
+        let trace = fx.parse_value();
+        assert!(
+            trace.is_object(),
+            "fixture {} top-level not an object",
+            fx.filename
+        );
+        assert!(
+            trace.get("from").and_then(|v| v.as_str()).is_some(),
+            "fixture {} has no `from`",
+            fx.filename
+        );
+        assert!(
+            trace.get("to").and_then(|v| v.as_str()).is_some(),
+            "fixture {} has no `to`",
+            fx.filename
+        );
+        // The selector check is done by trace_fixtures::tests; here we
+        // only verify the round-trip from `include_str!` → `Value`.
+    }
+}

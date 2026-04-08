@@ -76,3 +76,47 @@ fn test_extract_methods_multiple_send_raw_tx_in_batch() {
     assert_eq!(send_txs[0].1.unwrap()[0], "0xaaa");
     assert_eq!(send_txs[1].1.unwrap()[0], "0xbbb");
 }
+
+// ──────────────────────────────────────────────
+//  Step 0.6 (refactor) — trace fixture round-trip tests
+//
+//  These tests verify that the canonical L2→L1-flavoured fixtures load
+//  and parse cleanly from this side of the composer. The DSL itself
+//  lives in `crate::test_support::trace_fixtures`. Phase 5 will add
+//  fuzz/proptest harnesses on top; here we only validate the wire-up.
+// ──────────────────────────────────────────────
+
+#[test]
+fn trace_fixtures_l2_to_l1_round_trip() {
+    use crate::test_support::trace_fixtures::{FixtureName, get};
+
+    // The L2→L1-flavoured fixtures we expect to be reachable from this
+    // side of the composer.
+    let l2_to_l1_fixtures = [
+        FixtureName::WithdrawalSimpleL2ToL1,
+        FixtureName::PingPongDepth2L2ToL1,
+        FixtureName::PingPongDepth3L2ToL1,
+    ];
+
+    for name in l2_to_l1_fixtures {
+        let fx = get(name).unwrap_or_else(|| panic!("fixture {:?} not registered", name));
+        let trace = fx.parse_value();
+        assert!(
+            trace.is_object(),
+            "fixture {} top-level not an object",
+            fx.filename
+        );
+        assert!(
+            trace.get("from").and_then(|v| v.as_str()).is_some(),
+            "fixture {} has no `from`",
+            fx.filename
+        );
+        assert!(
+            trace.get("to").and_then(|v| v.as_str()).is_some(),
+            "fixture {} has no `to`",
+            fx.filename
+        );
+        // The selector check is done by trace_fixtures::tests; here we
+        // only verify the round-trip from `include_str!` → `Value`.
+    }
+}

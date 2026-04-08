@@ -13,5 +13,9 @@
 //! Members:
 //! - [`mirror_case`] — neutral DSL for L1↔L2 mirror tests (refactor PLAN
 //!   step 0.5; closes invariant #18 of `docs/refactor/INVARIANT_MAP.md`).
+//! - [`trace_fixtures`] — embedded canonical `callTracer` JSON fixtures
+//!   (refactor PLAN step 0.6) used by composer_rpc tests today and by
+//!   Phase 5 fuzz harnesses later.
 
 pub mod mirror_case;
+pub mod trace_fixtures;
