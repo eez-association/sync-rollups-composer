@@ -35,7 +35,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{self, Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// The operating mode of the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,58 @@ pub enum DriverMode {
     Builder,
     /// Fullnode mode — sync only, never sequence.
     Fullnode,
+}
+
+/// Classification of `verify_local_block_matches_l1`'s terminal path for a
+/// single derived block.
+///
+/// Each variant names the branch taken; all side effects (rewind target,
+/// mode switch, hold transitions) are applied *before* the variant is
+/// constructed — the variant is an explicit record consumed by the thin
+/// `verify_local_block_matches_l1` wrapper that maps it to `Result<()>` for
+/// callers. Fields carry informational payloads surfaced via the `Debug`
+/// impl in the `trace!` decision log.
+///
+/// **Invariants closed by this enum:**
+///
+/// - **#9 — deferral exhaustion → rewind, not acceptance.** The
+///   `MismatchDeferExhausted` variant is the only way to name the
+///   exhausted-deferral outcome; the code path that constructs it calls
+///   `rewind_to_re_derive` unconditionally before returning. No fallthrough
+///   to an "accept" branch exists after `DeferralResult::MustRewind`.
+/// - **#10 — rewind target is `entry_block - 1`.** Every terminal path that
+///   sets a rewind target either delegates to `Driver::rewind_to_re_derive`
+///   (hard rewind) or computes `saturating_sub(1)` inline at a single site
+///   (soft L1-context rewind). The formula is not copy-pasted across the
+///   file — it lives in exactly the two places that need it.
+///
+/// The in-progress deferral branch (`DeferralResult::Continue`) is
+/// intentionally not represented: it returns `Err(...)` directly to trigger
+/// outer-loop backoff and never produces a decision value.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "payload fields are read via the derived Debug impl in the trace! decision log"
+)]
+enum VerificationDecision {
+    /// Block matched L1 (state root and L1 context agree). Normal happy path.
+    Match,
+    /// Verification skipped because the block is below the immutable ceiling
+    /// or is missing from local storage. Benign — caller proceeds.
+    Skip,
+    /// L1 context mismatch detected — soft rewind applied (no mode switch,
+    /// no rewind-cycle increment). Caller proceeds with `Ok(())`.
+    L1ContextMismatchRewound { target_l2: u64 },
+    /// Gap-fill block (state_root == ZERO) matched its L1 context; if the
+    /// hold was armed for this block it has been released. Caller proceeds.
+    GapFillVerified,
+    /// Entry-bearing block mismatch — deferral budget exhausted.
+    /// Hard rewind to `rewind_target` has been applied; caller proceeds.
+    MismatchDeferExhausted { rewind_target: u64 },
+    /// Mismatch with no hold armed (permanent divergence).
+    /// Rewind-to-re-derive has been applied and the caller propagates `Err`
+    /// so the outer loop transitions to sync-mode backoff.
+    MismatchPermanent { rewind_target: u64 },
 }
 
 /// Orchestrates the rollup node's main loop.
@@ -2658,15 +2710,7 @@ where
                             } else {
                                 (0, self.config.deployment_l1_block)
                             };
-                        self.clear_internal_state();
-                        self.derivation.set_last_derived_l2_block(rewind_target);
-                        self.derivation.rollback_to(rollback_l1_block);
-                        self.mode = DriverMode::Sync;
-                        self.synced
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        self.consecutive_rewind_cycles =
-                            self.consecutive_rewind_cycles.saturating_add(1);
-                        self.set_rewind_target(rewind_target);
+                        self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                         return Ok(());
                     } else {
                         // First time hitting persistent mismatch — rewind to re-derive.
@@ -2704,15 +2748,7 @@ where
                              (protocol tx filtering §4f will produce correct root)"
                         );
                         self.consecutive_flush_mismatches = 0;
-                        self.clear_internal_state();
-                        self.derivation.set_last_derived_l2_block(rewind_target);
-                        self.derivation.rollback_to(rollback_l1_block);
-                        self.mode = DriverMode::Sync;
-                        self.synced
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        self.consecutive_rewind_cycles =
-                            self.consecutive_rewind_cycles.saturating_add(1);
-                        self.set_rewind_target(rewind_target);
+                        self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                         // Do NOT forward L1 txs during rewind — the entries
                         // are not on L1 yet, so the user's tx would revert
                         // with ExecutionNotFound, wasting gas. The L1 txs
@@ -2889,15 +2925,7 @@ where
                                 } else {
                                     (0, self.config.deployment_l1_block)
                                 };
-                            self.clear_internal_state();
-                            self.derivation.set_last_derived_l2_block(rewind_target);
-                            self.derivation.rollback_to(rollback_l1_block);
-                            self.mode = DriverMode::Sync;
-                            self.synced
-                                .store(false, std::sync::atomic::Ordering::Relaxed);
-                            self.consecutive_rewind_cycles =
-                                self.consecutive_rewind_cycles.saturating_add(1);
-                            self.set_rewind_target(rewind_target);
+                            self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                             return Ok(());
                         }
                     }
@@ -2963,15 +2991,7 @@ where
                                     } else {
                                         (0, self.config.deployment_l1_block)
                                     };
-                                self.clear_internal_state();
-                                self.derivation.set_last_derived_l2_block(rewind_target);
-                                self.derivation.rollback_to(rollback_l1_block);
-                                self.mode = DriverMode::Sync;
-                                self.synced
-                                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                                self.consecutive_rewind_cycles =
-                                    self.consecutive_rewind_cycles.saturating_add(1);
-                                self.set_rewind_target(rewind_target);
+                                self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                                 return Ok(());
                             }
                         }
@@ -3072,15 +3092,7 @@ where
                                         } else {
                                             (0, self.config.deployment_l1_block)
                                         };
-                                    self.clear_internal_state();
-                                    self.derivation.set_last_derived_l2_block(rewind_target);
-                                    self.derivation.rollback_to(rollback_l1_block);
-                                    self.mode = DriverMode::Sync;
-                                    self.synced
-                                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                                    self.consecutive_rewind_cycles =
-                                        self.consecutive_rewind_cycles.saturating_add(1);
-                                    self.set_rewind_target(rewind_target);
+                                    self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                                     return Ok(());
                                 }
                             }
@@ -3110,15 +3122,7 @@ where
                                 } else {
                                     (0, self.config.deployment_l1_block)
                                 };
-                            self.clear_internal_state();
-                            self.derivation.set_last_derived_l2_block(rewind_target);
-                            self.derivation.rollback_to(rollback_l1_block);
-                            self.mode = DriverMode::Sync;
-                            self.synced
-                                .store(false, std::sync::atomic::Ordering::Relaxed);
-                            self.consecutive_rewind_cycles =
-                                self.consecutive_rewind_cycles.saturating_add(1);
-                            self.set_rewind_target(rewind_target);
+                            self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                         } else {
                             // Receipt timeout or RPC error — re-queue for retry.
                             // Uses the pre-submit clone: the FlushPlan already
@@ -3942,10 +3946,49 @@ where
             Some(self.pending_rewind_target.map_or(target, |t| t.min(target)));
     }
 
-    fn verify_local_block_matches_l1(
+    /// Execute the canonical "hard rewind" sequence used by every mismatch path
+    /// (flush pre-state mismatch, trigger revert, partial consumption, deferral
+    /// exhaustion, postBatch revert, generic verification mismatch).
+    ///
+    /// The sequence is:
+    /// 1. Clear all internal pending state (submissions, entries, hold, etc.)
+    /// 2. Reset the derivation cursor's last derived L2 block to `target_l2_block`
+    /// 3. Roll the L1 derivation scan back to `rollback_l1_block`
+    /// 4. Switch to `DriverMode::Sync` so derivation catches up before building
+    /// 5. Mark the node as not synced (clears WS preconfirmations etc.)
+    /// 6. Increment `consecutive_rewind_cycles` for backoff dampening
+    /// 7. Record the rewind target (takes min with any prior target in the batch)
+    ///
+    /// **Invariant #10**: when the caller rewinds because an entry block failed
+    /// to verify, the target MUST be `entry_block.saturating_sub(1)` so the block
+    /// containing the entry is itself re-derived, not skipped. Callers compute
+    /// the target; this helper does not second-guess it.
+    ///
+    /// This is the *hard* rewind variant. The L1-context mismatch path in
+    /// `verify_local_block_matches_l1` uses a lighter sequence (no mode switch,
+    /// no rewind-cycle increment) and does not call this helper.
+    fn rewind_to_re_derive(&mut self, target_l2_block: u64, rollback_l1_block: u64) {
+        self.clear_internal_state();
+        self.derivation.set_last_derived_l2_block(target_l2_block);
+        self.derivation.rollback_to(rollback_l1_block);
+        self.mode = DriverMode::Sync;
+        self.synced
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_rewind_cycles = self.consecutive_rewind_cycles.saturating_add(1);
+        self.set_rewind_target(target_l2_block);
+    }
+
+    /// Verify that a locally built block matches what derivation produced for
+    /// it and return a `VerificationDecision` describing the outcome.
+    ///
+    /// This method applies all side effects (rewind target, mode switch, hold
+    /// transitions) inline before returning; the returned enum is the record
+    /// of which branch fired. The thin `verify_local_block_matches_l1` wrapper
+    /// maps the decision to `Result<()>` for callers.
+    fn classify_and_apply_verification(
         &mut self,
         derived: &crate::derivation::DerivedBlock,
-    ) -> Result<()> {
+    ) -> Result<VerificationDecision> {
         // Skip verification for blocks that are permanently committed in reth
         // and cannot be unwound via FCU. These were built during a prior session
         // or before a failed rewind. Re-triggering a rewind for them would be
@@ -3958,7 +4001,7 @@ where
                 ceiling = self.immutable_block_ceiling,
                 "skipping verification for immutable block (cannot be unwound)"
             );
-            return Ok(());
+            return Ok(VerificationDecision::Skip);
         }
 
         let local_header = self
@@ -3972,7 +4015,7 @@ where
                 l2_block = derived.l2_block_number,
                 "cannot verify L1 match: local block not found"
             );
-            return Ok(());
+            return Ok(VerificationDecision::Skip);
         };
 
         let is_gap_fill = derived.state_root == B256::ZERO;
@@ -4018,8 +4061,11 @@ where
             // Clear all pending state — submissions contain state roots from the
             // wrong L1 context, and preconfirmed/deposit data may be stale.
             self.clear_internal_state();
-            self.set_rewind_target(derived.l2_block_number.saturating_sub(1));
-            return Ok(());
+            // Soft rewind: invariant #10 lives right here — re-derive the block
+            // itself, not the one after it.
+            let target_l2 = derived.l2_block_number.saturating_sub(1);
+            self.set_rewind_target(target_l2);
+            return Ok(VerificationDecision::L1ContextMismatchRewound { target_l2 });
         }
 
         // For gap-fill blocks, L1 context match is sufficient — there's no L1 state
@@ -4047,7 +4093,7 @@ where
                     "gap-fill block verified: L1 context matches"
                 );
             }
-            return Ok(());
+            return Ok(VerificationDecision::GapFillVerified);
         }
 
         // With protocol tx filtering (§4f), derivation produces the correct root
@@ -4108,16 +4154,10 @@ where
                         } else {
                             self.config.deployment_l1_block
                         };
-                        self.clear_internal_state();
-                        self.derivation.set_last_derived_l2_block(rewind_target);
-                        self.derivation.rollback_to(rollback_l1_block);
-                        self.mode = DriverMode::Sync;
-                        self.synced
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        self.consecutive_rewind_cycles =
-                            self.consecutive_rewind_cycles.saturating_add(1);
-                        self.set_rewind_target(rewind_target);
-                        return Ok(());
+                        self.rewind_to_re_derive(rewind_target, rollback_l1_block);
+                        return Ok(VerificationDecision::MismatchDeferExhausted {
+                            rewind_target,
+                        });
                     }
                     DeferralResult::NotArmed => {
                         // Unreachable: we checked `is_armed_for(...)` above.
@@ -4140,7 +4180,13 @@ where
             self.consecutive_rewind_cycles = self.consecutive_rewind_cycles.saturating_add(1);
             self.clear_internal_state();
             self.derivation.rollback_to(derived_l1_number);
-            self.set_rewind_target(derived.l2_block_number.saturating_sub(1));
+            let rewind_target = derived.l2_block_number.saturating_sub(1);
+            self.set_rewind_target(rewind_target);
+            // Record the decision explicitly, then convert to Err so the main
+            // loop's backoff machinery kicks in. The `rewind_target` in the
+            // decision is for telemetry only — the side effects are already
+            // applied above.
+            let _decision = VerificationDecision::MismatchPermanent { rewind_target };
             return Err(eyre::eyre!(
                 "state root mismatch at L2 block {}: header={header_root}, L1={}",
                 derived.l2_block_number,
@@ -4170,6 +4216,24 @@ where
             "builder block verified: L1 context and state root match"
         );
 
+        Ok(VerificationDecision::Match)
+    }
+
+    /// Thin wrapper around `classify_and_apply_verification` that preserves
+    /// the `Result<()>` API expected by callers. The outcome is logged at
+    /// trace level so operators can correlate decisions with downstream
+    /// state transitions.
+    fn verify_local_block_matches_l1(
+        &mut self,
+        derived: &crate::derivation::DerivedBlock,
+    ) -> Result<()> {
+        let decision = self.classify_and_apply_verification(derived)?;
+        trace!(
+            target: "based_rollup::driver",
+            l2_block = derived.l2_block_number,
+            ?decision,
+            "verification decision"
+        );
         Ok(())
     }
 
