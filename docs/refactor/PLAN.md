@@ -1046,48 +1046,80 @@ Mechanical movement.
 | 0 | 0.6 | trace fixtures | incremental | ☐ | — |
 | 0 | 0.7 | hold/rewind tests (incl. withdrawal revert) | incremental | ☐ | #15 |
 | 0 | 0.8 | ⭐ capture baseline script | incremental | ☐ | — |
-| 1 | 1.1a | RollupId newtype (scaffold) | incremental | ☐ | — |
-| 1 | 1.1b | RollupId migration | dedicated | ☐ | — |
-| 1 | 1.1c | ScopePath newtype | incremental | ☐ | — |
-| 1 | 1.2 | state root newtypes (module-private + boundary) | dedicated | ☐ | #3 |
-| 1 | 1.3 | ParentLink enum | dedicated | ☐ | #7 |
-| 1 | 1.4 | TxOutcome + EntryGroupMode + EntryClass | dedicated | ☐ | #5 |
-| 1 | 1.4b | ⭐ QueuedCallRequest enums (moved from 1.11, Codex p4) | dedicated | ☐ | #6 |
-| 1 | 1.5 | PendingL1SubmissionQueue + BlockEntryMix | incremental | ☐ | #11 |
-| 1 | 1.6 | EntryVerificationHold + builder halt gate | incremental | ☐ | #14 |
-| 1 | 1.6b+c | ⭐ EntryQueue struct + ForwardPermit token (merged, Codex p4) | dedicated | ☐ | #13 |
-| 1 | 1.7 | ⭐ FlushPlan typestate (NoEntries/Collected/HoldArmed + SendResult) | dedicated | ☐ | #1 |
-| 1 | 1.8 | L1NonceReservation + ProofContext + L1Client wrapper | incremental | ☐ | #2, #22 |
-| 1 | 1.9a | ImmediateEntryBuilder + CallOrientation | incremental | ☐ | #19 |
-| 1 | 1.9b | DeferredEntryBuilder + RevertGroupBuilder | incremental | ☐ | #8 |
-| 1 | 1.9c | L2ToL1ContinuationBuilder (with_scope_return mandatory) | incremental | ☐ | #12 |
-| 1 | 1.10 | ⭐ ReturnData enum (Void / NonVoid) | dedicated | ☐ | #20 |
-| 2 | 2.1 | Driver mechanical split (multiple `impl Driver` blocks, no traits) | dedicated | ☐ | — |
-| 2 | 2.2 | BuilderTickContext | incremental | ☐ | — |
-| 2 | 2.3 | QueueDrain | incremental | ☐ | — |
-| 2 | 2.4 | ProtocolTxPlan with typed stages | incremental | ☐ | — |
-| 2 | 2.5 | VerificationDecision + rewind_to_re_derive | incremental | ☐ | #9, #10 |
-| 2 | 2.6 | FlushPrecheck | incremental | ☐ | — |
-| 2 | 2.7 | FlushAssembly → FlushPlan<Collected> | incremental | ☐ | — |
-| 2 | 2.7b | ⭐ ForwardAndTriggerPlan + TriggerExecutionResult | incremental | ☐ | #15 |
-| 2 | 2.8 | step_builder/flush_to_l1 as orchestrators (complete FlushStage) | dedicated | ☐ | — |
-| 3 | 3.0 | ⭐ trait SimulationClient + HttpSimClient + InMemorySimClient | dedicated | ☐ | — |
-| 3 | 3.1 | Sealed trait Direction | incremental | ☐ | — |
-| 3 | 3.2 | shared composer_rpc/model.rs | dedicated | ☐ | — |
-| 3 | 3.3 | rebase_parent_links single helper | incremental | ☐ | #7 |
-| 3 | 3.4 | discover_until_stable (complete spec) | dedicated | ☐ | — |
-| 3 | 3.5 | build_queue_payload (uses 1.4b enums) | dedicated | ☐ | — |
-| 3 | 3.6 | SimulationPlan enum + simulate_delivery() function | dedicated | ☐ | #17, #21 |
-| 3 | 3.7 | directions as thin adapters | dedicated | ☐ | — |
-| 4 | 4.1 | composer_rpc split | dedicated | ☐ | — |
-| 4 | 4.2 | generic server.rs | incremental | ☐ | — |
-| 4 | 4.3 | tx_codec.rs | incremental | ☐ | — |
-| 4 | 4.4 | selectors in cross_chain.rs (chosen owner) + CI grep gate | incremental | ☐ | #23 |
-| 4 | 4.5 | ⭐ trace split + typed structs (ex-5.2 merged) | dedicated | ☐ | — |
-| 4 | 4.6 | entry_builder.rs (façade over 1.9) | dedicated | ☐ | — |
-| 5 | 5.1 | remove residual unwraps | incremental | ☐ | — |
-| 5 | 5.4 | proptest / fuzz | incremental | ☐ | — |
-| 5 | 5.7 | replay baseline gate vs 0.8 | dedicated | ☐ | blocks merge to main |
+| 1 | 1.1a | RollupId newtype (scaffold) | incremental | ✅ | — |
+| 1 | 1.1b | RollupId migration | dedicated | ✅ | — |
+| 1 | 1.1c | ScopePath newtype | incremental | ✅ | — |
+| 1 | 1.2 | state root newtypes (module-private + boundary) | dedicated | ✅ | #3 |
+| 1 | 1.3 | ParentLink enum | dedicated | ✅ | #7 (partial — single helper lives in 3.3) |
+| 1 | 1.4 | TxOutcome + EntryGroupMode + EntryClass | dedicated | ✅ | #5 |
+| 1 | 1.4b | ⭐ QueuedCallRequest enums (moved from 1.11, Codex p4) | dedicated | ✅ | #6 |
+| 1 | 1.5 | PendingL1SubmissionQueue + BlockEntryMix | incremental | ✅ | #11 |
+| 1 | 1.6 | EntryVerificationHold + builder halt gate | incremental | ✅ | #14 |
+| 1 | 1.6b+c | ⭐ EntryQueue struct + ForwardPermit token (merged, Codex p4) | dedicated | ⏸ deferred | #13 (behaviorally closed by existing hold-then-forward; type wrapper not yet added) |
+| 1 | 1.7 | ⭐ FlushPlan typestate (NoEntries/Collected/HoldArmed + SendResult) | dedicated | ✅ | #1 |
+| 1 | 1.8 | L1NonceReservation + ProofContext + L1Client wrapper | incremental | ✅ | #2, #22 (L1Client wrapper deferred — narrow scope) |
+| 1 | 1.9a | ImmediateEntryBuilder + CallOrientation | incremental | ✅ (CallOrientation only) | #19 |
+| 1 | 1.9b | DeferredEntryBuilder + RevertGroupBuilder | incremental | ⏸ deferred | #8 (logic correct, no type wrapper yet) |
+| 1 | 1.9c | L2ToL1ContinuationBuilder (with_scope_return mandatory) | incremental | ⏸ deferred | #12 (logic correct, no type wrapper yet) |
+| 1 | 1.10 | ⭐ ReturnData enum (Void / NonVoid) | dedicated | ✅ (scaffold only) | #20 (enum defined, field cascade deferred) |
+| 2 | 2.1 | Driver mechanical split (multiple `impl Driver` blocks, no traits) | dedicated | ⏸ deferred | — (end-of-phase structural work) |
+| 2 | 2.2 | BuilderTickContext | incremental | ⏸ deferred | — |
+| 2 | 2.3 | QueueDrain | incremental | ⏸ deferred | — |
+| 2 | 2.4 | ProtocolTxPlan with typed stages | incremental | ⏸ deferred | — |
+| 2 | 2.5 | VerificationDecision + rewind_to_re_derive | incremental | ✅ | #9, #10 |
+| 2 | 2.6 | FlushPrecheck | incremental | ⏸ deferred | — |
+| 2 | 2.7 | FlushAssembly → FlushPlan<Collected> | incremental | ⏸ deferred (1.7 already owns FlushPlan<Collected>) | — |
+| 2 | 2.7b | ⭐ ForwardAndTriggerPlan + TriggerExecutionResult | incremental | ✅ (TriggerExecutionResult) | #15 |
+| 2 | 2.8 | step_builder/flush_to_l1 as orchestrators (complete FlushStage) | dedicated | ⏸ deferred | — |
+| 3 | 3.0 | ⭐ trait SimulationClient + HttpSimClient + InMemorySimClient | dedicated | ⏸ deferred | — |
+| 3 | 3.1 | Sealed trait Direction | incremental | ⏸ deferred | — |
+| 3 | 3.2 | shared composer_rpc/model.rs | dedicated | ⏸ deferred | — |
+| 3 | 3.3 | rebase_parent_links single helper | incremental | ⏸ deferred | #7 (second half) |
+| 3 | 3.4 | discover_until_stable (complete spec) | dedicated | ⏸ deferred | — |
+| 3 | 3.5 | build_queue_payload (uses 1.4b enums) | dedicated | ⏸ deferred | — |
+| 3 | 3.6 | SimulationPlan enum + simulate_delivery() function | dedicated | ⏸ deferred | #17, #21 |
+| 3 | 3.7 | directions as thin adapters | dedicated | ⏸ deferred | — |
+| 4 | 4.1 | composer_rpc split | dedicated | ⏸ deferred | — |
+| 4 | 4.2 | generic server.rs | incremental | ⏸ deferred | — |
+| 4 | 4.3 | tx_codec.rs | incremental | ⏸ deferred | — |
+| 4 | 4.4 | selectors in cross_chain.rs (chosen owner) + CI grep gate | incremental | ✅ (CI gate; codebase was already clean) | #23 |
+| 4 | 4.5 | ⭐ trace split + typed structs (ex-5.2 merged) | dedicated | ⏸ deferred | — |
+| 4 | 4.6 | entry_builder.rs (façade over 1.9) | dedicated | ⏸ deferred | — |
+| 5 | 5.1 | remove residual unwraps | incremental | ✅ | — |
+| 5 | 5.4 | proptest / fuzz | incremental | ⏸ deferred | — |
+| 5 | 5.7 | replay baseline gate vs 0.8 | dedicated | ⏸ deferred | blocks merge to main |
+
+### Current closure status (invariants 1-23)
+
+| # | Invariant | Status | Closure vehicle |
+|---|---|---|---|
+| 1 | Hold before send_to_l1 | ✅ compile-time | `FlushPlan<Sendable>` typestate (1.7) |
+| 2 | Never auto-nonce; reset on failure | ✅ compile-time | `NonceResetRequired` + `#[must_use]` (1.8) |
+| 3 | Never fabricate pre_state_root | ✅ compile-time | `CleanStateRoot` + boundary ctors (1.2) |
+| 4 | §4f prefix-counting (not all-or-nothing) | ⏸ behavioral | `compute_consumed_trigger_prefix` logic; proptest deferred |
+| 5 | Continuation entries ≠ triggers | ✅ compile-time | `EntryClass` + `partition_entries` (1.4) |
+| 6 | Result skipped with continuations | ✅ compile-time | `QueuedCrossChainCall::WithContinuations` no `result_entry` field (1.4b) |
+| 7 | Rebase parent_call_index | ✅ compile-time (types) + ⏸ (single helper 3.3) | `ParentLink` + `AbsoluteCallIndex` (1.3) |
+| 8 | First trigger needs clean root | ⏸ behavioral | reorder_for_swap_and_pop logic |
+| 9 | Deferral exhaustion → rewind | ✅ compile-time | `MismatchDeferExhausted` only path (2.5) |
+| 10 | Rewind target is entry_block - 1 | ✅ compile-time | `rewind_to_re_derive` helper + single saturating_sub site (2.5) |
+| 11 | Deposits+withdrawals coexist | ✅ compile-time | `BlockEntryMix` (1.5) |
+| 12 | Scope navigation on continuation Entry 1 | ⏸ behavioral | builder logic (1.9c deferred) |
+| 13 | Hold-then-forward awaits confirmation | ⏸ behavioral | composer_rpc hold logic (1.6b+c deferred) |
+| 14 | Builder halts during hold | ✅ compile-time | `hold.is_blocking_build()` gate (1.6) |
+| 15 | Trigger revert → rewind | ✅ compile-time | `TriggerExecutionResult` + `#[must_use]` (2.7b) |
+| 16 | §4f filtering is generic | ⏸ behavioral | unified `filter_block_entries` function |
+| 17 | Never per-call sim for multi-call L2→L1 | ⏸ behavioral | `simulate_l1_combined_delivery` routing (3.6 deferred) |
+| 18 | L1/L2 structures mirror | ⏸ behavioral | mirror tests deferred (0.5, 3.2) |
+| 19 | Never swap (dest, source) for L1→L2 return | ✅ compile-time | `CallOrientation` enum (1.9a) |
+| 20 | ReturnData Void vs NonVoid | ✅ compile-time (scaffold) | `ReturnData` enum (1.10) |
+| 21 | Single + terminal return → promote | ⏸ behavioral | `bool` condition (3.6 deferred) |
+| 22 | publicInputsHash uses timestamp | ✅ compile-time | `ProofContext.block_timestamp` (1.8) |
+| 23 | Never hardcode selectors | ✅ CI gate | `scripts/refactor/check-no-hardcoded-selectors.sh` (4.4) |
+
+**Compile-time closures: 14/23** (1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15, 19, 20, 22) — any violation produces a build error.
+**CI gates: 1/23** (23) — any regression breaks the no-hardcoded-selectors job.
+**Behavioral-only: 8/23** (4, 8, 12, 13, 16, 17, 18, 21) — invariant is preserved by the code but is not gated by a type or CI check; waiting for deferred refactor steps (primarily Phase 3 composer unification).
 
 ---
 
