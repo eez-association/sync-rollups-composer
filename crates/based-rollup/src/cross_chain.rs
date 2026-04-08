@@ -1052,6 +1052,112 @@ impl<'de> serde::Deserialize<'de> for EntryGroupMode {
     }
 }
 
+// ──────────────────────────────────────────────
+//  CallOrientation (refactor PLAN step 1.9a)
+//
+//  Distinguishes a **forward** L2→L1 child call from a **return**
+//  L1→L2 child call. The two kinds have opposite (destination,
+//  source) pairings when building their L1 trigger entries, and
+//  swapping the pair by mistake was a real class of bug:
+//
+//  - **Forward** L2→L1 children: the proxy on L1 represents the L2
+//    *source* (e.g., Bridge_L2). The L1 *destination* is the L1
+//    contract that the L2 source is calling (e.g., Bridge_L1
+//    receiving withdrawn tokens). Trigger entry pair:
+//
+//        (trigger_dest, trigger_source) = (source_address, destination)
+//
+//    i.e. **swap** the CALL action's (destination, source).
+//
+//  - **Return** L1→L2 children: the proxy on L1 represents the L2
+//    *destination* (e.g., PingPongL2). The L1 *source_address* is
+//    the L1 contract that called the proxy. Trigger entry pair:
+//
+//        (trigger_dest, trigger_source) = (destination, source_address)
+//
+//    i.e. **do not swap** — preserve the CALL action's pair.
+//
+//  ## Closes invariant #19 (more explicitly)
+//
+//  Pre-1.9a, the swap logic was duplicated at three call sites in
+//  `table_builder.rs`, each with its own `let is_return_call =
+//  child.call_action.rollup_id == our_rollup_id;` followed by an
+//  `if is_return_call` block. Copy-pasting or refactoring any of
+//  these sites was brittle — it took one inverted `if` to
+//  reintroduce the CLAUDE.md "Return Call Address Direction" bug
+//  that cost hours to diagnose during the PingPong depth-2 debug.
+//
+//  Post-1.9a, the swap lives in exactly one place:
+//  [`CallOrientation::address_pair_for`]. The three former sites
+//  call this helper and pass the orientation computed by
+//  [`CallOrientation::from_child`]. A future bug in the swap logic
+//  is a single-site edit that the test suite catches (the mirror
+//  tests + the PingPong-depth2 property test exercise both
+//  orientations). A future bug in the ORIENTATION detection (the
+//  `rollup_id == our_rollup_id` heuristic) is also a single-site
+//  edit.
+// ──────────────────────────────────────────────
+
+/// Orientation of a child cross-chain call inside a multi-depth
+/// pattern. See the module comment above for the precise semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallOrientation {
+    /// L2→L1 child call. The child's CALL action targets L1
+    /// (`rollup_id = RollupId::MAINNET`) and originates from an
+    /// L2 contract. Trigger entries **swap** (dest, source).
+    Forward,
+    /// L1→L2 return call child. The child's CALL action targets
+    /// our L2 rollup (`rollup_id == our_rollup_id`) and originates
+    /// from an L1 contract. Trigger entries **do not swap** —
+    /// preserve the CALL action's (dest, source) pair.
+    Return,
+}
+
+impl CallOrientation {
+    /// Detect the orientation from a child's `CrossChainAction
+    /// .rollup_id`. This is the canonical gate — **every** site
+    /// that used to write `is_return_call = child.rollup_id ==
+    /// our_rollup_id` must go through this helper so the detection
+    /// rule lives in one place.
+    pub fn from_child(child_rollup_id: RollupId, our_rollup_id: RollupId) -> Self {
+        if child_rollup_id == our_rollup_id {
+            Self::Return
+        } else {
+            Self::Forward
+        }
+    }
+
+    /// Produce the `(trigger_dest, trigger_source)` tuple for a
+    /// child's L1 trigger / L2 `callReturn` entry. **Closes
+    /// invariant #19** — any future code that wants to rebuild
+    /// this pair must either call this function or rename the
+    /// enum's variants (which is visible in review).
+    pub fn address_pair_for(
+        &self,
+        call_destination: Address,
+        call_source_address: Address,
+    ) -> (Address, Address) {
+        match self {
+            // Return call: preserve — proxy represents the L2
+            // destination, source is the L1 caller.
+            Self::Return => (call_destination, call_source_address),
+            // Forward call: swap — proxy represents the L2 source,
+            // destination is the L1 contract being called.
+            Self::Forward => (call_source_address, call_destination),
+        }
+    }
+
+    /// `true` iff this is a return call (`L1→L2 child`).
+    pub fn is_return(&self) -> bool {
+        matches!(self, Self::Return)
+    }
+
+    /// `true` iff this is a forward call (`L2→L1 child`).
+    pub fn is_forward(&self) -> bool {
+        matches!(self, Self::Forward)
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {

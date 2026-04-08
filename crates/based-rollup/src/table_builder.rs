@@ -12,7 +12,7 @@ use alloy_sol_types::SolType;
 use serde::{Deserialize, Serialize};
 
 use crate::cross_chain::{
-    ActionHash, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
+    ActionHash, CallOrientation, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
     CrossChainStateDelta, EntryGroupMode, ICrossChainManagerL2, ParentLink, RollupId, ScopePath,
     TxOutcome,
 };
@@ -1398,22 +1398,18 @@ fn push_reentrant_child_entries(
         //   proxy = proxy(destination, our_rollup_id) on L1
         //   trigger: destination = destination (proxy's originalAddress)
         //            source_address = source_address (L1 caller to proxy)
-        let is_return_call = child.call_action.rollup_id == our_rollup_id;
-        let (trigger_dest, trigger_source) = if is_return_call {
-            // L1→L2 return call: proxy represents the L2 destination on L1.
-            // The L1 source_address is the L1 contract calling the proxy.
-            (
-                child.call_action.destination,
-                child.call_action.source_address,
-            )
-        } else {
-            // L2→L1 child: proxy represents the L2 source on L1.
-            // The L1 destination is the L1 contract that called the proxy.
-            (
-                child.call_action.source_address,
-                child.call_action.destination,
-            )
-        };
+        //
+        // Invariant #19 closure: `CallOrientation::address_pair_for`
+        // is the single site that holds the swap rule.
+        let orientation = CallOrientation::from_child(
+            child.call_action.rollup_id,
+            our_rollup_id,
+        );
+        let is_return_call = orientation.is_return();
+        let (trigger_dest, trigger_source) = orientation.address_pair_for(
+            child.call_action.destination,
+            child.call_action.source_address,
+        );
 
         let child_trigger = CrossChainAction {
             action_type: CrossChainActionType::Call,
@@ -1753,18 +1749,15 @@ pub fn build_l2_to_l1_continuation_entries(
             // For L1→L2 return call children (e.g., pong(round, maxRounds)):
             //   destination = child.destination (L2 contract, e.g., PingPongL2)
             //   source_address = child.source_address (proxy's originalAddress on L1)
-            let is_return_call = first_child.call_action.rollup_id == our_rollup_id;
-            let (cr_dest, cr_source) = if is_return_call {
-                (
-                    first_child.call_action.destination,
-                    first_child.call_action.source_address,
-                )
-            } else {
-                (
-                    first_child.call_action.source_address,
-                    first_child.call_action.destination,
-                )
-            };
+            // Invariant #19: single site for the swap rule.
+            let first_orientation = CallOrientation::from_child(
+                first_child.call_action.rollup_id,
+                our_rollup_id,
+            );
+            let (cr_dest, cr_source) = first_orientation.address_pair_for(
+                first_child.call_action.destination,
+                first_child.call_action.source_address,
+            );
             let first_child_scope = if first_child.scope.is_empty() {
                 ScopePath::from_index(U256::ZERO)
             } else {
@@ -1803,18 +1796,15 @@ pub fn build_l2_to_l1_continuation_entries(
             for (child_pos, &(_child_orig_idx, child)) in
                 this_call_children.iter().enumerate().skip(1)
             {
-                let child_is_return = child.call_action.rollup_id == our_rollup_id;
-                let (ccr_dest, ccr_source) = if child_is_return {
-                    (
-                        child.call_action.destination,
-                        child.call_action.source_address,
-                    )
-                } else {
-                    (
-                        child.call_action.source_address,
-                        child.call_action.destination,
-                    )
-                };
+                // Invariant #19: single site for the swap rule.
+                let child_orientation = CallOrientation::from_child(
+                    child.call_action.rollup_id,
+                    our_rollup_id,
+                );
+                let (ccr_dest, ccr_source) = child_orientation.address_pair_for(
+                    child.call_action.destination,
+                    child.call_action.source_address,
+                );
                 // Sibling scope: use child's pre-computed scope if available,
                 // otherwise fall back to simple positional index.
                 let sibling_scope = if child.scope.is_empty() {
