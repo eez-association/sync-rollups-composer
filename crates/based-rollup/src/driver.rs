@@ -100,6 +100,33 @@ enum VerificationDecision {
     MismatchPermanent { rewind_target: u64 },
 }
 
+/// Outcome of verifying L2→L1 trigger receipts after a postBatch lands on L1.
+///
+/// Produced by `Driver::verify_trigger_receipts` and consumed exactly once by
+/// `flush_to_l1`. The `#[must_use]` attribute is the compile-time enforcement
+/// for **invariant #15** (withdrawal trigger revert on L1 causes REWIND, not
+/// a silent log): with `clippy::must_use_candidate` / `-D warnings` any caller
+/// that drops this value without matching on it produces a build error.
+///
+/// The `Reverted` variant carries the rewind-target hint so callers don't
+/// recompute it; the helper method that produces it does not touch driver
+/// state beyond querying receipts, so the caller retains control of when
+/// the actual rewind fires.
+#[derive(Debug, Clone)]
+#[must_use = "invariant #15: trigger receipt outcome must be consumed — a reverted \
+              trigger MUST cause a rewind, never a silent log"]
+#[allow(
+    dead_code,
+    reason = "payload fields are surfaced via the derived Debug impl in log statements"
+)]
+enum TriggerExecutionResult {
+    /// All triggers landed with a successful receipt (status=1).
+    AllConfirmed { count: usize },
+    /// At least one trigger reverted on L1. The caller MUST initiate a rewind
+    /// so the entry-bearing block is re-derived with §4f filtering.
+    Reverted { reverted_count: usize, total: usize },
+}
+
 /// Orchestrates the rollup node's main loop.
 ///
 /// Manages mode switching between sync and builder modes, drives the
@@ -2950,31 +2977,29 @@ where
                         // Verify all L2→L1 trigger receipts. Triggers land in the
                         // same L1 block as postBatch, so receipts should be available
                         // immediately after the postBatch receipt.
-                        if !trigger_tx_hashes.is_empty() {
-                            let proposer = self.proposer.as_ref().expect("checked above");
-                            let mut any_trigger_failed = false;
-                            for trigger_hash in &trigger_tx_hashes {
-                                match proposer.wait_for_l1_receipt(*trigger_hash).await {
-                                    Ok(_) => {
-                                        // Trigger landed successfully — receipt status=1
-                                    }
-                                    Err(err) => {
-                                        warn!(
-                                            target: "based_rollup::driver",
-                                            %err, %trigger_hash,
-                                            "L2→L1 trigger reverted on L1 — will rewind to strip entries"
-                                        );
-                                        any_trigger_failed = true;
-                                    }
-                                }
+                        //
+                        // The `#[must_use]` attribute on `TriggerExecutionResult`
+                        // (invariant #15) makes it impossible for future callers
+                        // to silently drop this outcome — every new variant must
+                        // be handled explicitly or the build fails under
+                        // `-D warnings`.
+                        match self.verify_trigger_receipts(&trigger_tx_hashes).await {
+                            TriggerExecutionResult::AllConfirmed { .. } => {
+                                // All triggers landed — fall through to entry
+                                // consumption verification below.
                             }
-                            if any_trigger_failed {
+                            TriggerExecutionResult::Reverted {
+                                reverted_count,
+                                total,
+                            } => {
                                 // With intermediate state roots, the on-chain stateRoot
                                 // is at an intermediate root (partial consumption).
                                 // Derivation can filter unconsumed L2→L1 txs to
                                 // produce the matching root via §4f. Rewind to re-derive.
                                 warn!(
                                     target: "based_rollup::driver",
+                                    reverted_count,
+                                    total,
                                     "one or more L2→L1 triggers reverted — \
                                      rewinding for re-derivation with filtered txs"
                                 );
@@ -3170,6 +3195,55 @@ where
     ///
     /// On any failure, resets the proposer's nonce cache before returning
     /// the error, so the caller's next `send_to_l1` starts fresh.
+    /// Verify L2→L1 trigger receipts and classify the outcome.
+    ///
+    /// Called by `flush_to_l1` after postBatch confirms, waiting synchronously
+    /// for each trigger receipt and producing a `TriggerExecutionResult` that
+    /// the caller MUST consume (`#[must_use]`) — see invariant #15.
+    ///
+    /// This function does NOT mutate driver state (no rewind, no hold change).
+    /// The caller decides what to do with the result, but the `#[must_use]`
+    /// attribute + `-D warnings` makes it impossible to silently drop.
+    async fn verify_trigger_receipts(
+        &self,
+        trigger_tx_hashes: &[B256],
+    ) -> TriggerExecutionResult {
+        if trigger_tx_hashes.is_empty() {
+            return TriggerExecutionResult::AllConfirmed { count: 0 };
+        }
+        let Some(proposer) = self.proposer.as_ref() else {
+            // No proposer means we could not have sent triggers in the first
+            // place — treat as vacuous confirmation.
+            return TriggerExecutionResult::AllConfirmed { count: 0 };
+        };
+        let mut reverted_count = 0usize;
+        for trigger_hash in trigger_tx_hashes {
+            match proposer.wait_for_l1_receipt(*trigger_hash).await {
+                Ok(_) => {
+                    // Trigger landed successfully — receipt status=1
+                }
+                Err(err) => {
+                    warn!(
+                        target: "based_rollup::driver",
+                        %err, %trigger_hash,
+                        "L2→L1 trigger reverted on L1 — will rewind to strip entries"
+                    );
+                    reverted_count += 1;
+                }
+            }
+        }
+        if reverted_count == 0 {
+            TriggerExecutionResult::AllConfirmed {
+                count: trigger_tx_hashes.len(),
+            }
+        } else {
+            TriggerExecutionResult::Reverted {
+                reverted_count,
+                total: trigger_tx_hashes.len(),
+            }
+        }
+    }
+
     async fn send_l2_to_l1_triggers(&mut self, triggers: &[TriggerMetadata]) -> Result<Vec<B256>> {
         let proposer = self
             .proposer
