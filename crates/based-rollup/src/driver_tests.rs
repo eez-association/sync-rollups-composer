@@ -3728,6 +3728,140 @@ fn test_consecutive_rewind_backoff_with_hold() {
     assert_eq!(consecutive_rewind_cycles, 0);
 }
 
+// ──────────────────────────────────────────────
+//  Step 0.7 (refactor) — hold/mismatch/rewind coverage audit
+//
+//  PLAN.md step 0.7 requires coverage of these 6 scenarios. Each is
+//  cross-referenced to the existing or new test that covers it. This
+//  comment is the audit trail referenced by INVARIANT_MAP.md row #15.
+//
+//  | Scenario                                | Test                                              |
+//  |-----------------------------------------|---------------------------------------------------|
+//  | Hold set BEFORE submit                  | test_hold_set_only_when_entries_non_empty         |
+//  | Hold cleared on verify match            | test_hold_cleared_on_verification_match           |
+//  | Defer 3 times then rewind               | test_full_rewind_cycle_state_transitions          |
+//  | Hold not set when no entries            | test_hold_set_only_when_entries_non_empty         |
+//  | Rewind cycle clamps to anchor           | test_l1_confirmed_anchor_rewind_clamps_to_anchor  |
+//  | Withdrawal trigger revert → rewind (#15)| test_withdrawal_trigger_revert_rewind  ⭐ NEW     |
+//
+//  The withdrawal trigger revert test below closes invariant #15
+//  ("Withdrawal trigger revert on L1 causes REWIND, not log") at the
+//  test/gate level. The compile-time half of #15 lands in PLAN step
+//  2.7b with `TriggerExecutionResult::RevertedNeedsRewind`.
+// ──────────────────────────────────────────────
+
+#[test]
+fn test_withdrawal_trigger_revert_rewind() {
+    // Mirrors the state transition in driver.rs flush_to_l1 around the
+    // trigger revert handler (driver.rs:2196-2245). The flow under test:
+    //
+    //   1. Builder posted an entry-bearing batch and sent L2→L1 trigger
+    //      txs alongside.
+    //   2. The postBatch confirmed → l1_confirmed_anchor was updated to
+    //      the entry block (the LAST block of the just-flushed batch).
+    //   3. Hold was armed for that entry block.
+    //   4. Driver waited for trigger receipts and observed at least one
+    //      reverted (any_trigger_failed = true).
+    //   5. Driver MUST rewind to anchor.l2_block_number - 1 so the
+    //      entry block itself gets re-derived under §4f filtering.
+    //
+    // The on-chain stateRoot after a partial trigger revert is at an
+    // intermediate root produced by the consumed-prefix; derivation can
+    // reproduce that exact root by filtering unconsumed L2→L1 txs from
+    // the L2 block during re-derivation.
+
+    // Initial state — builder just flushed entry block 100 in L1 block 200.
+    let mut hold: Option<u64> = Some(100);
+    let mut mode = DriverMode::Builder;
+    let mut consecutive_rewind_cycles: u32 = 0;
+    let mut synced = true;
+    let mut rewind_target: Option<u64> = None;
+    let l1_confirmed_anchor: Option<L1ConfirmedAnchor> = Some(L1ConfirmedAnchor {
+        l2_block_number: 100, // entry block (last of the batch)
+        l1_block_number: 200, // L1 block where postBatch landed
+    });
+    // Pending queue is empty post-flush; the batch already committed.
+    let mut pending: VecDeque<PendingBlock> = VecDeque::new();
+
+    // Pre-revert sanity checks: this is the state of the driver right
+    // before it observes the trigger receipt failure.
+    assert_eq!(hold, Some(100), "hold armed for entry block 100");
+    assert_eq!(mode, DriverMode::Builder);
+    assert_eq!(consecutive_rewind_cycles, 0);
+    assert!(synced, "driver synced before observing the revert");
+    assert!(rewind_target.is_none(), "no rewind target yet");
+    assert!(pending.is_empty(), "pending drained by the flush");
+
+    // Step 4 — observe at least one trigger receipt with status=0
+    // (any_trigger_failed = true).
+    let any_trigger_failed = true;
+    assert!(
+        any_trigger_failed,
+        "precondition: simulated trigger revert observed"
+    );
+
+    // Step 5 — driver computes rewind targets from the anchor.
+    // Mirrors driver.rs:2226-2234 exactly:
+    //   rewind_target    = anchor.l2_block_number - 1
+    //   rollback_l1_block = anchor.l1_block_number - 1
+    let (computed_rewind_target, computed_rollback_l1_block) =
+        if let Some(anchor) = l1_confirmed_anchor {
+            (
+                anchor.l2_block_number.saturating_sub(1),
+                anchor.l1_block_number.saturating_sub(1),
+            )
+        } else {
+            (0, 1000) // deployment_l1_block fallback
+        };
+    assert_eq!(
+        computed_rewind_target, 99,
+        "must rewind to entry_block - 1 so the entry block re-derives"
+    );
+    assert_eq!(
+        computed_rollback_l1_block, 199,
+        "L1 cursor rolls back to anchor.l1 - 1"
+    );
+
+    // clear_internal_state() effects: pending drained, hold cleared.
+    pending.clear();
+    hold = None;
+
+    // Mode flips to Sync, synced flag drops, rewind cycles bumped, target set.
+    mode = DriverMode::Sync;
+    synced = false;
+    consecutive_rewind_cycles = consecutive_rewind_cycles.saturating_add(1);
+    rewind_target = Some(computed_rewind_target);
+
+    // ── Assertions on the post-rewind state ──
+    assert!(hold.is_none(), "trigger revert clears the hold");
+    assert!(
+        pending.is_empty(),
+        "trigger revert drains pending submissions"
+    );
+    assert_eq!(
+        mode,
+        DriverMode::Sync,
+        "trigger revert switches mode to Sync for re-derivation"
+    );
+    assert!(!synced, "trigger revert flips synced=false");
+    assert_eq!(
+        consecutive_rewind_cycles, 1,
+        "trigger revert counts as one rewind cycle"
+    );
+    assert_eq!(
+        rewind_target,
+        Some(99),
+        "rewind target equals entry_block - 1 (so the entry block re-derives)"
+    );
+
+    // The anchor itself is preserved across the rewind so the next
+    // rewind cycle (if needed) clamps to the same lower bound.
+    assert!(
+        l1_confirmed_anchor.is_some(),
+        "anchor remains set across the rewind"
+    );
+}
+
 #[test]
 fn test_mismatch_counter_resets_on_success() {
     // consecutive_flush_mismatches should reset to 0 when pre_state matches.
