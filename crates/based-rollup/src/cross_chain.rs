@@ -196,6 +196,129 @@ pub const CROSS_CHAIN_MANAGER_L2_ADDRESS: Address = Address::new([
     0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03,
 ]);
 
+// ──────────────────────────────────────────────
+//  RollupId newtype (refactor PLAN step 1.1a)
+//
+//  A zero-cost wrapper over `U256` that makes rollup identifiers a
+//  distinct type at the compile-time level. Exists to prevent two
+//  classes of bugs:
+//    1. Passing a generic `U256` where a rollup id is expected (or
+//       vice versa — e.g. calling with a block number).
+//    2. Uncontrolled construction from raw bytes: every non-trivial
+//       path that turns raw bytes / topics / decoded ABI values into
+//       a `RollupId` must go through an explicit `from_*_boundary`
+//       function so that `grep from_.*_boundary` reveals every entry
+//       point a human auditor needs to review.
+//
+//  **Step 1.1a deliberately does NOT migrate call sites.** The type
+//  is introduced alongside the existing `U256`-typed fields (e.g.
+//  `CrossChainAction::rollup_id: U256`). Callsite migration happens in
+//  step 1.1b on a dedicated branch because it touches >20 files.
+// ──────────────────────────────────────────────
+
+/// Rollup identifier — the `rollupId` field of `ICrossChainManager.Action`.
+///
+/// A newtype wrapper over [`U256`]. Construction is controlled:
+/// - Internal code uses [`RollupId::new`] (module-private `pub(crate)`)
+/// - ABI-decoded values use [`RollupId::from_abi_boundary`]
+/// - Log topics use [`RollupId::from_log_boundary`]
+/// - Raw bytes use [`RollupId::from_bytes_at_boundary`]
+///
+/// Every `from_*_boundary` function is grep-able. Auditors can list
+/// every uncontrolled construction with `rg 'from_.*_boundary'`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct RollupId(U256);
+
+impl RollupId {
+    /// Mainnet (L1) rollup ID — conventionally `U256::ZERO` in the
+    /// sync-rollups-protocol spec. Available as a `const` so it can
+    /// appear in pattern matches and `if` expressions.
+    pub const MAINNET: Self = Self(U256::ZERO);
+
+    /// Module-private constructor for internal use.
+    ///
+    /// Prefer the explicit `from_*_boundary` functions for any
+    /// construction that crosses a serialization / decoding boundary.
+    /// This constructor exists for purely-internal code paths (e.g.
+    /// tests, helpers that already have a validated `U256`).
+    ///
+    /// Marked `#[allow(dead_code)]` during step 1.1a (scaffold only).
+    /// Step 1.1b will migrate production callsites to use this
+    /// constructor and remove the allow.
+    #[allow(dead_code)]
+    pub(crate) fn new(value: U256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `U256` value decoded at an ABI boundary — for
+    /// example, the `rollupId` field of a `sol!`-decoded struct or
+    /// the return value of an `eth_call` against a Solidity getter.
+    ///
+    /// Grep `from_abi_boundary` to audit every ABI decode path that
+    /// produces a rollup id.
+    pub fn from_abi_boundary(value: U256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a log topic (`B256`) taken from an on-chain event.
+    /// The topic is interpreted as big-endian 32 bytes.
+    ///
+    /// Grep `from_log_boundary` to audit every log parsing path.
+    pub fn from_log_boundary(topic: B256) -> Self {
+        Self(U256::from_be_bytes(topic.0))
+    }
+
+    /// Construct from raw bytes at a serialization boundary. Accepts
+    /// any slice up to 32 bytes; shorter slices are interpreted as
+    /// big-endian with left-padding zeros (the same convention as
+    /// `U256::from_be_slice`). Slices longer than 32 bytes are
+    /// truncated from the right (low-order bytes preserved).
+    ///
+    /// Grep `from_bytes_at_boundary` to audit every raw-bytes path.
+    pub fn from_bytes_at_boundary(bytes: &[u8]) -> Self {
+        let mut buf = [0u8; 32];
+        let len = bytes.len().min(32);
+        // Copy the last `len` bytes of the input into the rightmost
+        // `len` bytes of the 32-byte buffer (big-endian padding).
+        buf[32 - len..].copy_from_slice(&bytes[bytes.len() - len..]);
+        Self(U256::from_be_bytes(buf))
+    }
+
+    /// Return the underlying `U256` value. Used at ABI encode boundaries
+    /// and in internal comparisons that have not been migrated yet.
+    pub fn as_u256(&self) -> U256 {
+        self.0
+    }
+
+    /// Return the underlying value as a `u64`, or `None` if it does
+    /// not fit. Every current rollup id in the codebase is small, but
+    /// the on-chain type is `uint256` so we encode the possibility of
+    /// overflow explicitly.
+    pub fn to_u64(&self) -> Option<u64> {
+        if self.0 <= U256::from(u64::MAX) {
+            Some(self.0.to::<u64>())
+        } else {
+            None
+        }
+    }
+
+    /// Return `true` if this is the mainnet / L1 rollup id.
+    pub fn is_mainnet(&self) -> bool {
+        self.0 == U256::ZERO
+    }
+}
+
+impl std::fmt::Display for RollupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_mainnet() {
+            write!(f, "MAINNET")
+        } else {
+            write!(f, "rollup-{}", self.0)
+        }
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {

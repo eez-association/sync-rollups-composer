@@ -3359,3 +3359,143 @@ mod proptests_filtering {
         }
     }
 }
+
+// ──────────────────────────────────────────────
+//  Step 1.1a (refactor) — RollupId newtype scaffold
+//
+//  These tests cover the type surface of `RollupId` introduced in
+//  cross_chain.rs at PLAN step 1.1a. They exist as a safety net
+//  BEFORE step 1.1b migrates callsites.
+// ──────────────────────────────────────────────
+
+#[test]
+fn test_rollup_id_mainnet_constant() {
+    assert_eq!(RollupId::MAINNET.as_u256(), U256::ZERO);
+    assert!(RollupId::MAINNET.is_mainnet());
+}
+
+#[test]
+fn test_rollup_id_new_roundtrip() {
+    let id = RollupId::new(U256::from(42u64));
+    assert_eq!(id.as_u256(), U256::from(42u64));
+    assert!(!id.is_mainnet());
+}
+
+#[test]
+fn test_rollup_id_from_abi_boundary_preserves_value() {
+    let id = RollupId::from_abi_boundary(U256::from(7u64));
+    assert_eq!(id.as_u256(), U256::from(7u64));
+}
+
+#[test]
+fn test_rollup_id_from_log_boundary_roundtrips_zero() {
+    let id = RollupId::from_log_boundary(B256::ZERO);
+    assert_eq!(id, RollupId::MAINNET);
+    assert!(id.is_mainnet());
+}
+
+#[test]
+fn test_rollup_id_from_log_boundary_decodes_be_topic() {
+    // A topic that encodes U256 = 1 has 0x01 in the LAST byte
+    // (big-endian).
+    let mut topic_bytes = [0u8; 32];
+    topic_bytes[31] = 0x01;
+    let id = RollupId::from_log_boundary(B256::from(topic_bytes));
+    assert_eq!(id.as_u256(), U256::from(1u64));
+}
+
+#[test]
+fn test_rollup_id_from_bytes_at_boundary_32_bytes_exact() {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 0x2A; // 42
+    let id = RollupId::from_bytes_at_boundary(&bytes);
+    assert_eq!(id.as_u256(), U256::from(42u64));
+}
+
+#[test]
+fn test_rollup_id_from_bytes_at_boundary_short_pads_left() {
+    // A 1-byte input `[0x05]` must produce the value 5 (big-endian,
+    // left-padded with zeros), NOT 5 << (31*8).
+    let id = RollupId::from_bytes_at_boundary(&[0x05]);
+    assert_eq!(id.as_u256(), U256::from(5u64));
+}
+
+#[test]
+fn test_rollup_id_from_bytes_at_boundary_empty_is_zero() {
+    let id = RollupId::from_bytes_at_boundary(&[]);
+    assert_eq!(id, RollupId::MAINNET);
+}
+
+#[test]
+fn test_rollup_id_from_bytes_at_boundary_exceeds_32_truncates() {
+    // Input longer than 32 bytes: only the LAST 32 bytes matter
+    // (preserves low-order U256 bytes, matching `U256::from_be_bytes`).
+    let mut bytes = vec![0xFFu8; 40];
+    bytes[39] = 0x01;
+    let id = RollupId::from_bytes_at_boundary(&bytes);
+    // Last 32 bytes are [0xFF; 31, 0x01] → a large non-zero value.
+    assert_ne!(id, RollupId::MAINNET);
+    assert_eq!(id.as_u256().byte(0), 0x01);
+}
+
+#[test]
+fn test_rollup_id_to_u64_fits() {
+    let id = RollupId::new(U256::from(u64::MAX));
+    assert_eq!(id.to_u64(), Some(u64::MAX));
+}
+
+#[test]
+fn test_rollup_id_to_u64_overflow_returns_none() {
+    let id = RollupId::new(U256::from(u64::MAX) + U256::from(1u64));
+    assert_eq!(id.to_u64(), None);
+}
+
+#[test]
+fn test_rollup_id_display_mainnet() {
+    assert_eq!(format!("{}", RollupId::MAINNET), "MAINNET");
+}
+
+#[test]
+fn test_rollup_id_display_non_mainnet() {
+    let id = RollupId::new(U256::from(7u64));
+    assert_eq!(format!("{}", id), "rollup-7");
+}
+
+#[test]
+fn test_rollup_id_equality_and_hash() {
+    use std::collections::HashSet;
+    let a = RollupId::new(U256::from(3u64));
+    let b = RollupId::new(U256::from(3u64));
+    let c = RollupId::new(U256::from(4u64));
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    let mut set: HashSet<RollupId> = HashSet::new();
+    set.insert(a);
+    assert!(set.contains(&b));
+    assert!(!set.contains(&c));
+}
+
+#[test]
+fn test_rollup_id_ordering() {
+    let a = RollupId::new(U256::from(1u64));
+    let b = RollupId::new(U256::from(2u64));
+    let c = RollupId::new(U256::from(3u64));
+    let mut ids = vec![c, a, b];
+    ids.sort();
+    assert_eq!(ids, vec![a, b, c]);
+}
+
+#[test]
+fn test_rollup_id_serde_roundtrip() {
+    let id = RollupId::new(U256::from(42u64));
+    let json = serde_json::to_string(&id).unwrap();
+    let back: RollupId = serde_json::from_str(&json).unwrap();
+    assert_eq!(id, back);
+}
+
+#[test]
+fn test_rollup_id_is_zero_cost_wrapper() {
+    // #[repr(transparent)] means RollupId has the same layout as U256.
+    use std::mem::size_of;
+    assert_eq!(size_of::<RollupId>(), size_of::<U256>());
+}
