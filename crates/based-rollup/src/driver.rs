@@ -1199,12 +1199,14 @@ where
             if !queue.is_empty() {
                 let mut calls: Vec<_> = queue.drain(..).collect();
                 // Sort by gas price descending — matches L1 miner tx ordering
-                calls.sort_by(|a, b| b.effective_gas_price.cmp(&a.effective_gas_price));
+                calls.sort_by(|a, b| {
+                    b.effective_gas_price().cmp(&a.effective_gas_price())
+                });
 
                 info!(
                     target: "based_rollup::driver",
                     count = calls.len(),
-                    gas_prices = ?calls.iter().map(|c| c.effective_gas_price).collect::<Vec<_>>(),
+                    gas_prices = ?calls.iter().map(|c| c.effective_gas_price()).collect::<Vec<_>>(),
                     "merging RPC cross-chain entries (sorted by gas price)"
                 );
 
@@ -1215,7 +1217,7 @@ where
                 let mut had_continuation = false;
                 let mut rpc_entries: Vec<CrossChainExecutionEntry> = Vec::new();
                 for call in calls {
-                    let is_continuation = !call.l1_entries.is_empty();
+                    let is_continuation = call.is_continuation();
                     if is_continuation && had_continuation {
                         // Re-queue this continuation for the next cycle
                         queue.push(call);
@@ -1225,57 +1227,70 @@ where
                         had_continuation = true;
                     }
 
-                    // Terminal failure: delivery ALWAYS fails (e.g., RevertCounter).
-                    // RESULT(failed=true) with non-empty revert data after enrichment
-                    // = true terminal failure. Skip L2 entries — protocol specifies no
-                    // loadExecutionTable for terminal reverts.
-                    // Terminal failure: the L2 delivery ALWAYS reverts (destination
-                    // contract error, not a missing-entry simulation artifact).
-                    // Simulation artifacts are protocol errors (ExecutionNotFound, etc.)
-                    // that only occur when entries aren't loaded yet.
-                    let is_terminal_failure = call.result_entry.next_action.failed
-                        && !crate::cross_chain::is_simulation_artifact(
-                            &call.result_entry.next_action.data,
-                        );
-                    if !is_terminal_failure {
-                        rpc_entries.push(call.call_entry.clone());
-                        if call.extra_l2_entries.is_empty() {
-                            // Simple deposit: CALL trigger + RESULT table entry
-                            rpc_entries.push(call.result_entry.clone());
-                        } else {
-                            // Multi-call continuation: continuation entries provide their own RESULT entries.
-                            // Skip result_entry to avoid conflicting actionHash.
-                            rpc_entries.extend(call.extra_l2_entries.iter().cloned());
+                    let group_start = self.pending_l1_entries.len();
+                    let group_mode = call.l1_independent_entries();
+                    let raw_l1_tx_for_forward = call.raw_l1_tx().clone();
+
+                    match &call {
+                        crate::rpc::QueuedCrossChainCall::Simple {
+                            call_entry,
+                            result_entry,
+                            ..
+                        } => {
+                            // Terminal failure: delivery ALWAYS fails (e.g., RevertCounter).
+                            // RESULT(failed=true) with non-empty revert data after enrichment
+                            // = true terminal failure. Skip L2 entries — protocol specifies no
+                            // loadExecutionTable for terminal reverts.
+                            // Simulation artifacts are protocol errors (ExecutionNotFound, etc.)
+                            // that only occur when entries aren't loaded yet.
+                            let is_terminal_failure = result_entry.next_action.failed
+                                && !crate::cross_chain::is_simulation_artifact(
+                                    &result_entry.next_action.data,
+                                );
+                            if !is_terminal_failure {
+                                // Simple deposit: CALL trigger + RESULT table entry
+                                rpc_entries.push(call_entry.clone());
+                                rpc_entries.push(result_entry.clone());
+                            } else {
+                                tracing::debug!(
+                                    target: "based_rollup::driver",
+                                    call_id = %call_entry.action_hash,
+                                    data_len = result_entry.next_action.data.len(),
+                                    "terminal failure: skipping L2 entries (delivery always reverts)"
+                                );
+                            }
+
+                            // Simple deposit: convert CALL+RESULT pair to L1 format
+                            let l1_entry = crate::cross_chain::convert_pairs_to_l1_entries(&[
+                                call_entry.clone(),
+                                result_entry.clone(),
+                            ]);
+                            self.pending_l1_entries.extend(l1_entry);
                         }
-                    } else {
-                        tracing::debug!(
-                            target: "based_rollup::driver",
-                            call_id = %call.call_entry.action_hash,
-                            data_len = call.result_entry.next_action.data.len(),
-                            "terminal failure: skipping L2 entries (delivery always reverts)"
-                        );
-                    }
-                    if !call.raw_l1_tx.is_empty() {
-                        queued_l1_txs_for_block.push(call.raw_l1_tx.clone());
+                        crate::rpc::QueuedCrossChainCall::WithContinuations {
+                            l2_table_entries,
+                            l1_entries,
+                            ..
+                        } => {
+                            // Multi-call continuation: continuation entries provide their
+                            // own RESULT entries via the chain. Push the entire
+                            // `l2_table_entries` sequence — invariant #6 ("never include
+                            // a result_entry alongside continuations") is enforced by
+                            // the type: this variant has no `result_entry` field at all.
+                            rpc_entries.extend(l2_table_entries.iter().cloned());
+
+                            // Continuation: use pre-built L1 entries directly
+                            self.pending_l1_entries
+                                .extend(l1_entries.iter().cloned());
+                        }
                     }
 
-                    // Populate L1 entry queue
-                    let group_start = self.pending_l1_entries.len();
-                    if !call.l1_entries.is_empty() {
-                        // Continuation: use pre-built L1 entries directly
-                        self.pending_l1_entries
-                            .extend(call.l1_entries.iter().cloned());
-                    } else {
-                        // Simple deposit: convert CALL+RESULT pair to L1 format
-                        let l1_entry = crate::cross_chain::convert_pairs_to_l1_entries(&[
-                            call.call_entry.clone(),
-                            call.result_entry.clone(),
-                        ]);
-                        self.pending_l1_entries.extend(l1_entry);
+                    if !raw_l1_tx_for_forward.is_empty() {
+                        queued_l1_txs_for_block.push(raw_l1_tx_for_forward);
                     }
+
                     self.pending_l1_group_starts.push(group_start);
-                    self.pending_l1_independent
-                        .push(call.l1_independent_entries);
+                    self.pending_l1_independent.push(group_mode);
                     self.pending_l1_trigger_metadata.push(None); // protocol trigger, no L1 executeL2TX needed
 
                     // Save for re-push on build failure (call is consumed by value)
@@ -2622,8 +2637,8 @@ where
                 has_txs = true;
                 // Unified queue stores max_fee_per_gas as effective_gas_price.
                 // Use it for both fee and priority fee (conservative overbid).
-                max_fee = max_fee.max(call.effective_gas_price);
-                max_priority_fee = max_priority_fee.max(call.effective_gas_price);
+                max_fee = max_fee.max(call.effective_gas_price());
+                max_priority_fee = max_priority_fee.max(call.effective_gas_price());
             }
         }
 

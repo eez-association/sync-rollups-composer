@@ -166,37 +166,183 @@ pub struct L2CrossChainCallParams {
     pub tx_reverts: crate::cross_chain::TxOutcome,
 }
 
-/// A queued cross-chain call with its entry pair, gas price, and raw L1 tx.
-/// Replaces the previous dual-queue design (separate entry queue + L1 tx queue)
-/// with a single unified struct that keeps entries and their L1 tx associated.
+/// A queued L1→L2 cross-chain call request awaiting flush to L1.
 ///
-/// For simple deposits, only `call_entry` + `result_entry` are populated.
-/// For continuation patterns (multi-call continuations), `extra_l2_entries` and `l1_entries`
-/// are also populated by the table builder.
+/// Closed enum (refactor PLAN step 1.4b) with two variants that make the
+/// "simple" and "multi-call continuation" shapes distinct at the type
+/// level. This closes invariant #6 — "NEVER include a RESULT entry when
+/// `extra_l2_entries` are present" — by making the invalid construction
+/// uncompilable rather than enforced at runtime.
+///
+/// Before 1.4b, this was a struct with `call_entry` + `result_entry` +
+/// `extra_l2_entries` + `l1_entries` all populated side-by-side. The
+/// driver at `flush_to_l1` had to check `if extra_l2_entries.is_empty()`
+/// at every access to decide whether `result_entry` was meaningful, and
+/// a construction site in `rpc.rs::build_execution_table` was silently
+/// populating `result_entry` even in the continuation case (the runtime
+/// guard in the driver hid the bug). The enum variants eliminate both.
+///
+/// ## Scope decision for 1.4b
+///
+/// PLAN §8 step 1.4b also names `QueuedL2ToL1Call` as a target for the
+/// same enum unification. After auditing the fields, the L2→L1 queue
+/// struct has direction-specific fields (`user`, `amount`,
+/// `trigger_count`, `raw_l2_tx`, `rlp_encoded_tx`) that do not fit the
+/// `Simple` / `WithContinuations` shape without either duplication or
+/// nested `Option` fields (which would reintroduce the anti-pattern
+/// this step is trying to eliminate). Invariant #6 also only applies
+/// to the L1→L2 CALL+RESULT pair pattern — the L2→L1 side has no
+/// `result_entry` at all.
+///
+/// Step 1.4b therefore migrates only `QueuedCrossChainCall`. The
+/// `QueuedL2ToL1Call` struct remains as-is; if a future refactor step
+/// finds a reason to enum-ify it separately, that is a follow-up.
+//
+// `clippy::large_enum_variant` would prefer boxing the `Simple`
+// variant's `call_entry` / `result_entry` to make the enum smaller.
+// We don't, because:
+//   1. The enum lives in a `Vec<QueuedCrossChainCall>` whose slot
+//      width is the largest variant regardless — boxing does not
+//      reduce memory footprint of the queue.
+//   2. The queue is short-lived (drained once per builder cycle)
+//      and never large enough for the size to matter.
+//   3. Boxing reintroduces an indirection at every field access
+//      which the driver hot loop runs ~100s of times per cycle.
 #[derive(Debug, Clone)]
-pub struct QueuedCrossChainCall {
-    /// The CALL execution entry (L2 table: consumed by executeIncomingCrossChainCall).
-    pub call_entry: CrossChainExecutionEntry,
-    /// The RESULT execution entry (L2 table: consumed after the call returns).
-    pub result_entry: CrossChainExecutionEntry,
-    /// Effective gas price of the user's L1 tx (for ordering).
-    pub effective_gas_price: u128,
-    /// Raw signed L1 transaction to forward after `postBatch`.
-    pub raw_l1_tx: Bytes,
-    /// Additional L2 table entries for continuation patterns (multi-call continuations).
-    /// Loaded via `loadExecutionTable` alongside the primary CALL+RESULT pair.
-    /// Empty for simple deposits.
-    pub extra_l2_entries: Vec<CrossChainExecutionEntry>,
-    /// Pre-built L1 entries for continuation patterns (multi-call continuations).
-    /// When non-empty, these are used AS-IS in `flush_to_l1` instead of
-    /// converting the CALL+RESULT pair via `convert_pairs_to_l1_entries`.
-    /// Empty for simple deposits (legacy path applies).
-    pub l1_entries: Vec<CrossChainExecutionEntry>,
-    /// Whether the L2 tx reverts after cross-chain calls (atomicity revert).
-    pub tx_reverts: crate::cross_chain::TxOutcome,
-    /// L1 entries are independent (not chained state deltas). For L1→L2 partial
-    /// revert: the reverted call's state is rolled back by try/catch on L1.
-    pub l1_independent_entries: crate::cross_chain::EntryGroupMode,
+#[allow(clippy::large_enum_variant)]
+pub enum QueuedCrossChainCall {
+    /// Simple deposit pattern: a single CALL+RESULT pair.
+    ///
+    /// The `call_entry` is consumed by `executeIncomingCrossChainCall`
+    /// on L2; the `result_entry` is pre-computed from the simulation
+    /// and loaded alongside so `_consumeExecution` finds it by hash
+    /// lookup. There are no continuation entries — the CALL+RESULT pair
+    /// is the entire L2 table contribution.
+    Simple {
+        /// The CALL execution entry (L2 table: consumed by
+        /// `executeIncomingCrossChainCall`).
+        call_entry: CrossChainExecutionEntry,
+        /// The RESULT execution entry (L2 table: consumed after the
+        /// call returns).
+        result_entry: CrossChainExecutionEntry,
+        /// Effective gas price of the user's L1 tx (for ordering).
+        effective_gas_price: u128,
+        /// Raw signed L1 transaction to forward after `postBatch`.
+        raw_l1_tx: Bytes,
+        /// Whether the L2 tx reverts after cross-chain calls
+        /// (atomicity revert).
+        tx_reverts: crate::cross_chain::TxOutcome,
+        /// L1 entry group mode. Always `Chained` for simple deposits;
+        /// `Independent` is only used by partial-revert multi-call
+        /// continuations (which live in the other variant).
+        l1_independent_entries: crate::cross_chain::EntryGroupMode,
+    },
+    /// Multi-call continuation pattern (flash loans, nested cross-chain
+    /// calls). The L2 table is loaded via `loadExecutionTable` with a
+    /// pre-built sequence of entries; the L1 entries are pre-built by
+    /// the table builder and posted via `postBatch` without conversion.
+    ///
+    /// Crucially, **there is no `result_entry` field in this variant**.
+    /// The L2 table sequence contains its own RESULT entries that
+    /// chain with the continuation CALLs; a separate `result_entry`
+    /// would conflict on `actionHash` with the first entry from the
+    /// continuation chain and cause `ExecutionNotFound` on L2. Closing
+    /// invariant #6 means this is a type error, not a runtime guard.
+    WithContinuations {
+        /// Complete L2 table entry sequence, in loadExecutionTable
+        /// order. The first entry is the trigger (equivalent of the
+        /// simple path's `call_entry`); subsequent entries are the
+        /// continuation CALLs and RESULTs produced by the table
+        /// builder.
+        l2_table_entries: Vec<CrossChainExecutionEntry>,
+        /// Pre-built L1 entries. Used AS-IS in `flush_to_l1` — no
+        /// conversion via `convert_pairs_to_l1_entries` is applied.
+        l1_entries: Vec<CrossChainExecutionEntry>,
+        /// Effective gas price of the user's L1 tx (for ordering).
+        effective_gas_price: u128,
+        /// Raw signed L1 transaction to forward after `postBatch`.
+        raw_l1_tx: Bytes,
+        /// Whether the L2 tx reverts after cross-chain calls
+        /// (atomicity revert).
+        tx_reverts: crate::cross_chain::TxOutcome,
+        /// L1 entry group mode. `Chained` for normal continuations;
+        /// `Independent` for partial-revert patterns where L1
+        /// try/catch rolls back the reverted call's state.
+        l1_independent_entries: crate::cross_chain::EntryGroupMode,
+    },
+}
+
+impl QueuedCrossChainCall {
+    /// Effective gas price used for ordering the queue (L1 miner
+    /// sorts by priority fee descending, the driver matches).
+    pub fn effective_gas_price(&self) -> u128 {
+        match self {
+            Self::Simple {
+                effective_gas_price,
+                ..
+            }
+            | Self::WithContinuations {
+                effective_gas_price,
+                ..
+            } => *effective_gas_price,
+        }
+    }
+
+    /// The raw L1 transaction to forward to the upstream RPC after
+    /// the builder's `postBatch` lands. Empty for simulation-path
+    /// entries that never forward a user tx.
+    pub fn raw_l1_tx(&self) -> &Bytes {
+        match self {
+            Self::Simple { raw_l1_tx, .. } | Self::WithContinuations { raw_l1_tx, .. } => {
+                raw_l1_tx
+            }
+        }
+    }
+
+    /// Tx outcome — did the user's L2 tx revert after making cross-chain
+    /// calls?
+    pub fn tx_reverts(&self) -> crate::cross_chain::TxOutcome {
+        match self {
+            Self::Simple { tx_reverts, .. } | Self::WithContinuations { tx_reverts, .. } => {
+                *tx_reverts
+            }
+        }
+    }
+
+    /// L1 entry group mode (chained vs independent state deltas).
+    pub fn l1_independent_entries(&self) -> crate::cross_chain::EntryGroupMode {
+        match self {
+            Self::Simple {
+                l1_independent_entries,
+                ..
+            }
+            | Self::WithContinuations {
+                l1_independent_entries,
+                ..
+            } => *l1_independent_entries,
+        }
+    }
+
+    /// `true` iff this is a multi-call continuation (used by the
+    /// driver's "one continuation per cycle" guard).
+    pub fn is_continuation(&self) -> bool {
+        matches!(self, Self::WithContinuations { .. })
+    }
+
+    /// Action hash used for tracking and logging. For `Simple` this
+    /// is the CALL entry's hash; for `WithContinuations` it is the
+    /// first table entry's hash (the continuation chain's root).
+    pub fn tracking_action_hash(&self) -> crate::cross_chain::ActionHash {
+        match self {
+            Self::Simple { call_entry, .. } => call_entry.action_hash,
+            Self::WithContinuations {
+                l2_table_entries, ..
+            } => l2_table_entries
+                .first()
+                .map(|e| e.action_hash)
+                .unwrap_or(crate::cross_chain::ActionHash::ZERO),
+        }
+    }
 }
 
 /// A queued L2→L1 call with L2 table entries and L1 deferred entries.
@@ -676,13 +822,11 @@ where
                     None::<()>,
                 ));
             }
-            queue.push(QueuedCrossChainCall {
+            queue.push(QueuedCrossChainCall::Simple {
                 call_entry,
                 result_entry,
                 effective_gas_price: params.gas_price,
                 raw_l1_tx: params.raw_l1_tx.clone(),
-                extra_l2_entries: vec![],
-                l1_entries: vec![],
                 tx_reverts: crate::cross_chain::TxOutcome::Success,
                 l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
             });
@@ -956,13 +1100,29 @@ where
                     None::<()>,
                 ));
             }
-            queue.push(QueuedCrossChainCall {
-                call_entry,
-                result_entry,
+            // Compose the L2 table entry sequence: `call_entry` is the
+            // trigger that `executeIncomingCrossChainCall` consumes,
+            // followed by the continuation entries from the table
+            // builder. The `result_entry` produced alongside `call_entry`
+            // is intentionally DROPPED — this is invariant #6 ("NEVER
+            // include a RESULT table entry when continuation entries are
+            // present"). Including it would conflict on `actionHash` with
+            // the continuation chain's first RESULT and cause
+            // `ExecutionNotFound` on L2. Pre-1.4b this was a runtime
+            // skip in `flush_to_l1`; the enum makes it a compile-time
+            // guarantee by not having a `result_entry` field on this
+            // variant.
+            let _ = result_entry; // explicitly dropped per invariant #6
+            let mut l2_table_entries =
+                Vec::with_capacity(1 + continuation.l2_entries.len());
+            l2_table_entries.push(call_entry);
+            l2_table_entries.extend(continuation.l2_entries);
+
+            queue.push(QueuedCrossChainCall::WithContinuations {
+                l2_table_entries,
+                l1_entries: continuation.l1_entries,
                 effective_gas_price: params.gas_price,
                 raw_l1_tx: params.raw_l1_tx.clone(),
-                extra_l2_entries: continuation.l2_entries,
-                l1_entries: continuation.l1_entries,
                 tx_reverts: crate::cross_chain::TxOutcome::Success,
                 l1_independent_entries: continuation.l1_independent_entries,
             });

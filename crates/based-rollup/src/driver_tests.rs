@@ -2342,13 +2342,11 @@ fn test_reorg_clears_all_cross_chain_state() {
     queued_cross_chain_calls
         .lock()
         .unwrap()
-        .push(QueuedCrossChainCall {
+        .push(QueuedCrossChainCall::Simple {
             call_entry: entries[0].clone(),
             result_entry: entries[0].clone(),
             effective_gas_price: 1_000_000_000,
             raw_l1_tx: Bytes::new(),
-            extra_l2_entries: vec![],
-            l1_entries: vec![],
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
         });

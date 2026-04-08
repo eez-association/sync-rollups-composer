@@ -106,33 +106,27 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
     // RPC side: push 3 calls with different gas prices
     {
         let mut q = queue.lock().unwrap();
-        q.push(QueuedCrossChainCall {
+        q.push(QueuedCrossChainCall::Simple {
             call_entry: make_entry(0x01),
             result_entry: make_entry(0x02),
             effective_gas_price: 100, // lowest
             raw_l1_tx: Bytes::from(vec![0x01]),
-            extra_l2_entries: vec![],
-            l1_entries: vec![],
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
         });
-        q.push(QueuedCrossChainCall {
+        q.push(QueuedCrossChainCall::Simple {
             call_entry: make_entry(0x03),
             result_entry: make_entry(0x04),
             effective_gas_price: 1000, // highest
             raw_l1_tx: Bytes::from(vec![0x02]),
-            extra_l2_entries: vec![],
-            l1_entries: vec![],
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
         });
-        q.push(QueuedCrossChainCall {
+        q.push(QueuedCrossChainCall::Simple {
             call_entry: make_entry(0x05),
             result_entry: make_entry(0x06),
             effective_gas_price: 500, // middle
             raw_l1_tx: Bytes::from(vec![0x03]),
-            extra_l2_entries: vec![],
-            l1_entries: vec![],
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
         });
@@ -143,12 +137,12 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
         let mut q = queue.lock().unwrap();
         q.drain(..).collect()
     };
-    drained.sort_by(|a, b| b.effective_gas_price.cmp(&a.effective_gas_price));
+    drained.sort_by_key(|b| std::cmp::Reverse(b.effective_gas_price()));
 
     assert_eq!(drained.len(), 3);
-    assert_eq!(drained[0].effective_gas_price, 1000); // highest first
-    assert_eq!(drained[1].effective_gas_price, 500); // middle
-    assert_eq!(drained[2].effective_gas_price, 100); // lowest last
+    assert_eq!(drained[0].effective_gas_price(), 1000); // highest first
+    assert_eq!(drained[1].effective_gas_price(), 500); // middle
+    assert_eq!(drained[2].effective_gas_price(), 100); // lowest last
 
     // Queue is now empty
     assert!(queue.lock().unwrap().is_empty());
