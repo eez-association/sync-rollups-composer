@@ -273,10 +273,10 @@ pub struct BuildExecutionTableCall {
     #[serde(default = "default_true")]
     pub call_success: bool,
     /// Index of the parent call whose L2 execution triggers this child.
-    /// `None` for root-level L1→L2 calls; `Some(i)` for L2→L1 child calls
+    /// `Root` for top-level L1→L2 calls; `Child(i)` for L2→L1 child calls
     /// discovered inside call[i]'s L2 simulation (the L1→L2→L1 pattern).
     #[serde(default)]
-    pub parent_call_index: Option<usize>,
+    pub parent_call_index: crate::cross_chain::ParentLink,
     /// Target rollup ID. 0 = L1 (mainnet). For L2→L1 children, this is 0
     /// (they target L1). Not set for normal L1→L2 calls (defaults to None,
     /// meaning the target is our L2 rollup).
@@ -374,9 +374,9 @@ pub struct BuildL2ToL1ReturnCall {
     /// Address that initiated the call on L1 (e.g., Bridge_L2's proxy).
     pub source_address: Address,
     /// Index of the L2→L1 call whose L1 execution produces this return call.
-    /// `None` means assign to the last L2→L1 call (backward-compatible default).
+    /// `Root` means assign to the last L2→L1 call (backward-compatible default).
     #[serde(default)]
-    pub parent_call_index: Option<usize>,
+    pub parent_call_index: crate::cross_chain::ParentLink,
     /// Return data from simulating this call on L2 (for L2 RESULT hash).
     #[serde(default)]
     pub l2_return_data: Option<Bytes>,

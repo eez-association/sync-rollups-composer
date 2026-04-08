@@ -678,6 +678,199 @@ impl std::fmt::Display for ActionHash {
     }
 }
 
+// ──────────────────────────────────────────────
+//  ParentLink + AbsoluteCallIndex (refactor PLAN step 1.3)
+//
+//  Two zero-cost wrappers that replace the `parent_call_index:
+//  Option<usize>` field used by every detected-call struct
+//  (`DetectedCall`, `L1DetectedCall`, `L2ReturnCall`, and the wire
+//  twins in `rpc.rs` / `composer_rpc/`). The protocol distinguishes
+//  two parent-link kinds:
+//
+//    - **`Root`**  — the call is a top-level cross-chain call. It
+//                    has no parent in the call tree.
+//    - **`Child(idx)`** — the call was made as a side-effect of an
+//                    earlier call's L2 execution; `idx` points at
+//                    that parent call in the absolute (post-rebase)
+//                    `all_l2_calls` slice.
+//
+//  Modeling this as a generic `Option<usize>` made it easy to:
+//
+//    1. Pass an unrelated index (e.g. a block number, a vec index
+//       into a different slice) where a parent index was expected.
+//    2. Treat `None` and `Some(0)` as semantically equivalent.
+//    3. Forget to rebase the index after `simulate_l1_combined_delivery`
+//       (which assigns `call_idx=0` relative to its single-call
+//       slice — see CLAUDE.md "Parent Call Index After Combined
+//       Simulation"). The newtype gives us a single grep-able
+//       `from_usize_at_boundary` site to audit every rebase.
+//
+//  ## Wire compatibility
+//
+//  `#[serde(into / from)]` makes both types serialize as the same
+//  JSON shape they had before:
+//
+//    - `ParentLink`        ↔ `Option<usize>` — `Root` ↔ `null`,
+//                            `Child(i)` ↔ `i`.
+//    - `AbsoluteCallIndex` ↔ `usize` — flat number, no wrapper
+//                            object.
+//
+//  Persisted state and in-flight RPC payloads are byte-identical to
+//  the pre-1.3 wire format.
+//
+//  ## Closes invariant #7 (partial)
+//
+//  PLAN §6 invariant #7: "`parent_call_index` MUST be rebased after
+//  `simulate_l1_combined_delivery`". The full closure (single helper
+//  `rebase_parent_links`) lands in step 3.3 once the composer is
+//  unified behind a `Direction` trait. Step 1.3 introduces the type
+//  so that:
+//
+//    - The compiler distinguishes "parent link in the original
+//      detected slice" from "parent link in `all_l2_calls`".
+//    - Every assignment that crosses that boundary must go through
+//      a named conversion (`from_usize_at_boundary`), making the
+//      grep audit trivial.
+// ──────────────────────────────────────────────
+
+/// Index into the *absolute* `all_l2_calls` slice — the post-rebase
+/// position of a call across the entire batch, distinct from a
+/// position within any single-call simulation slice.
+///
+/// Construction follows the now-standard newtype shape:
+///
+/// - [`AbsoluteCallIndex::new`] — `pub(crate)` constructor for
+///   internal code that already has a validated index.
+/// - [`AbsoluteCallIndex::from_usize_at_boundary`] — explicit
+///   "I am crossing a slice boundary" constructor. Grep
+///   `from_usize_at_boundary` to audit every rebase point in the
+///   composer.
+/// - [`AbsoluteCallIndex::as_usize`] — read-only view for arithmetic
+///   and comparisons.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct AbsoluteCallIndex(usize);
+
+impl AbsoluteCallIndex {
+    /// Module-private constructor. Internal code that already has a
+    /// validated absolute index uses this directly.
+    pub(crate) fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `usize` at a slice boundary — i.e. when an
+    /// index is being rebased from one slice into the absolute
+    /// `all_l2_calls` slice. Grep `from_usize_at_boundary` to audit
+    /// every rebase point.
+    pub fn from_usize_at_boundary(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// Read-only view of the underlying `usize`.
+    pub fn as_usize(&self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for AbsoluteCallIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Parent link for a detected cross-chain call.
+///
+/// Replaces the previous `Option<usize>` representation so the
+/// "no parent (root call)" and "child of call N" cases are distinct
+/// at the type level.
+///
+/// `#[serde(into / try_from = "Option<usize>")]` keeps the on-the-wire
+/// JSON identical to the pre-1.3 representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ParentLink {
+    /// A top-level cross-chain call with no parent.
+    #[default]
+    Root,
+    /// A child call made by the L2 execution of an earlier call.
+    /// `idx` points into the absolute `all_l2_calls` slice.
+    Child(AbsoluteCallIndex),
+}
+
+impl ParentLink {
+    /// Construct from an `Option<usize>` (typically deserialized JSON
+    /// or a legacy field). `None` becomes `Root`, `Some(i)` becomes
+    /// `Child(AbsoluteCallIndex(i))`.
+    pub fn from_option(opt: Option<usize>) -> Self {
+        match opt {
+            None => Self::Root,
+            Some(i) => Self::Child(AbsoluteCallIndex::from_usize_at_boundary(i)),
+        }
+    }
+
+    /// Convert back to an `Option<usize>` for the wire / sol! /
+    /// legacy boundary.
+    pub fn to_option(self) -> Option<usize> {
+        match self {
+            Self::Root => None,
+            Self::Child(idx) => Some(idx.as_usize()),
+        }
+    }
+
+    /// `true` iff this call has no parent (top-level call).
+    pub fn is_root(&self) -> bool {
+        matches!(self, Self::Root)
+    }
+
+    /// `true` iff this call has a parent.
+    pub fn is_child(&self) -> bool {
+        matches!(self, Self::Child(_))
+    }
+
+    /// Return the parent index if this is a child call.
+    pub fn child_index(&self) -> Option<AbsoluteCallIndex> {
+        match self {
+            Self::Root => None,
+            Self::Child(idx) => Some(*idx),
+        }
+    }
+
+    /// Update the parent index in place. If currently `Root`, this
+    /// transitions to `Child`. Used at the rebase site after
+    /// `simulate_l1_combined_delivery` collapses children onto
+    /// `call_idx=0`.
+    pub fn set_child(&mut self, idx: AbsoluteCallIndex) {
+        *self = Self::Child(idx);
+    }
+
+    /// Mutably borrow the inner index if this is a child. Used by
+    /// the few sites that need to update the index in place
+    /// (`if let Some(ref mut idx) = rc.parent_call_index { *idx = … }`).
+    pub fn child_index_mut(&mut self) -> Option<&mut AbsoluteCallIndex> {
+        match self {
+            Self::Root => None,
+            Self::Child(idx) => Some(idx),
+        }
+    }
+}
+
+// Wire compatibility: serialize as `Option<usize>`. The transparent
+// `Serialize` cannot be derived for an enum, so we go through
+// `Option<usize>` explicitly via serde's `into` / `try_from`.
+impl serde::Serialize for ParentLink {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_option().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ParentLink {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Option::<usize>::deserialize(deserializer).map(ParentLink::from_option)
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {

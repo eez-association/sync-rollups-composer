@@ -185,7 +185,7 @@ fn detected_l1_to_l2(
             source_rollup: RollupId::MAINNET, // MAINNET
             scope: ScopePath::root(),
         },
-        parent_call_index: None,
+        parent_call_index: crate::cross_chain::ParentLink::Root,
         is_continuation,
         depth: 0,
         delivery_return_data: vec![],
@@ -219,7 +219,7 @@ fn detected_l2_to_l1(
             source_rollup: RollupId::new(U256::from(L2_ROLLUP_ID)),
             scope: ScopePath::root(),
         },
-        parent_call_index,
+        parent_call_index: crate::cross_chain::ParentLink::from_option(parent_call_index),
         is_continuation: false,
         depth,
         delivery_return_data: vec![],

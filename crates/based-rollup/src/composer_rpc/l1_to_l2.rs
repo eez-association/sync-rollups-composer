@@ -435,10 +435,10 @@ async fn queue_execution_table(
             // Include parent linkage and target rollup for L2→L1 child calls
             // (the L1→L2→L1 nested pattern). Without these, analyze_continuation_calls
             // treats all calls as L1→L2, producing wrong entry structures.
-            if let Some(parent_idx) = c.parent_call_index {
-                call_json["parentCallIndex"] = serde_json::json!(parent_idx);
+            if let Some(parent_idx) = c.parent_call_index.child_index() {
+                call_json["parentCallIndex"] = serde_json::json!(parent_idx.as_usize());
             }
-            if c.target_rollup_id == 0 && c.parent_call_index.is_some() {
+            if c.target_rollup_id == 0 && c.parent_call_index.is_child() {
                 // Explicitly mark L2→L1 children (target=L1=0) so the RPC handler
                 // can distinguish them from L1→L2 calls.
                 call_json["targetRollupId"] = serde_json::json!(0u64);
@@ -544,9 +544,9 @@ struct DetectedInternalCall {
     /// Empty when the call returns void or when simulation was not performed.
     return_data: Vec<u8>,
     /// Index of the parent L1→L2 call whose L2 execution triggers this child.
-    /// `None` for root-level L1→L2 calls; `Some(i)` for L2→L1 child calls
+    /// `Root` for top-level L1→L2 calls; `Child(i)` for L2→L1 child calls
     /// discovered inside call[i]'s L2 simulation (the L1→L2→L1 pattern).
-    parent_call_index: Option<usize>,
+    parent_call_index: crate::cross_chain::ParentLink,
     /// Depth in the source chain trace. For L1→L2 root calls: depth on L1 trace.
     /// Used to compute symmetric scope on L2: scope = [0; trace_depth].
     trace_depth: usize,
@@ -1868,7 +1868,7 @@ async fn walk_l1_trace_generic(
             source_address: c.source_address,
             call_success: true,
             return_data: vec![],
-            parent_call_index: None, // root-level L1→L2 call
+            parent_call_index: crate::cross_chain::ParentLink::Root, // root-level L1→L2 call
             trace_depth: c.trace_depth,
             discovery_iteration: 0, // initial detection from first trace
             in_reverted_frame: c.in_reverted_frame,
@@ -1908,7 +1908,7 @@ async fn build_and_run_l1_postbatch_trace(
             l2_return_data: c.return_data.clone(),
             call_success: c.call_success,
             parent_call_index: c.parent_call_index,
-            target_rollup_id: if c.parent_call_index.is_some() && c.target_rollup_id == 0 {
+            target_rollup_id: if c.parent_call_index.is_child() && c.target_rollup_id == 0 {
                 Some(0)
             } else {
                 None
@@ -2743,7 +2743,7 @@ async fn trace_and_detect_internal_calls(
                         source_address: child.source_address,
                         call_success: true, // defaults to true; will be enriched later if needed
                         return_data: vec![], // will be enriched via L1 simulation
-                        parent_call_index: Some(call_idx), // linked to parent L1→L2 call
+                        parent_call_index: crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)), // linked to parent L1→L2 call
                         trace_depth: 0,     // L2→L1 child: depth in L2 simulation
                         discovery_iteration: 0, // will be updated in iterative loop
                         in_reverted_frame: false, // L2→L1 children: not in reverted frame
@@ -3059,7 +3059,7 @@ async fn trace_and_detect_internal_calls(
                         for prior in all_calls.iter() {
                             // Only L1→L2 calls contribute to L2 state chaining.
                             // L2→L1 children (target_rollup_id=0) don't execute on L2.
-                            if prior.parent_call_index.is_some() {
+                            if prior.parent_call_index.is_child() {
                                 continue;
                             }
                             let result_action = crate::cross_chain::CrossChainAction {
@@ -3214,7 +3214,7 @@ async fn trace_and_detect_internal_calls(
                                 let mut prior_child_txs: Vec<Value> = Vec::new();
                                 // Prior children from all_calls
                                 for prior in all_calls.iter() {
-                                    if prior.parent_call_index.is_some()
+                                    if prior.parent_call_index.is_child()
                                         && prior.target_rollup_id == 0
                                     {
                                         prior_child_txs.push(serde_json::json!({
@@ -3320,7 +3320,7 @@ async fn trace_and_detect_internal_calls(
                                             source_address: child.source_address,
                                             call_success: !child_delivery_failed,
                                             return_data: child_delivery_data,
-                                            parent_call_index: None,
+                                            parent_call_index: crate::cross_chain::ParentLink::Root,
                                             trace_depth: 0,
                                             discovery_iteration: iteration,
                                             in_reverted_frame: false, // iterative child: not in reverted frame
@@ -3364,8 +3364,8 @@ async fn trace_and_detect_internal_calls(
                                 // Simplest: just set parent_call_index = parent_idx
                                 // for all remaining unset children. This works because
                                 // we process calls sequentially.
-                                if child.parent_call_index.is_none() {
-                                    child.parent_call_index = Some(parent_idx);
+                                if child.parent_call_index.is_root() {
+                                    child.parent_call_index = crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(parent_idx));
                                     child_idx += 1;
                                 } else {
                                     break;
@@ -3433,11 +3433,11 @@ async fn trace_and_detect_internal_calls(
                 let needs_enrichment = {
                     let mut needed = false;
                     for (i, c) in detected_calls.iter().enumerate() {
-                        if c.parent_call_index.is_none() && c.return_data.is_empty() {
+                        if c.parent_call_index.is_root() && c.return_data.is_empty() {
                             // Check if this call has children
                             let has_children = detected_calls
                                 .iter()
-                                .any(|other| other.parent_call_index == Some(i));
+                                .any(|other| other.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(i)));
                             if has_children {
                                 needed = true;
                                 break;
@@ -3453,7 +3453,7 @@ async fn trace_and_detect_internal_calls(
                     // Same logic as build_continuation_entries in table_builder.rs.
                     let root_calls: Vec<&DetectedInternalCall> = detected_calls
                         .iter()
-                        .filter(|c| c.parent_call_index.is_none())
+                        .filter(|c| c.parent_call_index.is_root())
                         .collect();
                     // Reentrant: each successive call is STRICTLY DEEPER (nested inside
                     // scope navigation). Continuation: same or non-increasing depths.
@@ -3497,7 +3497,7 @@ async fn trace_and_detect_internal_calls(
                             .iter()
                             .enumerate()
                             .filter(|(_, c)| {
-                                c.parent_call_index.is_some() && c.target_rollup_id == 0
+                                c.parent_call_index.is_child() && c.target_rollup_id == 0
                             })
                             .map(|(i, _)| i)
                             .collect();
@@ -3557,7 +3557,7 @@ async fn trace_and_detect_internal_calls(
                     let root_indices: Vec<usize> = detected_calls
                         .iter()
                         .enumerate()
-                        .filter(|(_, c)| c.parent_call_index.is_none())
+                        .filter(|(_, c)| c.parent_call_index.is_root())
                         .map(|(i, _)| i)
                         .rev()
                         .collect();
@@ -3613,7 +3613,7 @@ async fn trace_and_detect_internal_calls(
                         for &idx in &root_indices {
                             let has_children = detected_calls
                                 .iter()
-                                .any(|other| other.parent_call_index == Some(idx));
+                                .any(|other| other.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(idx)));
                             if !has_children || !detected_calls[idx].return_data.is_empty() {
                                 continue; // Leaf or already enriched.
                             }
@@ -3621,7 +3621,7 @@ async fn trace_and_detect_internal_calls(
                             // Find this parent's L2→L1 child.
                             let child_idx = match detected_calls
                                 .iter()
-                                .position(|c| c.parent_call_index == Some(idx))
+                                .position(|c| c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(idx)))
                             {
                                 Some(ci) => ci,
                                 None => continue,
@@ -3772,7 +3772,7 @@ async fn trace_and_detect_internal_calls(
                                         l2_return_data: c.return_data.clone(),
                                         call_success: c.call_success,
                                         parent_call_index: c.parent_call_index,
-                                        target_rollup_id: if c.parent_call_index.is_some()
+                                        target_rollup_id: if c.parent_call_index.is_child()
                                             && c.target_rollup_id == 0
                                         {
                                             Some(0)
@@ -3963,7 +3963,7 @@ async fn trace_and_detect_internal_calls(
                                 //   could possibly have happened.
                                 let has_children = detected_calls
                                     .iter()
-                                    .any(|c| c.parent_call_index == Some(idx));
+                                    .any(|c| c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(idx)));
                                 let skip_update =
                                     used_fallback && has_children && !is_reentrant_pattern;
 

@@ -472,10 +472,10 @@ async fn queue_l2_to_l1_multi_call_entries(
                 "value": format!("{}", rc.value),
                 "sourceAddress": format!("{}", rc.source_address)
             });
-            if let Some(idx) = rc.parent_call_index {
+            if let Some(idx) = rc.parent_call_index.child_index() {
                 obj.as_object_mut().unwrap().insert(
                     "parentCallIndex".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(idx)),
+                    serde_json::Value::Number(serde_json::Number::from(idx.as_usize())),
                 );
             }
             if !rc.l2_return_data.is_empty() {
@@ -2563,7 +2563,7 @@ async fn simulate_l1_combined_delivery(
             // Collect return calls belonging to this trigger call.
             let my_return_calls: Vec<&DetectedReturnCall> = all_return_calls
                 .iter()
-                .filter(|rc| rc.parent_call_index == Some(i))
+                .filter(|rc| rc.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(i)))
                 .collect();
 
             // Scope: for single calls, use trace_depth-1 (direct caller excluded).
@@ -2624,7 +2624,7 @@ async fn simulate_l1_combined_delivery(
                             // combined simulation's call index. For the table builder,
                             // we're building entries for a single root call, so set to
                             // None (defaults to last L2→L1 call, which is the only one).
-                            parent_call_index: None,
+                            parent_call_index: crate::cross_chain::ParentLink::Root,
                             l2_return_data: rc.l2_return_data.clone(),
                             l2_delivery_failed: rc.l2_delivery_failed,
                             scope: rc.scope.clone(),
@@ -2918,7 +2918,7 @@ async fn simulate_l1_combined_delivery(
 
             // Tag return calls with parent_call_index so we know which trigger produced them.
             for mut rc in new_returns {
-                rc.parent_call_index = Some(call_idx);
+                rc.parent_call_index = crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx));
                 new_return_calls_this_iteration.push(rc);
             }
         }
@@ -2988,7 +2988,7 @@ async fn simulate_l1_combined_delivery(
     for (i, _call) in calls.iter().enumerate() {
         let my_return_calls: Vec<DetectedReturnCall> = all_return_calls
             .iter()
-            .filter(|rc| rc.parent_call_index == Some(i))
+            .filter(|rc| rc.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(i)))
             .cloned()
             .collect();
 
@@ -3186,9 +3186,9 @@ struct DetectedReturnCall {
     /// The address that initiated the call on L1 (from field in trace).
     source_address: Address,
     /// Index of the trigger call (in the combined simulation bundle) that produced this
-    /// return call. `None` for single-call simulations; `Some(i)` for combined simulation
+    /// return call. `Root` for single-call simulations; `Child(i)` for combined simulation
     /// where call `i` in the `calls` slice triggered this return.
-    parent_call_index: Option<usize>,
+    parent_call_index: crate::cross_chain::ParentLink,
     /// Return data from simulating this call's execution on L2.
     /// Used for the L2 RESULT entry hash — must match the actual return data
     /// from _processCallAtScope on L2. Empty for void functions.
@@ -3352,7 +3352,7 @@ async fn extract_l1_to_l2_return_calls(
                         data: c.calldata,
                         value: c.value,
                         source_address: c.source_address,
-                        parent_call_index: None,
+                        parent_call_index: crate::cross_chain::ParentLink::Root,
                         l2_return_data: vec![],
                         l2_delivery_failed: false,
                         scope: ScopePath::from_parts(accumulated),
@@ -4618,7 +4618,7 @@ async fn trace_and_detect_l2_internal_calls(
                 if is_same_pattern {
                     for rc in &detected_return_calls {
                         let mut rc_clone = rc.clone();
-                        rc_clone.parent_call_index = Some(i);
+                        rc_clone.parent_call_index = crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(i));
                         // Use REAL chained data instead of cloned data
                         if rc_data_idx < chained_rc_data.len() {
                             let (ref data, failed) = chained_rc_data[rc_data_idx];
@@ -4730,8 +4730,14 @@ async fn trace_and_detect_l2_internal_calls(
                 .into_iter()
                 .flat_map(|(_data, _failed, rcs)| rcs)
                 .map(|mut rc| {
-                    if let Some(ref mut idx) = rc.parent_call_index {
-                        *idx += global_offset;
+                    // Rebase: if the return call is currently linked to a child
+                    // index `i` in the bundle slice, it must be rebased to
+                    // `i + global_offset` in the absolute `all_detected_l2_calls`
+                    // slice (closes invariant #7 partially — see ParentLink docs).
+                    if let Some(idx) = rc.parent_call_index.child_index_mut() {
+                        *idx = crate::cross_chain::AbsoluteCallIndex::from_usize_at_boundary(
+                            idx.as_usize() + global_offset,
+                        );
                     }
                     rc
                 })
@@ -4940,8 +4946,12 @@ async fn trace_and_detect_l2_internal_calls(
                     .into_iter()
                     .flat_map(|(_data, _failed, rcs)| rcs)
                     .map(|mut rc| {
-                        if let Some(ref mut idx) = rc.parent_call_index {
-                            *idx += global_offset;
+                        // Rebase from `nested_l2_calls`-local index to absolute
+                        // `all_l2_calls` index (closes invariant #7 partially).
+                        if let Some(idx) = rc.parent_call_index.child_index_mut() {
+                            *idx = crate::cross_chain::AbsoluteCallIndex::from_usize_at_boundary(
+                                idx.as_usize() + global_offset,
+                            );
                         }
                         rc
                     })
@@ -4998,8 +5008,8 @@ async fn trace_and_detect_l2_internal_calls(
             let mut return_calls_with_parent = Vec::new();
             for rc in &all_return_calls {
                 let mut rc_clone = rc.clone();
-                if rc_clone.parent_call_index.is_none() {
-                    rc_clone.parent_call_index = Some(0);
+                if rc_clone.parent_call_index.is_root() {
+                    rc_clone.parent_call_index = crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(0));
                 }
 
                 // Simulate the return call's execution on L2 via debug_traceCallMany

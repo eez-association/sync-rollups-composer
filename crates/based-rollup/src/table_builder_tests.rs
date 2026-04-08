@@ -61,7 +61,7 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
     let call_a = DetectedCall {
         direction: CallDirection::L1ToL2,
         call_action: make_l1_to_l2_call(bridge_l2, vec![0x01, 0x02], bridge_l1, l2_id),
-        parent_call_index: None,
+        parent_call_index: ParentLink::Root,
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
@@ -130,7 +130,7 @@ fn test_flash_loan_continuation_entries() {
     let call_a = DetectedCall {
         direction: CallDirection::L1ToL2,
         call_action: call_a_action.clone(),
-        parent_call_index: None,
+        parent_call_index: ParentLink::Root,
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
@@ -147,7 +147,7 @@ fn test_flash_loan_continuation_entries() {
     let call_b = DetectedCall {
         direction: CallDirection::L1ToL2,
         call_action: call_b_action.clone(),
-        parent_call_index: None,
+        parent_call_index: ParentLink::Root,
         is_continuation: true,
         depth: 0,
         delivery_return_data: vec![],
@@ -163,7 +163,7 @@ fn test_flash_loan_continuation_entries() {
     let call_c = DetectedCall {
         direction: CallDirection::L2ToL1,
         call_action: call_c_action.clone(),
-        parent_call_index: Some(1), // child of CALL_B (index 1)
+        parent_call_index: ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(1)), // child of CALL_B (index 1)
         is_continuation: false,
         depth: 1,
         delivery_return_data: vec![],
@@ -363,7 +363,7 @@ fn test_two_continuations_no_children() {
     let call_a = DetectedCall {
         direction: CallDirection::L1ToL2,
         call_action: make_l1_to_l2_call(addr_a, vec![0x01], src, l2_id),
-        parent_call_index: None,
+        parent_call_index: ParentLink::Root,
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
@@ -376,7 +376,7 @@ fn test_two_continuations_no_children() {
     let call_b = DetectedCall {
         direction: CallDirection::L1ToL2,
         call_action: make_l1_to_l2_call(addr_b, vec![0x02], src, l2_id),
-        parent_call_index: None,
+        parent_call_index: ParentLink::Root,
         is_continuation: true,
         depth: 0,
         delivery_return_data: vec![],
@@ -437,7 +437,7 @@ fn make_l2_to_l1_detected(
             source_rollup: l2_rollup_id,
             scope: ScopePath::root(),
         },
-        parent_call_index,
+        parent_call_index: crate::cross_chain::ParentLink::from_option(parent_call_index),
         is_continuation: false,
         depth,
         delivery_return_data: vec![],
@@ -1118,7 +1118,7 @@ fn test_all_entries_have_empty_state_deltas() {
     let call = DetectedCall {
         direction: CallDirection::L1ToL2,
         call_action: make_l1_to_l2_call(addr, vec![0x01], src, l2_id),
-        parent_call_index: None,
+        parent_call_index: ParentLink::Root,
         is_continuation: false,
         depth: 0,
         delivery_return_data: vec![],
@@ -1183,7 +1183,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
                 source_rollup: l2_id,
                 scope: ScopePath::root(),
             },
-            parent_call_index: None,
+            parent_call_index: ParentLink::Root,
             is_continuation: false,
             depth: 0,
             delivery_return_data: counter_return.clone(), // L1 delivery also returns the counter value
@@ -1206,7 +1206,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
                 source_rollup: RollupId::MAINNET,
                 scope: ScopePath::root(),
             },
-            parent_call_index: Some(0),
+            parent_call_index: ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(0)),
             is_continuation: false,
             depth: 1,
             delivery_return_data: vec![],
@@ -1293,7 +1293,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 source_rollup: l2_id,
                 scope: ScopePath::root(),
             },
-            parent_call_index: None,
+            parent_call_index: ParentLink::Root,
             is_continuation: false,
             depth: 0,
             delivery_return_data: root_delivery_return.clone(),
@@ -1317,7 +1317,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 source_rollup: RollupId::MAINNET,
                 scope: ScopePath::root(),
             },
-            parent_call_index: Some(0),
+            parent_call_index: ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(0)),
             is_continuation: false,
             depth: 1,
             delivery_return_data: vec![],
@@ -1341,7 +1341,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 source_rollup: RollupId::MAINNET,
                 scope: ScopePath::root(),
             },
-            parent_call_index: Some(0),
+            parent_call_index: ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(0)),
             is_continuation: false,
             depth: 1,
             delivery_return_data: vec![],
@@ -1423,7 +1423,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
                 source_rollup: l2_id,
                 scope: ScopePath::root(),
             },
-            parent_call_index: None,
+            parent_call_index: ParentLink::Root,
             is_continuation: false,
             depth: 0,
             delivery_return_data: delivery_data.clone(), // L1 delivery returns data
@@ -1446,7 +1446,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
                 source_rollup: RollupId::MAINNET,
                 scope: ScopePath::root(),
             },
-            parent_call_index: Some(0),
+            parent_call_index: ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(0)),
             is_continuation: false,
             depth: 1,
             delivery_return_data: vec![0xCA, 0xFE], // child also has delivery data
@@ -1514,7 +1514,7 @@ fn test_void_children_still_use_result_void() {
                 source_rollup: l2_id,
                 scope: ScopePath::root(),
             },
-            parent_call_index: None,
+            parent_call_index: ParentLink::Root,
             is_continuation: false,
             depth: 0,
             delivery_return_data: vec![], // void
@@ -1537,7 +1537,7 @@ fn test_void_children_still_use_result_void() {
                 source_rollup: RollupId::MAINNET,
                 scope: ScopePath::root(),
             },
-            parent_call_index: Some(0),
+            parent_call_index: ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(0)),
             is_continuation: false,
             depth: 1,
             delivery_return_data: vec![], // void

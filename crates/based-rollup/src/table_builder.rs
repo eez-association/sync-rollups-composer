@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cross_chain::{
     ActionHash, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
-    CrossChainStateDelta, ICrossChainManagerL2, RollupId, ScopePath,
+    CrossChainStateDelta, ICrossChainManagerL2, ParentLink, RollupId, ScopePath,
 };
 
 /// Direction of a cross-chain call.
@@ -36,9 +36,10 @@ pub struct DetectedCall {
     /// The CALL action for this detected call.
     pub call_action: CrossChainAction,
     /// Index of the parent call whose L2 execution triggers this call.
-    /// `None` for root-level calls; `Some(i)` for calls made within call[i]'s
+    /// `Root` for top-level calls; `Child(i)` for calls made within call[i]'s
     /// execution on L2 (e.g., bridgeTokens inside claimAndBridgeBack).
-    pub parent_call_index: Option<usize>,
+    #[serde(default)]
+    pub parent_call_index: ParentLink,
     /// Whether this call is a continuation — chained after a previous L1→L2 call
     /// returns (i.e., the L2 execution table returns this CALL as nextAction
     /// instead of a terminal RESULT).
@@ -349,7 +350,7 @@ pub fn build_continuation_entries(
         let any_non_reverted = l1_to_l2_calls.iter().any(|(_, c)| !c.in_reverted_frame);
         let has_l2_to_l1_children = l1_to_l2_calls.iter().any(|(parent_idx, _)| {
             calls.iter().any(|c| {
-                c.parent_call_index == Some(*parent_idx) && c.direction == CallDirection::L2ToL1
+                c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(*parent_idx)) && c.direction == CallDirection::L2ToL1
             })
         });
         any_reverted && any_non_reverted && !has_l2_to_l1_children
@@ -397,7 +398,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -482,7 +483,7 @@ pub fn build_continuation_entries(
                 // return data from L1 execution.
                 let outer_call_idx = l1_to_l2_calls[pos - 1].0;
                 let outer_child = calls.iter().find(|c| {
-                    c.parent_call_index == Some(outer_call_idx)
+                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(outer_call_idx))
                         && c.direction == CallDirection::L2ToL1
                 });
 
@@ -543,7 +544,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -773,7 +774,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -825,7 +826,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -893,7 +894,7 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == Some(call_idx) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -1010,10 +1011,10 @@ pub struct L1DetectedCall {
     #[serde(default = "default_call_success")]
     pub call_success: bool,
     /// Index of the parent L1→L2 call whose L2 execution triggers this child.
-    /// `None` for root-level L1→L2 calls; `Some(i)` for L2→L1 child calls
+    /// `Root` for top-level L1→L2 calls; `Child(i)` for L2→L1 child calls
     /// (the L1→L2→L1 pattern) discovered inside call[i]'s L2 simulation.
     #[serde(default)]
-    pub parent_call_index: Option<usize>,
+    pub parent_call_index: ParentLink,
     /// Target rollup ID. `None` means L1→L2 (targets our L2 rollup).
     /// `Some(0)` means L2→L1 (targets L1/mainnet). Used to distinguish
     /// L1→L2 continuation calls from L2→L1 child calls.
@@ -1076,7 +1077,7 @@ pub fn analyze_continuation_calls(
         .enumerate()
         .map(|(i, call)| {
             let is_l2_to_l1_child =
-                call.target_rollup_id == Some(0) && call.parent_call_index.is_some();
+                call.target_rollup_id == Some(0) && call.parent_call_index.is_child();
 
             if is_l2_to_l1_child {
                 // L2→L1 child: targets L1 (rollup 0), source is on L2
@@ -1126,7 +1127,7 @@ pub fn analyze_continuation_calls(
                 DetectedCall {
                     direction: CallDirection::L1ToL2,
                     call_action,
-                    parent_call_index: None,
+                    parent_call_index: crate::cross_chain::ParentLink::Root,
                     is_continuation,
                     depth: call.l1_trace_depth, // L1 trace depth for reentrant detection
                     delivery_return_data: vec![],
@@ -1185,10 +1186,10 @@ pub struct L2ReturnCall {
     /// Address that initiated the call on L1.
     pub source_address: Address,
     /// Index of the L2→L1 call whose L1 execution produces this return call.
-    /// `None` means assign to the last L2→L1 call (backward-compatible default).
-    /// `Some(i)` explicitly links this return call to `l2_calls[i]`.
+    /// `Root` means assign to the last L2→L1 call (backward-compatible default).
+    /// `Child(i)` explicitly links this return call to `l2_calls[i]`.
     #[serde(default)]
-    pub parent_call_index: Option<usize>,
+    pub parent_call_index: ParentLink,
     /// Return data from simulating this call on L2 (eth_call to destination with data).
     /// Used for the L2 RESULT entry hash. Without this, result_void is used, which
     /// mismatches when the target returns data (issue #245).
@@ -1263,7 +1264,7 @@ pub fn analyze_l2_to_l1_continuation_calls(
         result.push(DetectedCall {
             direction: CallDirection::L2ToL1,
             call_action,
-            parent_call_index: None,
+            parent_call_index: crate::cross_chain::ParentLink::Root,
             is_continuation,
             depth: 0,
             delivery_return_data: call.delivery_return_data.clone(),
@@ -1287,7 +1288,11 @@ pub fn analyze_l2_to_l1_continuation_calls(
     if !return_calls.is_empty() {
         for rc in return_calls {
             // Use explicit parent_call_index if provided, otherwise default to last call.
-            let parent_idx = rc.parent_call_index.unwrap_or(last_l2_to_l1_idx);
+            let parent_idx = rc
+                .parent_call_index
+                .child_index()
+                .map(|i| i.as_usize())
+                .unwrap_or(last_l2_to_l1_idx);
 
             let child_action = CrossChainAction {
                 action_type: CrossChainActionType::Call,
@@ -1306,14 +1311,14 @@ pub fn analyze_l2_to_l1_continuation_calls(
                 parent_idx,
                 destination = %rc.destination,
                 source = %rc.source_address,
-                explicit_parent = rc.parent_call_index.is_some(),
+                explicit_parent = rc.parent_call_index.is_child(),
                 "return call linked to L2→L1 call"
             );
 
             result.push(DetectedCall {
                 direction: CallDirection::L2ToL1,
                 call_action: child_action,
-                parent_call_index: Some(parent_idx),
+                parent_call_index: crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(parent_idx)),
                 is_continuation: false,
                 depth: 1,
                 delivery_return_data: vec![], // child executes on L2, no L1 delivery data
@@ -1348,7 +1353,7 @@ fn find_children(detected: &[DetectedCall], parent_idx: usize) -> Vec<(usize, &D
     detected
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.parent_call_index == Some(parent_idx))
+        .filter(|(_, c)| c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(parent_idx)))
         .collect()
 }
 
@@ -1643,7 +1648,7 @@ pub fn build_l2_to_l1_continuation_entries(
     let l2_to_l1_calls: Vec<(usize, &DetectedCall)> = detected
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.parent_call_index.is_none())
+        .filter(|(_, c)| c.parent_call_index.is_root())
         .collect();
 
     // ── Partial revert detection ──
