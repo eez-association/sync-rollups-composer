@@ -2857,13 +2857,13 @@ fn test_builder_assigns_entries_only_to_last_block_in_batch() {
         action_hash: B256::with_last_byte(0xAA),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::L2Tx,
-            rollup_id: alloy_primitives::U256::ZERO,
+            rollup_id: crate::cross_chain::RollupId::MAINNET,
             destination: Address::ZERO,
             value: alloy_primitives::U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: alloy_primitives::U256::ZERO,
+            source_rollup: crate::cross_chain::RollupId::MAINNET,
             scope: vec![],
         },
     }];
@@ -3330,13 +3330,13 @@ fn test_clear_pending_state_before_rewind_prevents_stale_entries() {
         state_deltas: vec![],
         next_action: crate::cross_chain::CrossChainAction {
             action_type: crate::cross_chain::CrossChainActionType::Result,
-            rollup_id: alloy_primitives::U256::ZERO,
+            rollup_id: crate::cross_chain::RollupId::MAINNET,
             destination: alloy_primitives::Address::ZERO,
             value: alloy_primitives::U256::ZERO,
             data: vec![],
             failed: false,
             source_address: alloy_primitives::Address::ZERO,
-            source_rollup: alloy_primitives::U256::ZERO,
+            source_rollup: crate::cross_chain::RollupId::MAINNET,
             scope: vec![],
         },
     });

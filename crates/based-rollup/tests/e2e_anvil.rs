@@ -15,7 +15,7 @@ use alloy_sol_types::{SolCall, SolValue, sol};
 use based_rollup::config::RollupConfig;
 use based_rollup::cross_chain::{
     self, CROSS_CHAIN_MANAGER_L2_ADDRESS, CrossChainAction, CrossChainActionType,
-    CrossChainExecutionEntry, ICrossChainManagerL2, build_aggregate_block_entry,
+    CrossChainExecutionEntry, ICrossChainManagerL2, RollupId, build_aggregate_block_entry,
     encode_block_calldata, encode_post_batch_calldata,
 };
 use based_rollup::derivation::DerivationPipeline;
@@ -4665,7 +4665,7 @@ async fn test_derivation_parses_batch_posted_events() {
     );
     assert_eq!(
         fetched[0].state_deltas[0].rollup_id,
-        U256::from(1u64),
+        RollupId::from_abi_boundary(U256::from(1u64)),
         "state delta rollup_id should match"
     );
 }
@@ -4726,7 +4726,7 @@ async fn test_cross_chain_filter_entries_by_rollup_id() {
     );
     assert_eq!(
         fetched_r1[0].state_deltas[0].rollup_id,
-        U256::from(1u64),
+        RollupId::from_abi_boundary(U256::from(1u64)),
         "state delta should be for rollup 1"
     );
 
@@ -4749,7 +4749,7 @@ async fn test_cross_chain_filter_entries_by_rollup_id() {
     );
     assert_eq!(
         fetched_r2[0].state_deltas[0].rollup_id,
-        U256::from(2u64),
+        RollupId::from_abi_boundary(U256::from(2u64)),
         "state delta should be for rollup 2"
     );
 }
@@ -5196,7 +5196,7 @@ async fn test_cross_chain_action_hash_matches_solidity() {
     // Build an execution entry with this action hash and a Result next_action
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1u64),
+            rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
             current_state: B256::ZERO, // matches initial state (rollup was just created with ZERO)
             new_state: B256::with_last_byte(0xFF),
             ether_delta: I256::ZERO,
@@ -5204,13 +5204,13 @@ async fn test_cross_chain_action_hash_matches_solidity() {
         action_hash: rust_action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1u64),
+            rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![0xDE, 0xAD], // return data
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     };
@@ -5306,7 +5306,7 @@ async fn test_cross_chain_multiple_entries_single_batch() {
         let action_hash = compute_l2tx_action_hash(1, &rlp_datas[i as usize]);
         let entry = CrossChainExecutionEntry {
             state_deltas: vec![CrossChainStateDelta {
-                rollup_id: U256::from(1u64),
+                rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
                 current_state: B256::with_last_byte(i),
                 new_state: B256::with_last_byte(i + 10),
                 ether_delta: I256::ZERO,
@@ -5314,13 +5314,13 @@ async fn test_cross_chain_multiple_entries_single_batch() {
             action_hash,
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Result,
-                rollup_id: U256::from(1u64),
+                rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
                 destination: Address::ZERO,
                 value: U256::ZERO,
                 data: vec![i],
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
         };
@@ -6022,13 +6022,13 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     };
     let result_action = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: U256::from(1u64),
+        rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
         destination: Address::ZERO,
         value: U256::ZERO,
         data: result_data.clone(),
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let result_action_hash = keccak256(
@@ -6048,13 +6048,13 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     // CALL action: triggers executeIncomingCrossChainCall on L2
     let call_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: U256::from(1u64),
+        rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
         destination: counter_address,
         value: U256::ZERO,
         data: increment_calldata.clone(),
         failed: false,
         source_address,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let call_action_hash = keccak256(

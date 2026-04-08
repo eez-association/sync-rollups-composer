@@ -1,12 +1,12 @@
 use super::*;
-use crate::cross_chain::CrossChainStateDelta;
+use crate::cross_chain::{CrossChainStateDelta, RollupId};
 use alloy_primitives::address;
 
 #[test]
 fn test_entry_to_serializable_roundtrip() {
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::ZERO,
@@ -14,13 +14,13 @@ fn test_entry_to_serializable_roundtrip() {
         action_hash: B256::with_last_byte(0xCC),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: address!("0x1111111111111111111111111111111111111111"),
             value: U256::ZERO,
             data: vec![0xDE, 0xAD],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::from(2),
+            source_rollup: RollupId::new(U256::from(2)),
             scope: vec![U256::from(1), U256::from(2)],
         },
     };
@@ -92,13 +92,13 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
         action_hash: B256::with_last_byte(hash_byte),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     };

@@ -39,7 +39,7 @@
 //! can build on it without retrofitting.
 
 use crate::cross_chain::{
-    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
+    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, RollupId,
     build_cross_chain_call_entries, build_l2_to_l1_call_entries,
 };
 use crate::table_builder::{
@@ -176,13 +176,13 @@ fn detected_l1_to_l2(
         direction: CallDirection::L1ToL2,
         call_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::from(L2_ROLLUP_ID),
+            rollup_id: RollupId::new(U256::from(L2_ROLLUP_ID)),
             destination,
             value: U256::ZERO,
             data,
             failed: false,
             source_address,
-            source_rollup: U256::ZERO, // MAINNET
+            source_rollup: RollupId::MAINNET, // MAINNET
             scope: vec![],
         },
         parent_call_index: None,
@@ -210,13 +210,13 @@ fn detected_l2_to_l1(
         direction: CallDirection::L2ToL1,
         call_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::ZERO, // L1 (MAINNET)
+            rollup_id: RollupId::MAINNET, // L1 (MAINNET)
             destination,
             value: U256::ZERO,
             data,
             failed: false,
             source_address,
-            source_rollup: U256::from(L2_ROLLUP_ID),
+            source_rollup: RollupId::new(U256::from(L2_ROLLUP_ID)),
             scope: vec![],
         },
         parent_call_index,
@@ -236,16 +236,16 @@ fn detected_l2_to_l1(
 // ──────────────────────────────────────────────
 
 fn case_deposit_simple() -> MirrorCase {
-    let l2_id = U256::from(L2_ROLLUP_ID);
+    let l2_id = RollupId::new(U256::from(L2_ROLLUP_ID));
     let (call_entry, result_entry) = build_cross_chain_call_entries(
         l2_id,
         addr_dest_a(),
         vec![0xDE, 0xAD, 0xBE, 0xEF],
         U256::ZERO,
         addr_user(),
-        U256::ZERO, // source_rollup = MAINNET
-        true,       // call_success
-        vec![],     // return_data
+        RollupId::MAINNET, // source_rollup = MAINNET
+        true,              // call_success
+        vec![],            // return_data
     );
     // For a simple deposit there is no L1 entry produced by this builder
     // — the L1 side is the user's tx itself. The L2 table entries
@@ -303,7 +303,7 @@ fn case_withdrawal_simple() -> MirrorCase {
 //     └─ CALL_C (L2→L1)  Bridge_L2 → Bridge_L1.receiveTokens (child of B)
 
 fn case_flash_loan_3_call() -> MirrorCase {
-    let l2_id = U256::from(L2_ROLLUP_ID);
+    let l2_id = RollupId::new(U256::from(L2_ROLLUP_ID));
     let call_a = detected_l1_to_l2(addr_dest_a(), vec![0xAA; 4], addr_user(), false);
     let call_b = detected_l1_to_l2(addr_dest_b(), vec![0xBB; 4], addr_src_b(), true);
     let mut call_c = detected_l2_to_l1(addr_dest_c(), vec![0xCC; 4], addr_src_c(), Some(1), 1);
@@ -334,7 +334,7 @@ fn case_flash_loan_3_call() -> MirrorCase {
 //   [3] CALL_D (grandchild of B, child of C, depth=2, leaf)
 
 fn case_ping_pong_depth_2() -> MirrorCase {
-    let l2_id = U256::from(L2_ROLLUP_ID);
+    let l2_id = RollupId::new(U256::from(L2_ROLLUP_ID));
     let call_a = detected_l2_to_l1(addr_dest_a(), vec![0xA1], addr_user(), None, 0);
     let call_b = detected_l2_to_l1(addr_dest_b(), vec![0xB1], addr_src_b(), None, 0);
     let call_c = detected_l2_to_l1(addr_dest_c(), vec![0xC1], addr_src_c(), Some(1), 1);
@@ -367,7 +367,7 @@ fn case_ping_pong_depth_2() -> MirrorCase {
 // `build_l2_to_l1_continuation_entries` without introducing branching.
 
 fn case_ping_pong_depth_3() -> MirrorCase {
-    let l2_id = U256::from(L2_ROLLUP_ID);
+    let l2_id = RollupId::new(U256::from(L2_ROLLUP_ID));
     let call_a = detected_l2_to_l1(addr_dest_a(), vec![0xA1], addr_user(), None, 0);
     let call_b = detected_l2_to_l1(addr_dest_b(), vec![0xB1], addr_src_b(), Some(0), 1);
     let call_c = detected_l2_to_l1(addr_dest_c(), vec![0xC1], addr_src_c(), Some(1), 2);

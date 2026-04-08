@@ -9,7 +9,7 @@ fn make_l1_to_l2_call(
     destination: Address,
     data: Vec<u8>,
     source_address: Address,
-    l2_rollup_id: U256,
+    l2_rollup_id: RollupId,
 ) -> CrossChainAction {
     CrossChainAction {
         action_type: CrossChainActionType::Call,
@@ -19,7 +19,7 @@ fn make_l1_to_l2_call(
         data,
         failed: false,
         source_address,
-        source_rollup: U256::ZERO, // MAINNET
+        source_rollup: RollupId::MAINNET, // MAINNET
         scope: vec![],
     }
 }
@@ -29,11 +29,11 @@ fn make_l2_to_l1_call(
     destination: Address,
     data: Vec<u8>,
     source_address: Address,
-    l2_rollup_id: U256,
+    l2_rollup_id: RollupId,
 ) -> CrossChainAction {
     CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: U256::ZERO, // targeting MAINNET
+        rollup_id: RollupId::MAINNET, // targeting MAINNET
         destination,
         value: U256::ZERO,
         data,
@@ -46,7 +46,7 @@ fn make_l2_to_l1_call(
 
 #[test]
 fn test_empty_calls_produces_empty_entries() {
-    let result = build_continuation_entries(&[], U256::from(1));
+    let result = build_continuation_entries(&[], RollupId::new(U256::from(1)));
     assert!(result.l2_entries.is_empty());
     assert!(result.l1_entries.is_empty());
 }
@@ -54,7 +54,7 @@ fn test_empty_calls_produces_empty_entries() {
 #[test]
 fn test_single_l1_to_l2_call_produces_simple_entries() {
     // Single deposit-like call: CALL_A (L1→L2), no continuation, no children.
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let bridge_l1 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let bridge_l2 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
@@ -111,8 +111,8 @@ fn test_single_l1_to_l2_call_produces_simple_entries() {
 ///   3. hash(RESULT(MAINNET,void)) → RESULT(L2,void)
 #[test]
 fn test_flash_loan_continuation_entries() {
-    let l2_id = U256::from(1);
-    let mainnet_id = U256::ZERO;
+    let l2_id = RollupId::new(U256::from(1));
+    let mainnet_id = RollupId::MAINNET;
 
     // Addresses (arbitrary for test)
     let bridge_l1 = address!("1111111111111111111111111111111111111111");
@@ -333,13 +333,13 @@ fn test_flash_loan_continuation_entries() {
 fn test_action_hash_determinism() {
     let action = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: U256::from(1),
+        rollup_id: RollupId::new(U256::from(1)),
         destination: Address::ZERO,
         value: U256::ZERO,
         data: vec![],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
 
@@ -355,7 +355,7 @@ fn test_action_hash_determinism() {
 /// No L2→L1 children.
 #[test]
 fn test_two_continuations_no_children() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let addr_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let addr_b = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let src = address!("cccccccccccccccccccccccccccccccccccccccc");
@@ -420,7 +420,7 @@ fn make_l2_to_l1_detected(
     destination: Address,
     data: Vec<u8>,
     source_address: Address,
-    l2_rollup_id: U256,
+    l2_rollup_id: RollupId,
     parent_call_index: Option<usize>,
     depth: usize,
 ) -> DetectedCall {
@@ -428,7 +428,7 @@ fn make_l2_to_l1_detected(
         direction: CallDirection::L2ToL1,
         call_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::ZERO, // targeting L1 (MAINNET)
+            rollup_id: RollupId::MAINNET, // targeting L1 (MAINNET)
             destination,
             value: U256::ZERO,
             data,
@@ -474,7 +474,7 @@ fn make_l2_to_l1_detected(
 ///   7. hash(RESULT(L1,void)) → RESULT(L1, void)           — B's scope resolution
 #[test]
 fn test_l2_to_l1_depth2_entry_generation() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let _builder = address!("0000000000000000000000000000000000000001");
 
     // Distinct addresses per call to prevent hash collisions masking bugs.
@@ -509,13 +509,13 @@ fn test_l2_to_l1_depth2_entry_generation() {
 
     let l1_result_void = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: U256::ZERO,
+        rollup_id: RollupId::MAINNET,
         destination: Address::ZERO,
         value: U256::ZERO,
         data: vec![],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let l2_result_void = CrossChainAction {
@@ -526,7 +526,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         data: vec![],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let l1_result_hash = compute_action_hash(&l1_result_void);
@@ -548,7 +548,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
     assert_eq!(
         l2_e0.next_action.rollup_id,
-        U256::ZERO,
+        RollupId::MAINNET,
         "L2[0] RESULT rollupId must be L1 (0)"
     );
 
@@ -592,7 +592,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
     assert_eq!(
         l2_e2.next_action.rollup_id,
-        U256::ZERO,
+        RollupId::MAINNET,
         "L2[2] scope resolution must target L1"
     );
 
@@ -635,7 +635,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
     );
     assert_eq!(
         l2_e4.next_action.rollup_id,
-        U256::ZERO,
+        RollupId::MAINNET,
         "L2[4] scope resolution must target L1"
     );
 
@@ -658,7 +658,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         data: vec![0xc0], // placeholder rlp_encoded_tx
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let child_trigger_c = CrossChainAction {
@@ -669,7 +669,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         data: vec![0xC1],
         failed: false,
         source_address: dest_c,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let child_trigger_d = CrossChainAction {
@@ -680,7 +680,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         data: vec![0xD1],
         failed: false,
         source_address: dest_d,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
@@ -742,7 +742,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         entries_d[0].next_action.action_type,
         CrossChainActionType::Result
     );
-    assert_eq!(entries_d[0].next_action.rollup_id, U256::ZERO);
+    assert_eq!(entries_d[0].next_action.rollup_id, RollupId::MAINNET);
 
     // 3 RESULT(L1,void)-triggered entries:
     //   1. RESULT(A) → CALL(B, scope=[1])  (chained sibling)
@@ -805,7 +805,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
 /// produces more entries than a depth-1 equivalent would.
 #[test]
 fn test_l2_to_l1_depth2_child_not_orphaned() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let _builder = address!("0000000000000000000000000000000000000001");
 
     // Minimal tree: one root with one child (depth=1) that has one grandchild (depth=2).
@@ -863,7 +863,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
         data: vec![0x33],
         failed: false,
         source_address: dest_grand,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let grandchild_trigger_hash = compute_action_hash(&grandchild_trigger);
@@ -912,7 +912,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
 ///   4. hash(RESULT(L1,void)) → RESULT(L1, void)       — scope resolution
 #[test]
 fn test_l2_to_l1_depth1_regression() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let _builder = address!("dead000000000000000000000000000000000000");
 
     let dest_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -938,13 +938,13 @@ fn test_l2_to_l1_depth1_regression() {
 
     let l1_result_void = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: U256::ZERO,
+        rollup_id: RollupId::MAINNET,
         destination: Address::ZERO,
         value: U256::ZERO,
         data: vec![],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let l2_result_void = CrossChainAction {
@@ -955,7 +955,7 @@ fn test_l2_to_l1_depth1_regression() {
         data: vec![],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let l1_result_hash = compute_action_hash(&l1_result_void);
@@ -973,7 +973,7 @@ fn test_l2_to_l1_depth1_regression() {
     );
     assert_eq!(
         l2_e0.next_action.rollup_id,
-        U256::ZERO,
+        RollupId::MAINNET,
         "L2[0] RESULT must target L1"
     );
 
@@ -1008,7 +1008,7 @@ fn test_l2_to_l1_depth1_regression() {
     );
     assert_eq!(
         l2_e2.next_action.rollup_id,
-        U256::ZERO,
+        RollupId::MAINNET,
         "L2[2] RESULT must target L1"
     );
 
@@ -1029,7 +1029,7 @@ fn test_l2_to_l1_depth1_regression() {
         data: vec![0xc0],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let child_trigger_c = CrossChainAction {
@@ -1040,7 +1040,7 @@ fn test_l2_to_l1_depth1_regression() {
         data: vec![0xC1],
         failed: false,
         source_address: dest_c,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let l2tx_trigger_hash = compute_action_hash(&l2tx_trigger);
@@ -1111,7 +1111,7 @@ fn test_l2_to_l1_depth1_regression() {
 /// Test that L2 entries have empty state deltas (driver fills them later).
 #[test]
 fn test_all_entries_have_empty_state_deltas() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let addr = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let src = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
@@ -1155,7 +1155,7 @@ fn test_all_entries_have_empty_state_deltas() {
 /// the return call's l2_return_data when non-empty.
 #[test]
 fn test_l2_scope_resolution_uses_l2_return_data() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let logger_l2 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let logger_l1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let counter_l2 = address!("cccccccccccccccccccccccccccccccccccccccc");
@@ -1174,7 +1174,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
             direction: CallDirection::L2ToL1,
             call_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::ZERO,
+                rollup_id: RollupId::MAINNET,
                 destination: logger_l1,
                 value: U256::ZERO,
                 data: increment_data.clone(),
@@ -1203,7 +1203,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
                 data: increment_data.clone(),
                 failed: false,
                 source_address: logger_l1,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
             parent_call_index: Some(0),
@@ -1241,7 +1241,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
         data: counter_return,
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let expected_hash = compute_action_hash(&expected_result);
@@ -1268,7 +1268,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
 /// use the PREVIOUS child's data.
 #[test]
 fn test_l2_mixed_void_nonvoid_children() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child_a = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let child_b = address!("cccccccccccccccccccccccccccccccccccccccc");
@@ -1284,7 +1284,7 @@ fn test_l2_mixed_void_nonvoid_children() {
             direction: CallDirection::L2ToL1,
             call_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::ZERO,
+                rollup_id: RollupId::MAINNET,
                 destination: parent,
                 value: U256::ZERO,
                 data: vec![0x01],
@@ -1314,7 +1314,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 data: vec![0x02],
                 failed: false,
                 source_address: parent,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
             parent_call_index: Some(0),
@@ -1338,7 +1338,7 @@ fn test_l2_mixed_void_nonvoid_children() {
                 data: vec![0x03],
                 failed: false,
                 source_address: parent,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
             parent_call_index: Some(0),
@@ -1374,7 +1374,7 @@ fn test_l2_mixed_void_nonvoid_children() {
         data: child_b_return,
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let nonvoid_hash = compute_action_hash(&nonvoid_result);
@@ -1402,7 +1402,7 @@ fn test_l2_mixed_void_nonvoid_children() {
 /// Verifies push_reentrant_child_entries uses child.delivery_return_data (#246).
 #[test]
 fn test_l1_reentrant_child_delivery_return_data() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
@@ -1414,7 +1414,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
             direction: CallDirection::L2ToL1,
             call_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::ZERO,
+                rollup_id: RollupId::MAINNET,
                 destination: parent,
                 value: U256::ZERO,
                 data: vec![0x01],
@@ -1443,7 +1443,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
                 data: vec![0x02],
                 failed: false,
                 source_address: parent,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
             parent_call_index: Some(0),
@@ -1461,7 +1461,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
     let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
 
     // L1 entries should include the delivery RESULT with non-void data
-    let void_l1 = result_void(U256::ZERO);
+    let void_l1 = result_void(RollupId::MAINNET);
     let void_l1_hash = compute_action_hash(&void_l1);
 
     // The delivery RESULT entry (Entry 0b) should NOT use void hash
@@ -1471,7 +1471,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
     let delivery_result_entry = cont.l1_entries.iter().find(|e| {
         e.action_hash != void_l1_hash
             && e.next_action.action_type == CrossChainActionType::Result
-            && e.next_action.rollup_id == alloy_primitives::U256::from(1u64)
+            && e.next_action.rollup_id == RollupId::new(alloy_primitives::U256::from(1u64))
     });
     assert!(
         delivery_result_entry.is_some(),
@@ -1484,7 +1484,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
         e.action_hash != void_l1_hash
             && e.next_action.action_type == CrossChainActionType::Result
             && e.next_action.data.is_empty()
-            && e.next_action.rollup_id == alloy_primitives::U256::from(1u64)
+            && e.next_action.rollup_id == RollupId::new(alloy_primitives::U256::from(1u64))
     });
     assert!(
         root_delivery_entry.is_some(),
@@ -1495,7 +1495,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
 /// Test that void children still produce result_void hash (no regression).
 #[test]
 fn test_void_children_still_use_result_void() {
-    let l2_id = U256::from(1);
+    let l2_id = RollupId::new(U256::from(1));
     let parent = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let child = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let _builder = address!("dddddddddddddddddddddddddddddddddddddddd");
@@ -1505,7 +1505,7 @@ fn test_void_children_still_use_result_void() {
             direction: CallDirection::L2ToL1,
             call_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::ZERO,
+                rollup_id: RollupId::MAINNET,
                 destination: parent,
                 value: U256::ZERO,
                 data: vec![0x01],
@@ -1534,7 +1534,7 @@ fn test_void_children_still_use_result_void() {
                 data: vec![0x02],
                 failed: false,
                 source_address: parent,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
             parent_call_index: Some(0),
@@ -1553,7 +1553,7 @@ fn test_void_children_still_use_result_void() {
 
     // All RESULT entries should use result_void hashes
     let void_l2_hash = compute_action_hash(&result_void(l2_id));
-    let void_l1_hash = compute_action_hash(&result_void(U256::ZERO));
+    let void_l1_hash = compute_action_hash(&result_void(RollupId::MAINNET));
 
     // L2 scope resolution should be void
     let l2_scope = cont.l2_entries.last().unwrap();
@@ -1603,13 +1603,13 @@ fn mk_reorder_entry(hash_byte: u8, seq: u64) -> CrossChainExecutionEntry {
         action_hash: B256::with_last_byte(hash_byte),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::from(seq),
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     }
@@ -2120,13 +2120,13 @@ mod mirror_loop_tests {
                 let target = entry.next_action.rollup_id;
                 let source = entry.next_action.source_rollup;
                 assert!(
-                    target == U256::ZERO || target == U256::from(1),
+                    target == RollupId::MAINNET || target == RollupId::new(U256::from(1)),
                     "case {}: L2-entry next_action.rollup_id={} not in {{0, 1}}",
                     case.name,
                     target
                 );
                 assert!(
-                    source == U256::ZERO || source == U256::from(1),
+                    source == RollupId::MAINNET || source == RollupId::new(U256::from(1)),
                     "case {}: L2-entry next_action.source_rollup={} not in {{0, 1}}",
                     case.name,
                     source

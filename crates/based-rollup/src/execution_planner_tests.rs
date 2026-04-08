@@ -64,12 +64,12 @@ fn test_build_entries_for_block_nonzero_rollup_id() {
     assert_eq!(entry.state_deltas.len(), 1);
     assert_eq!(
         entry.state_deltas[0].rollup_id,
-        U256::from(42),
+        RollupId::new(U256::from(42)),
         "rollup_id should propagate to state delta"
     );
     assert_eq!(
         entry.next_action.rollup_id,
-        U256::from(42),
+        RollupId::new(U256::from(42)),
         "rollup_id should propagate to next_action"
     );
 }
@@ -301,7 +301,7 @@ fn test_build_entries_from_encoded_produces_valid_entry() {
 
     let entry = &entries[0];
     assert_eq!(entry.state_deltas.len(), 1);
-    assert_eq!(entry.state_deltas[0].rollup_id, U256::from(42));
+    assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(42)));
     assert_eq!(entry.state_deltas[0].current_state, pre);
     assert_eq!(entry.state_deltas[0].new_state, post);
     assert_ne!(entry.action_hash, B256::ZERO);
@@ -1444,7 +1444,7 @@ fn test_build_state_only_entry_different_roots_produces_entry() {
     assert_eq!(entry.state_deltas.len(), 1);
     assert_eq!(entry.state_deltas[0].current_state, pre);
     assert_eq!(entry.state_deltas[0].new_state, post);
-    assert_eq!(entry.state_deltas[0].rollup_id, U256::from(42));
+    assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(42)));
     assert_eq!(entry.state_deltas[0].ether_delta, I256::ZERO);
 }
 
@@ -1543,11 +1543,11 @@ fn test_cross_chain_call_result_pair_l1_pipeline_roundtrip() {
     use alloy_rpc_types::Log;
     use alloy_sol_types::{SolCall, SolEvent};
 
-    let rollup_id = U256::from(1u64);
+    let rollup_id = RollupId::new(U256::from(1u64));
     let destination = Address::with_last_byte(0x42);
     let call_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
     let source_address = Address::with_last_byte(0x01);
-    let source_rollup = U256::from(2u64);
+    let source_rollup = RollupId::new(U256::from(2u64));
     let return_data = vec![0x00; 32]; // simulated return
 
     // Step 1: Build CALL+RESULT pair (L2 format)
@@ -1594,7 +1594,7 @@ fn test_cross_chain_call_result_pair_l1_pipeline_roundtrip() {
     };
 
     // L1 entry (actionHash=CALL, nextAction=RESULT) targets rollup_id=1
-    let derived = parse_batch_posted_logs(&[mock_log], rollup_id);
+    let derived = parse_batch_posted_logs(&[mock_log], rollup_id.as_u256());
     assert_eq!(
         derived.len(),
         1,
@@ -1638,7 +1638,7 @@ fn test_cross_chain_entry_action_hash_is_keccak_of_next_action() {
             Address::with_last_byte(0x42),
             vec![0xDE, 0xAD],
             Address::with_last_byte(0x01),
-            U256::from(2u64),
+            RollupId::new(U256::from(2u64)),
             true,
             vec![0x00; 32],
         ),
@@ -1646,7 +1646,7 @@ fn test_cross_chain_entry_action_hash_is_keccak_of_next_action() {
             Address::with_last_byte(0xFF),
             vec![],
             Address::ZERO,
-            U256::ZERO,
+            RollupId::MAINNET,
             false,
             vec![0x08, 0xc3, 0x79, 0xa0], // revert selector
         ),
@@ -1654,7 +1654,7 @@ fn test_cross_chain_entry_action_hash_is_keccak_of_next_action() {
             Address::with_last_byte(0xAA),
             vec![0xCA, 0xFE, 0xBA, 0xBE],
             Address::with_last_byte(0xBB),
-            U256::from(99u64),
+            RollupId::new(U256::from(99u64)),
             true,
             vec![],
         ),
@@ -1663,7 +1663,7 @@ fn test_cross_chain_entry_action_hash_is_keccak_of_next_action() {
     for (i, (dest, data, src_addr, src_rollup, success, ret_data)) in
         test_cases.into_iter().enumerate()
     {
-        let rollup_id = U256::from(1u64);
+        let rollup_id = RollupId::new(U256::from(1u64));
         let (call_entry, result_entry) = build_cross_chain_call_entries(
             rollup_id,
             dest,

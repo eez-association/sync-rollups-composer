@@ -4,7 +4,7 @@ use super::*;
 fn test_execution_entry_serialization_roundtrip() {
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(2),
+            rollup_id: RollupId::new(U256::from(2)),
             current_state: B256::ZERO,
             new_state: B256::with_last_byte(0xFF),
             ether_delta: I256::ZERO,
@@ -12,13 +12,13 @@ fn test_execution_entry_serialization_roundtrip() {
         action_hash: B256::with_last_byte(0x42),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::with_last_byte(0x01),
             value: U256::from(1000),
             data: vec![0xDE, 0xAD],
             failed: false,
             source_address: Address::with_last_byte(0x02),
-            source_rollup: U256::from(2),
+            source_rollup: RollupId::new(U256::from(2)),
             scope: vec![U256::from(0), U256::from(1)],
         },
     };
@@ -160,7 +160,7 @@ fn test_encode_load_execution_table_empty() {
 fn test_encode_load_execution_table_roundtrip() {
     let entries = vec![CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::try_from(1_000_000i128).unwrap(),
@@ -168,13 +168,13 @@ fn test_encode_load_execution_table_roundtrip() {
         action_hash: B256::with_last_byte(0x42),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::from(2),
+            rollup_id: RollupId::new(U256::from(2)),
             destination: Address::with_last_byte(0x99),
             value: U256::from(500),
             data: vec![0xDE, 0xAD],
             failed: false,
             source_address: Address::with_last_byte(0x01),
-            source_rollup: U256::from(1),
+            source_rollup: RollupId::new(U256::from(1)),
             scope: vec![U256::from(0)],
         },
     }];
@@ -195,13 +195,13 @@ fn test_encode_load_execution_table_roundtrip() {
 fn test_encode_execute_incoming_call_roundtrip() {
     let action = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: U256::from(1),
+        rollup_id: RollupId::new(U256::from(1)),
         destination: Address::with_last_byte(0x42),
         value: U256::from(1_000_000),
         data: vec![0xCA, 0xFE, 0xBA, 0xBE],
         failed: false,
         source_address: Address::with_last_byte(0xBB),
-        source_rollup: U256::from(2),
+        source_rollup: RollupId::new(U256::from(2)),
         scope: vec![U256::from(0), U256::from(1)],
     };
     let calldata = encode_execute_incoming_call_calldata(&action);
@@ -220,7 +220,7 @@ fn test_encode_load_execution_table_multiple_entries() {
     let entries = vec![
         CrossChainExecutionEntry {
             state_deltas: vec![CrossChainStateDelta {
-                rollup_id: U256::from(1),
+                rollup_id: RollupId::new(U256::from(1)),
                 current_state: B256::with_last_byte(0x11),
                 new_state: B256::with_last_byte(0x22),
                 ether_delta: I256::try_from(999_999_999_999i128).unwrap(),
@@ -228,26 +228,26 @@ fn test_encode_load_execution_table_multiple_entries() {
             action_hash: B256::with_last_byte(0xAA),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::from(10),
+                rollup_id: RollupId::new(U256::from(10)),
                 destination: Address::with_last_byte(0x01),
                 value: U256::from(42),
                 data: vec![0x01, 0x02, 0x03],
                 failed: false,
                 source_address: Address::with_last_byte(0x0A),
-                source_rollup: U256::from(5),
+                source_rollup: RollupId::new(U256::from(5)),
                 scope: vec![U256::from(100)],
             },
         },
         CrossChainExecutionEntry {
             state_deltas: vec![
                 CrossChainStateDelta {
-                    rollup_id: U256::from(2),
+                    rollup_id: RollupId::new(U256::from(2)),
                     current_state: B256::with_last_byte(0x33),
                     new_state: B256::with_last_byte(0x44),
                     ether_delta: I256::try_from(-500_000_000i128).unwrap(),
                 },
                 CrossChainStateDelta {
-                    rollup_id: U256::from(3),
+                    rollup_id: RollupId::new(U256::from(3)),
                     current_state: B256::ZERO,
                     new_state: B256::with_last_byte(0xFF),
                     ether_delta: I256::ZERO,
@@ -256,13 +256,13 @@ fn test_encode_load_execution_table_multiple_entries() {
             action_hash: B256::with_last_byte(0xBB),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Revert,
-                rollup_id: U256::from(20),
+                rollup_id: RollupId::new(U256::from(20)),
                 destination: Address::with_last_byte(0x02),
                 value: U256::ZERO,
                 data: vec![],
                 failed: true,
                 source_address: Address::with_last_byte(0x0B),
-                source_rollup: U256::from(10),
+                source_rollup: RollupId::new(U256::from(10)),
                 scope: vec![U256::from(1), U256::from(2)],
             },
         },
@@ -271,13 +271,13 @@ fn test_encode_load_execution_table_multiple_entries() {
             action_hash: B256::with_last_byte(0xCC),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::L2Tx,
-                rollup_id: U256::from(30),
+                rollup_id: RollupId::new(U256::from(30)),
                 destination: Address::with_last_byte(0x03),
                 value: U256::from(1_000_000_000_000_000_000u128),
                 data: vec![0xFF; 64],
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
         },
@@ -333,13 +333,13 @@ fn test_encode_load_execution_table_multiple_entries() {
 fn test_from_sol_action_roundtrip() {
     let action = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: U256::from(42),
+        rollup_id: RollupId::new(U256::from(42)),
         destination: Address::with_last_byte(0xAB),
         value: U256::from(1_000_000u64),
         data: vec![1, 2, 3, 4],
         failed: false,
         source_address: Address::with_last_byte(0xCD),
-        source_rollup: U256::from(7),
+        source_rollup: RollupId::new(U256::from(7)),
         scope: vec![U256::from(1), U256::from(2)],
     };
     let sol = action.to_sol_action();
@@ -351,7 +351,7 @@ fn test_from_sol_action_roundtrip() {
 fn test_from_sol_execution_entry_roundtrip() {
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::try_from(100i64).unwrap(),
@@ -359,13 +359,13 @@ fn test_from_sol_execution_entry_roundtrip() {
         action_hash: B256::with_last_byte(0xFF),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![0xDE, 0xAD],
             failed: true,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     };
@@ -554,7 +554,7 @@ fn test_from_sol_state_delta_roundtrip() {
     };
 
     let rust_delta = CrossChainStateDelta::from_sol(&sol_delta);
-    assert_eq!(rust_delta.rollup_id, U256::from(42));
+    assert_eq!(rust_delta.rollup_id, RollupId::new(U256::from(42)));
     assert_eq!(rust_delta.current_state, B256::with_last_byte(0xAA));
     assert_eq!(rust_delta.new_state, B256::with_last_byte(0xBB));
     assert!(rust_delta.ether_delta < I256::ZERO);
@@ -789,10 +789,14 @@ fn test_parse_batch_posted_logs_matches_via_next_action_rollup_id_not_state_delt
     );
     assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0x42));
     assert_eq!(result[0].l1_block_number, 100);
-    assert_eq!(result[0].entry.next_action.rollup_id, our_rollup_id);
+    assert_eq!(
+        result[0].entry.next_action.rollup_id,
+        RollupId::new(our_rollup_id)
+    );
     // state deltas should still reference the source rollup, not ours
     assert_eq!(
-        result[0].entry.state_deltas[0].rollup_id, source_rollup_id,
+        result[0].entry.state_deltas[0].rollup_id,
+        RollupId::new(source_rollup_id),
         "state deltas should be preserved as-is from source rollup"
     );
 }
@@ -1057,7 +1061,7 @@ fn test_encode_post_batch_calldata_selector_matches() {
 
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::ZERO,
             new_state: B256::with_last_byte(0x01),
             ether_delta: I256::ZERO,
@@ -1065,13 +1069,13 @@ fn test_encode_post_batch_calldata_selector_matches() {
         action_hash: B256::with_last_byte(0xAA),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     };
@@ -1101,7 +1105,7 @@ fn test_encode_post_batch_calldata_empty_entries() {
 fn test_encode_post_batch_calldata_multiple_entries() {
     let make_entry = |n: u8| CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(n as u64),
+            rollup_id: RollupId::new(U256::from(n as u64)),
             current_state: B256::with_last_byte(n),
             new_state: B256::with_last_byte(n.wrapping_add(1)),
             ether_delta: I256::ZERO,
@@ -1109,13 +1113,13 @@ fn test_encode_post_batch_calldata_multiple_entries() {
         action_hash: B256::with_last_byte(n.wrapping_add(0x10)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(n as u64),
+            rollup_id: RollupId::new(U256::from(n as u64)),
             destination: Address::with_last_byte(n),
             value: U256::from(n as u64 * 100),
             data: vec![n; n as usize],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     };
@@ -1144,7 +1148,7 @@ fn test_encode_post_batch_calldata_roundtrip_decode() {
 
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(42),
+            rollup_id: RollupId::new(U256::from(42)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::try_from(-1_000_000i128).expect("valid i256"),
@@ -1152,13 +1156,13 @@ fn test_encode_post_batch_calldata_roundtrip_decode() {
         action_hash: B256::with_last_byte(0xFF),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::from(42),
+            rollup_id: RollupId::new(U256::from(42)),
             destination: Address::with_last_byte(0x99),
             value: U256::from(500_000),
             data: vec![0xCA, 0xFE],
             failed: false,
             source_address: Address::with_last_byte(0x01),
-            source_rollup: U256::from(7),
+            source_rollup: RollupId::new(U256::from(7)),
             scope: vec![U256::from(1), U256::from(2)],
         },
     };
@@ -1531,7 +1535,7 @@ fn test_action_hash_matches_integration_test_solidity() {
     // ── Also verify via Rust-native types → to_sol_action() path ──
     let rust_result = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: l2_rollup_id,
+        rollup_id: RollupId::new(l2_rollup_id),
         destination: Address::ZERO,
         value: U256::ZERO,
         data: {
@@ -1541,7 +1545,7 @@ fn test_action_hash_matches_integration_test_solidity() {
         },
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let rust_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
@@ -1554,13 +1558,13 @@ fn test_action_hash_matches_integration_test_solidity() {
 
     let rust_call = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: l2_rollup_id,
+        rollup_id: RollupId::new(l2_rollup_id),
         destination: counter_l2,
         value: U256::ZERO,
         data: vec![0xd0, 0x9d, 0xe0, 0x8a],
         failed: false,
         source_address: counter_and_proxy,
-        source_rollup: mainnet_rollup_id,
+        source_rollup: RollupId::new(mainnet_rollup_id),
         scope: vec![],
     };
     let rust_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
@@ -1597,12 +1601,12 @@ fn test_build_entries_matches_integration_test() {
     };
 
     let (call_entry, result_entry) = build_cross_chain_call_entries(
-        l2_rollup_id,
+        RollupId::new(l2_rollup_id),
         counter_l2,
         increment_calldata,
         U256::ZERO,
         counter_and_proxy,
-        mainnet_rollup_id,
+        RollupId::new(mainnet_rollup_id),
         true, // call succeeded
         return_data,
     );
@@ -1715,13 +1719,13 @@ fn test_action_hash_matches_nested_integration_test() {
     // Also verify via Rust-native types
     let rust_inner = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: remote_rollup_id,
+        rollup_id: RollupId::new(remote_rollup_id),
         destination: remote_counter,
         value: U256::ZERO,
         data: increment_calldata,
         failed: false,
         source_address: counter_and_proxy,
-        source_rollup: l2_rollup_id,
+        source_rollup: RollupId::new(l2_rollup_id),
         scope: vec![],
     };
     assert_eq!(
@@ -1733,13 +1737,13 @@ fn test_action_hash_matches_nested_integration_test() {
 
     let rust_outer = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: l2_rollup_id,
+        rollup_id: RollupId::new(l2_rollup_id),
         destination: Address::ZERO,
         value: U256::ZERO,
         data: vec![], // void
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     assert_eq!(
@@ -1755,12 +1759,12 @@ fn test_action_hash_matches_nested_integration_test() {
 #[test]
 fn test_build_cross_chain_call_entries_empty_data() {
     let (call_entry, result_entry) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x42),
         vec![],
         U256::ZERO,
         Address::with_last_byte(0x01),
-        U256::from(0),
+        RollupId::MAINNET,
         true,
         vec![],
     );
@@ -1783,12 +1787,12 @@ fn test_build_cross_chain_call_entries_empty_data() {
 #[test]
 fn test_build_cross_chain_call_entries_failed_call() {
     let (call_entry, result_entry) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x42),
         vec![0xDE, 0xAD],
         U256::ZERO,
         Address::with_last_byte(0x01),
-        U256::from(0),
+        RollupId::MAINNET,
         false,                        // call failed
         vec![0x08, 0xC3, 0x79, 0xA0], // revert selector
     );
@@ -1804,12 +1808,12 @@ fn test_build_cross_chain_call_entries_failed_call() {
 fn test_l1_l2_entry_roundtrip() {
     // Build L2 pairs → convert to L1 → extract CALL actions → reconstruct L2 pairs
     let (call_entry, result_entry) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x42),
         vec![0xDE, 0xAD],
         U256::ZERO,
         Address::with_last_byte(0x01),
-        U256::from(0),
+        RollupId::MAINNET,
         true,
         vec![0x00; 32],
     );
@@ -1855,22 +1859,22 @@ fn test_l1_l2_entry_roundtrip() {
 fn test_l1_l2_entry_roundtrip_filtered_subset() {
     // Test hash-based matching when only some entries are consumed
     let (call_a, result_a) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x42),
         vec![0x01],
         U256::ZERO,
         Address::with_last_byte(0x01),
-        U256::from(0),
+        RollupId::MAINNET,
         true,
         vec![],
     );
     let (call_b, result_b) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x43),
         vec![0x02],
         U256::ZERO,
         Address::with_last_byte(0x02),
-        U256::from(0),
+        RollupId::MAINNET,
         true,
         vec![],
     );
@@ -1911,12 +1915,12 @@ fn test_build_cross_chain_call_entries_full_l1_roundtrip() {
     use alloy_sol_types::{SolCall, SolEvent};
 
     let (call_entry, result_entry) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x42),
         vec![0xDE, 0xAD],
         U256::ZERO,
         Address::with_last_byte(0xAB),
-        U256::from(2),
+        RollupId::new(U256::from(2)),
         true,
         vec![0xCA, 0xFE],
     );
@@ -2014,7 +2018,7 @@ fn test_build_block_entries_creates_immediate_entries() {
     for entry in &entries {
         assert_eq!(entry.action_hash, B256::ZERO);
         assert_eq!(entry.state_deltas.len(), 1);
-        assert_eq!(entry.state_deltas[0].rollup_id, U256::from(1));
+        assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(1)));
     }
     // Verify state root chaining
     assert_eq!(
@@ -2039,7 +2043,7 @@ fn test_build_block_entries_creates_immediate_entries() {
 fn test_decode_post_batch_calldata_roundtrip() {
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::ZERO,
@@ -2047,13 +2051,13 @@ fn test_decode_post_batch_calldata_roundtrip() {
         action_hash: B256::ZERO,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::L2Tx,
-            rollup_id: U256::ZERO,
+            rollup_id: RollupId::MAINNET,
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     };
@@ -2170,32 +2174,32 @@ fn test_parse_execution_consumed_deduplicates() {
 fn test_attach_chained_state_deltas() {
     // Create 3 CALL+RESULT entry pairs with empty state_deltas
     let (call1, result1) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x01),
         vec![0x01],
         U256::ZERO,
         Address::with_last_byte(0xA1),
-        U256::from(2),
+        RollupId::new(U256::from(2)),
         true,
         vec![0x01],
     );
     let (call2, result2) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x02),
         vec![0x02],
         U256::ZERO,
         Address::with_last_byte(0xA2),
-        U256::from(2),
+        RollupId::new(U256::from(2)),
         true,
         vec![0x02],
     );
     let (call3, result3) = build_cross_chain_call_entries(
-        U256::from(1),
+        RollupId::new(U256::from(1)),
         Address::with_last_byte(0x03),
         vec![0x03],
         U256::ZERO,
         Address::with_last_byte(0xA3),
-        U256::from(2),
+        RollupId::new(U256::from(2)),
         true,
         vec![0x03],
     );
@@ -2220,7 +2224,7 @@ fn test_attach_chained_state_deltas() {
     assert_eq!(entries[0].state_deltas.len(), 1);
     assert_eq!(entries[0].state_deltas[0].current_state, y);
     assert_eq!(entries[0].state_deltas[0].new_state, x1);
-    assert_eq!(entries[0].state_deltas[0].rollup_id, U256::from(1));
+    assert_eq!(entries[0].state_deltas[0].rollup_id, RollupId::new(U256::from(1)));
 
     assert_eq!(entries[2].state_deltas.len(), 1);
     assert_eq!(entries[2].state_deltas[0].current_state, x1);
@@ -2299,7 +2303,7 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
     );
     assert_eq!(
         l1_entry_1.next_action.rollup_id,
-        alloy_primitives::U256::from(1u64),
+        RollupId::new(alloy_primitives::U256::from(1u64)),
         "L1 deferred terminal RESULT rollupId must be triggering rollupId (L2)"
     );
 }
@@ -2503,7 +2507,7 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
 
 #[test]
 fn test_revert_action_canonical_fields() {
-    let rollup_id = U256::from(42069);
+    let rollup_id = RollupId::new(U256::from(42069));
     let scope = vec![U256::ZERO];
     let action = revert_action(rollup_id, scope.clone());
 
@@ -2514,7 +2518,7 @@ fn test_revert_action_canonical_fields() {
     assert!(action.data.is_empty());
     assert!(!action.failed, "REVERT.failed must be false (spec §D.12)");
     assert_eq!(action.source_address, Address::ZERO);
-    assert_eq!(action.source_rollup, U256::ZERO);
+    assert_eq!(action.source_rollup, RollupId::MAINNET);
     assert_eq!(action.scope, scope);
 
     // Verify Solidity ABI conversion
@@ -2526,7 +2530,7 @@ fn test_revert_action_canonical_fields() {
 
 #[test]
 fn test_revert_continue_action_canonical_fields() {
-    let rollup_id = U256::from(42069);
+    let rollup_id = RollupId::new(U256::from(42069));
     let action = revert_continue_action(rollup_id);
 
     assert_eq!(action.action_type, CrossChainActionType::RevertContinue);
@@ -2539,7 +2543,7 @@ fn test_revert_continue_action_canonical_fields() {
         "REVERT_CONTINUE.failed must be true (spec §D.12)"
     );
     assert_eq!(action.source_address, Address::ZERO);
-    assert_eq!(action.source_rollup, U256::ZERO);
+    assert_eq!(action.source_rollup, RollupId::MAINNET);
     assert!(
         action.scope.is_empty(),
         "REVERT_CONTINUE.scope must be [] (spec §D.12)"
@@ -2557,7 +2561,7 @@ fn test_revert_continue_action_canonical_fields() {
 
 #[test]
 fn test_compute_revert_continue_hash_deterministic() {
-    let rollup_id = U256::from(42069);
+    let rollup_id = RollupId::new(U256::from(42069));
 
     // Hash must be deterministic — same rollup_id always produces same hash
     let hash1 = compute_revert_continue_hash(rollup_id);
@@ -2565,7 +2569,7 @@ fn test_compute_revert_continue_hash_deterministic() {
     assert_eq!(hash1, hash2, "REVERT_CONTINUE hash must be deterministic");
 
     // Different rollup_id produces different hash
-    let hash3 = compute_revert_continue_hash(U256::from(1));
+    let hash3 = compute_revert_continue_hash(RollupId::new(U256::from(1)));
     assert_ne!(
         hash1, hash3,
         "different rollupId must produce different hash"
@@ -2578,7 +2582,7 @@ fn test_compute_revert_continue_hash_deterministic() {
 #[test]
 fn test_revert_continue_hash_matches_manual_abi_encode() {
     // Manually construct the same action and hash it to verify consistency
-    let rollup_id = U256::from(42069);
+    let rollup_id = RollupId::new(U256::from(42069));
     let action = CrossChainAction {
         action_type: CrossChainActionType::RevertContinue,
         rollup_id,
@@ -2587,7 +2591,7 @@ fn test_revert_continue_hash_matches_manual_abi_encode() {
         data: vec![],
         failed: true,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let manual_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
@@ -2607,7 +2611,7 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
     let destination = Address::with_last_byte(0x42);
     let source = Address::with_last_byte(0x01);
     let rollup_id = 42069u64;
-    let rollup_id_u256 = U256::from(rollup_id);
+    let rollup_id_u256 = RollupId::new(U256::from(rollup_id));
     let return_data = U256::from(4).to_be_bytes_vec(); // Counter returns 4
     let delivery_scope = vec![U256::ZERO]; // depth 1
 
@@ -2790,7 +2794,7 @@ fn test_attach_generic_state_deltas_revert_group() {
     let pre = B256::with_last_byte(0x01);
     let post = B256::with_last_byte(0x02);
     let rollup_id = 42069u64;
-    let rollup_id_u256 = U256::from(rollup_id);
+    let rollup_id_u256 = RollupId::new(U256::from(rollup_id));
 
     // 3-entry REVERT group (L2TX→CALL, RESULT→REVERT, REVERT_CONTINUE→RESULT)
     let mut entries = vec![
@@ -2804,13 +2808,13 @@ fn test_attach_generic_state_deltas_revert_group() {
             action_hash: B256::with_last_byte(0xAA),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::ZERO,
+                rollup_id: RollupId::MAINNET,
                 destination: Address::ZERO,
                 value: U256::ZERO,
                 data: vec![],
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
         },
@@ -2840,7 +2844,7 @@ fn test_attach_generic_state_deltas_revert_group() {
                 data: vec![],
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
         },
@@ -2881,7 +2885,7 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
     let pre = B256::with_last_byte(0x01);
     let post = B256::with_last_byte(0x02);
     let rollup_id = 1u64;
-    let rollup_id_u256 = U256::from(rollup_id);
+    let rollup_id_u256 = RollupId::new(U256::from(rollup_id));
 
     // 2-entry normal group
     let mut entries = vec![
@@ -2895,13 +2899,13 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
             action_hash: B256::with_last_byte(0xAA),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::ZERO,
+                rollup_id: RollupId::MAINNET,
                 destination: Address::ZERO,
                 value: U256::ZERO,
                 data: vec![],
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
         },
@@ -2921,7 +2925,7 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
                 data: vec![],
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             },
         },
@@ -3008,7 +3012,7 @@ fn mk_unrelated_event_receipt(
 /// Test helper: build a CrossChainExecutionEntry whose `next_action` is a
 /// CALL targeting `our_rollup_id` with `action_hash == hash(next_action)`,
 /// i.e. an entry that `partition_entries` should classify as a TRIGGER.
-fn mk_trigger_entry(our_rollup_id: U256, dest: Address) -> CrossChainExecutionEntry {
+fn mk_trigger_entry(our_rollup_id: RollupId, dest: Address) -> CrossChainExecutionEntry {
     let action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: our_rollup_id,
@@ -3017,7 +3021,7 @@ fn mk_trigger_entry(our_rollup_id: U256, dest: Address) -> CrossChainExecutionEn
         data: vec![],
         failed: false,
         source_address: Address::with_last_byte(0xAA),
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
@@ -3032,7 +3036,7 @@ fn mk_trigger_entry(our_rollup_id: U256, dest: Address) -> CrossChainExecutionEn
 /// deliberately does NOT equal `hash(next_action)` (continuation-style),
 /// so `partition_entries` classifies it as a TABLE entry even though
 /// `next_action` targets our rollup.
-fn mk_continuation_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
+fn mk_continuation_entry(our_rollup_id: RollupId) -> CrossChainExecutionEntry {
     let action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: our_rollup_id,
@@ -3041,7 +3045,7 @@ fn mk_continuation_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
         data: vec![0xC0, 0xC0],
         failed: false,
         source_address: Address::with_last_byte(0xAA),
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     CrossChainExecutionEntry {
@@ -3054,8 +3058,8 @@ fn mk_continuation_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
 
 /// Test helper: build a CrossChainExecutionEntry that targets a *different*
 /// rollup, so `partition_entries` always classifies it as a TABLE entry.
-fn mk_foreign_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
-    let other = our_rollup_id + U256::from(1);
+fn mk_foreign_entry(our_rollup_id: RollupId) -> CrossChainExecutionEntry {
+    let other = RollupId::new(our_rollup_id.as_u256() + U256::from(1));
     let action = CrossChainAction {
         action_type: CrossChainActionType::Call,
         rollup_id: other,
@@ -3064,7 +3068,7 @@ fn mk_foreign_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
         data: vec![],
         failed: false,
         source_address: Address::with_last_byte(0xAA),
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
@@ -3077,7 +3081,7 @@ fn mk_foreign_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
 
 #[test]
 fn test_partition_entries_empty() {
-    let our_id = U256::from(1);
+    let our_id = RollupId::new(U256::from(1));
     let (table, triggers) = partition_entries(&[], our_id);
     assert!(table.is_empty());
     assert!(triggers.is_empty());
@@ -3085,7 +3089,7 @@ fn test_partition_entries_empty() {
 
 #[test]
 fn test_partition_entries_all_triggers() {
-    let our_id = U256::from(1);
+    let our_id = RollupId::new(U256::from(1));
     let entries = vec![
         mk_trigger_entry(our_id, Address::with_last_byte(0x01)),
         mk_trigger_entry(our_id, Address::with_last_byte(0x02)),
@@ -3099,7 +3103,7 @@ fn test_partition_entries_all_triggers() {
 
 #[test]
 fn test_partition_entries_all_table_when_action_hash_mismatches() {
-    let our_id = U256::from(1);
+    let our_id = RollupId::new(U256::from(1));
     let entries = vec![
         mk_continuation_entry(our_id),
         mk_continuation_entry(our_id),
@@ -3111,7 +3115,7 @@ fn test_partition_entries_all_table_when_action_hash_mismatches() {
 
 #[test]
 fn test_partition_entries_foreign_rollup_goes_to_table() {
-    let our_id = U256::from(1);
+    let our_id = RollupId::new(U256::from(1));
     let entries = vec![mk_foreign_entry(our_id), mk_foreign_entry(our_id)];
     let (table, triggers) = partition_entries(&entries, our_id);
     assert_eq!(table.len(), 2);
@@ -3120,7 +3124,7 @@ fn test_partition_entries_foreign_rollup_goes_to_table() {
 
 #[test]
 fn test_partition_entries_mixed_preserves_relative_order() {
-    let our_id = U256::from(1);
+    let our_id = RollupId::new(U256::from(1));
     let t1 = mk_trigger_entry(our_id, Address::with_last_byte(0x01));
     let t2 = mk_trigger_entry(our_id, Address::with_last_byte(0x02));
     let cont = mk_continuation_entry(our_id);
@@ -3133,7 +3137,7 @@ fn test_partition_entries_mixed_preserves_relative_order() {
 
 #[test]
 fn test_partition_entries_disjoint_and_conserves_count() {
-    let our_id = U256::from(1);
+    let our_id = RollupId::new(U256::from(1));
     let entries = vec![
         mk_trigger_entry(our_id, Address::with_last_byte(0x01)),
         mk_continuation_entry(our_id),
@@ -3252,7 +3256,7 @@ mod proptests_filtering {
 
     /// Strategy: a single entry that is either a trigger, a continuation,
     /// or a foreign entry. The variant is encoded as a u8 tag.
-    fn arb_entry(our_id: U256) -> impl Strategy<Value = CrossChainExecutionEntry> {
+    fn arb_entry(our_id: RollupId) -> impl Strategy<Value = CrossChainExecutionEntry> {
         (0u8..3, 0u8..=255u8).prop_map(move |(tag, addr_byte)| match tag {
             0 => mk_trigger_entry(our_id, Address::with_last_byte(addr_byte)),
             1 => mk_continuation_entry(our_id),
@@ -3274,9 +3278,9 @@ mod proptests_filtering {
         /// time — robust to duplicate entries.
         #[test]
         fn partition_entries_conserves_and_disjoint(
-            entries in prop_vec(arb_entry(U256::from(1)), 0..16),
+            entries in prop_vec(arb_entry(RollupId::new(U256::from(1))), 0..16),
         ) {
-            let our_id = U256::from(1);
+            let our_id = RollupId::new(U256::from(1));
             let (table, triggers) = partition_entries(&entries, our_id);
 
             // Conservation: every input ends up in exactly one bucket.

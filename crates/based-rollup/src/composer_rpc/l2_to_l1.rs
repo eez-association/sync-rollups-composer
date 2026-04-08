@@ -19,7 +19,7 @@
 //! The proxy listens on a configurable port (default: disabled) and forwards
 //! to `127.0.0.1:{reth_rpc_port}` (default: 8545).
 
-use crate::cross_chain::filter_new_by_count;
+use crate::cross_chain::{RollupId, filter_new_by_count};
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolCall;
 use http_body_util::{BodyExt, Full};
@@ -1789,7 +1789,7 @@ async fn simulate_l1_delivery(
             );
             let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
                 &analyzed,
-                alloy_primitives::U256::from(rollup_id),
+                crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                 rlp_encoded_tx,
                 false, // tx_reverts
             );
@@ -2638,7 +2638,7 @@ async fn simulate_l1_combined_delivery(
                 );
                 let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
                     &analyzed,
-                    alloy_primitives::U256::from(rollup_id),
+                    crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                     rlp_encoded_tx,
                     false, // tx_reverts
                 );
@@ -4348,7 +4348,7 @@ async fn trace_and_detect_l2_internal_calls(
         if !analyzed.is_empty() {
             let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
                 &analyzed,
-                U256::from(rollup_id),
+                crate::cross_chain::RollupId::new(U256::from(rollup_id)),
                 &tx_bytes,
                 tx_reverts,
             );
@@ -5339,13 +5339,13 @@ async fn simulate_l2_return_call_delivery(
         // Build the executeIncomingCrossChainCall calldata using the return call's info.
         let incoming_action = crate::cross_chain::CrossChainAction {
             action_type: crate::cross_chain::CrossChainActionType::Call,
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             destination: rc.destination,
             value: rc.value,
             data: rc.data.clone(),
             failed: false,
             source_address: rc.source_address,
-            source_rollup: U256::ZERO, // L1 (MAINNET_ROLLUP_ID)
+            source_rollup: RollupId::MAINNET, // L1 (MAINNET_ROLLUP_ID)
             scope: rc.scope.clone(),
         };
         let exec_calldata =

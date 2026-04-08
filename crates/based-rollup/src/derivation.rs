@@ -463,7 +463,7 @@ impl DerivationPipeline {
             };
 
             let mut effective_state_root = batch_final_state_root;
-            let rollup_id_u256 = U256::from(self.config.rollup_id);
+            let our_rollup_id = crate::cross_chain::RollupId::new(U256::from(self.config.rollup_id));
             for entry in &deferred_entries {
                 // Skip REVERT group entries — their deltas are consumed-and-reverted
                 // on L1, should not advance effective_state_root.
@@ -472,7 +472,7 @@ impl DerivationPipeline {
                 }
                 for delta in &entry.state_deltas {
                     if delta.current_state == effective_state_root
-                        && delta.rollup_id == rollup_id_u256
+                        && delta.rollup_id == our_rollup_id
                     {
                         effective_state_root = delta.new_state;
                     }

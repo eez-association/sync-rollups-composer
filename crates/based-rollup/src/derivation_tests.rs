@@ -740,7 +740,7 @@ fn test_derivation_effective_state_root_with_consumed_deltas() {
     use alloy_primitives::Address;
 
     let rollup_id = 1u64;
-    let rollup_id_u256 = U256::from(rollup_id);
+    let rollup_id_u256 = crate::cross_chain::RollupId::new(U256::from(rollup_id));
 
     // Intermediate roots: Y → X₁ → X₂ → X
     let y = B256::with_last_byte(0x10);
@@ -758,7 +758,7 @@ fn test_derivation_effective_state_root_with_consumed_deltas() {
             vec![id],
             U256::ZERO,
             Address::with_last_byte(0xA0 + id),
-            U256::from(2),
+            crate::cross_chain::RollupId::new(U256::from(2)),
             true,
             vec![id],
         )

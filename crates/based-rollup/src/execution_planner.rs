@@ -7,7 +7,7 @@
 use crate::config::RollupConfig;
 use crate::cross_chain::{
     CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    ICrossChainManagerL2,
+    ICrossChainManagerL2, RollupId,
 };
 use crate::evm_config::RollupEvmConfig;
 use crate::rpc::{SimulationResult, entry_to_serializable};
@@ -132,7 +132,7 @@ where
     // Build the execution entry
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(config.rollup_id),
+            rollup_id: RollupId::new(U256::from(config.rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
@@ -140,13 +140,13 @@ where
         action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(config.rollup_id),
+            rollup_id: RollupId::new(U256::from(config.rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: return_data.to_vec(),
             failed: !success,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     };
@@ -276,7 +276,7 @@ pub fn build_entries_for_block(
 
     vec![CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
@@ -284,13 +284,13 @@ pub fn build_entries_for_block(
         action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     }]
@@ -315,7 +315,7 @@ pub fn build_entries_from_encoded(
 
     vec![CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
@@ -323,13 +323,13 @@ pub fn build_entries_from_encoded(
         action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     }]
@@ -357,7 +357,7 @@ pub fn build_state_only_entry(
     // (see postBatch line 217: `if (entries[i].actionHash == bytes32(0))`)
     vec![CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
@@ -365,13 +365,13 @@ pub fn build_state_only_entry(
         action_hash: B256::ZERO,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
+            source_rollup: RollupId::MAINNET,
             scope: vec![],
         },
     }]

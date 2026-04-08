@@ -580,7 +580,7 @@ where
             ));
         }
 
-        let rollup_id = U256::from(self.config.rollup_id);
+        let rollup_id = crate::cross_chain::RollupId::new(U256::from(self.config.rollup_id));
 
         // Simulate the call against current L2 state to capture the actual
         // return data. CrossChainManagerL2._processCallAtScope() builds a
@@ -638,7 +638,7 @@ where
             params.data.to_vec(),
             params.value,
             params.source_address,
-            params.source_rollup,
+            crate::cross_chain::RollupId::from_abi_boundary(params.source_rollup),
             call_success,
             return_data,
         );
@@ -851,7 +851,7 @@ where
             ));
         }
 
-        let rollup_id = U256::from(self.config.rollup_id);
+        let rollup_id = crate::cross_chain::RollupId::new(U256::from(self.config.rollup_id));
 
         // Convert RPC params to L1DetectedCall structs
         let l1_calls: Vec<L1DetectedCall> = params
@@ -927,7 +927,7 @@ where
             first_call.data.to_vec(),
             first_call.value,
             first_call.source_address,
-            U256::ZERO, // source_rollup = MAINNET
+            crate::cross_chain::RollupId::MAINNET, // source_rollup = MAINNET
             call_success,
             return_data,
         );
@@ -1001,7 +1001,7 @@ where
             ));
         }
 
-        let rollup_id = U256::from(self.config.rollup_id);
+        let rollup_id = crate::cross_chain::RollupId::new(U256::from(self.config.rollup_id));
 
         // Convert RPC params to table_builder types.
         let l2_calls: Vec<L2DetectedCall> = params
@@ -1245,7 +1245,7 @@ pub fn entry_to_serializable(entry: &CrossChainExecutionEntry) -> SerializableEx
             .state_deltas
             .iter()
             .map(|d| SerializableStateDelta {
-                rollup_id: d.rollup_id,
+                rollup_id: d.rollup_id.as_u256(),
                 current_state: d.current_state,
                 new_state: d.new_state,
                 ether_delta: d.ether_delta,
@@ -1265,13 +1265,13 @@ fn action_to_serializable(action: &CrossChainAction) -> SerializableAction {
             CrossChainActionType::Revert => "REVERT".to_string(),
             CrossChainActionType::RevertContinue => "REVERT_CONTINUE".to_string(),
         },
-        rollup_id: action.rollup_id,
+        rollup_id: action.rollup_id.as_u256(),
         destination: action.destination,
         value: action.value,
         data: Bytes::from(action.data.clone()),
         failed: action.failed,
         source_address: action.source_address,
-        source_rollup: action.source_rollup,
+        source_rollup: action.source_rollup.as_u256(),
         scope: action.scope.clone(),
     }
 }

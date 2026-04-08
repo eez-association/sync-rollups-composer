@@ -1589,7 +1589,9 @@ where
             // entry deltas. All entry types (deposits, L2→L1 calls, continuations)
             // are handled in a single root chain via trigger group counting.
             let has_rpc_entries = !rpc_entries_for_block.is_empty();
-            let our_rollup_id = alloy_primitives::U256::from(self.config.rollup_id);
+            let our_rollup_id = crate::cross_chain::RollupId::new(alloy_primitives::U256::from(
+                self.config.rollup_id,
+            ));
             let num_protocol_triggers = rpc_entries_for_block
                 .iter()
                 .filter(|e| {
@@ -2281,7 +2283,9 @@ where
                                 // by matching the REVERT_CONTINUE action hash.
                                 let revert_continue_hash =
                                     crate::cross_chain::compute_revert_continue_hash(
-                                        alloy_primitives::U256::from(self.config.rollup_id),
+                                        crate::cross_chain::RollupId::new(
+                                            alloy_primitives::U256::from(self.config.rollup_id),
+                                        ),
                                     );
 
                                 let mut entry_counts: std::collections::HashMap<B256, usize> =
@@ -4071,7 +4075,9 @@ where
 
         // loadExecutionTable + executeIncomingCrossChainCall (if cross-chain entries)
         if !execution_entries.is_empty() && !self.config.cross_chain_manager_address.is_zero() {
-            let our_rollup_id = alloy_primitives::U256::from(self.config.rollup_id);
+            let our_rollup_id = cross_chain::RollupId::new(alloy_primitives::U256::from(
+                self.config.rollup_id,
+            ));
             let (table_entries, mut trigger_entries) =
                 cross_chain::partition_entries(execution_entries, our_rollup_id);
 

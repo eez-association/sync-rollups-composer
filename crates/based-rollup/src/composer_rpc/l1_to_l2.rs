@@ -15,7 +15,7 @@
 //!
 //! Users point MetaMask at this proxy for transparent synchronous composability.
 
-use crate::cross_chain::filter_new_by_count;
+use crate::cross_chain::{RollupId, filter_new_by_count};
 use alloy_primitives::{Address, U256};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes as HyperBytes;
@@ -815,13 +815,13 @@ async fn simulate_l1_to_l2_call_on_l2(
     // Scope reflects the nesting depth on L1 (symmetric with L2→L1 rule).
     let sim_action = crate::cross_chain::CrossChainAction {
         action_type: crate::cross_chain::CrossChainActionType::Call,
-        rollup_id: U256::from(rollup_id),
+        rollup_id: RollupId::new(U256::from(rollup_id)),
         destination,
         value,
         data: data.to_vec(),
         failed: false,
         source_address,
-        source_rollup: U256::ZERO, // L1 = rollup 0
+        source_rollup: RollupId::MAINNET, // L1 = rollup 0
         scope: l2_scope.to_vec(),
     };
     let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
@@ -994,13 +994,13 @@ async fn simulate_l1_to_l2_call_on_l2(
     // Build RESULT entry with the real return data from Run 1
     let result_action = crate::cross_chain::CrossChainAction {
         action_type: crate::cross_chain::CrossChainActionType::Result,
-        rollup_id: U256::from(rollup_id),
+        rollup_id: RollupId::new(U256::from(rollup_id)),
         destination: Address::ZERO,
         value: U256::ZERO,
         data: inner_return_data.clone(),
         failed: !inner_success,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let result_hash = crate::table_builder::compute_action_hash(&result_action);
@@ -1180,13 +1180,13 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
     // Build the current call's exec calldata.
     let sim_action = crate::cross_chain::CrossChainAction {
         action_type: crate::cross_chain::CrossChainActionType::Call,
-        rollup_id: U256::from(rollup_id),
+        rollup_id: RollupId::new(U256::from(rollup_id)),
         destination,
         value,
         data: data.to_vec(),
         failed: false,
         source_address,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: l2_scope.to_vec(),
     };
     let exec_calldata = crate::cross_chain::encode_execute_incoming_call_calldata(&sim_action);
@@ -1195,13 +1195,13 @@ async fn simulate_l1_to_l2_call_chained_on_l2(
     // to fail, but the inner destination call still executes).
     let void_result = crate::cross_chain::CrossChainAction {
         action_type: crate::cross_chain::CrossChainActionType::Result,
-        rollup_id: U256::from(rollup_id),
+        rollup_id: RollupId::new(U256::from(rollup_id)),
         destination: Address::ZERO,
         value: U256::ZERO,
         data: vec![],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     };
     let void_hash = crate::table_builder::compute_action_hash(&void_result);
@@ -1967,12 +1967,12 @@ async fn build_and_run_l1_postbatch_trace(
             .iter()
             .flat_map(|c| {
                 let (call_entry, result_entry) = crate::cross_chain::build_cross_chain_call_entries(
-                    alloy_primitives::U256::from(rollup_id),
+                    crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                     c.destination,
                     c.data.clone(),
                     c.value,
                     c.source_address,
-                    alloy_primitives::U256::ZERO,
+                    crate::cross_chain::RollupId::MAINNET,
                     c.call_success,
                     c.l2_return_data.clone(),
                 );
@@ -1983,7 +1983,7 @@ async fn build_and_run_l1_postbatch_trace(
     } else {
         let cont = crate::table_builder::build_continuation_entries(
             &analyzed,
-            alloy_primitives::U256::from(rollup_id),
+            crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
         );
         tracing::info!(
             target: "based_rollup::l1_proxy",
@@ -2679,13 +2679,13 @@ async fn trace_and_detect_internal_calls(
             if !enrichment_has_partial_revert || !detected_calls[call_idx].in_reverted_frame {
                 let result_action = crate::cross_chain::CrossChainAction {
                     action_type: crate::cross_chain::CrossChainActionType::Result,
-                    rollup_id: U256::from(rollup_id),
+                    rollup_id: RollupId::new(U256::from(rollup_id)),
                     destination: Address::ZERO,
                     value: U256::ZERO,
                     data: final_ret_data,
                     failed: !final_success,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 };
                 let result_hash = crate::table_builder::compute_action_hash(&result_action);
@@ -2698,13 +2698,13 @@ async fn trace_and_detect_internal_calls(
                 // Build exec calldata for this call.
                 let sim_action = crate::cross_chain::CrossChainAction {
                     action_type: crate::cross_chain::CrossChainActionType::Call,
-                    rollup_id: U256::from(rollup_id),
+                    rollup_id: RollupId::new(U256::from(rollup_id)),
                     destination: call_destination,
                     value: call_value,
                     data: call_calldata,
                     failed: false,
                     source_address: call_source,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 };
                 let exec_cd =
@@ -3064,13 +3064,13 @@ async fn trace_and_detect_internal_calls(
                             }
                             let result_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Result,
-                                rollup_id: U256::from(rollup_id),
+                                rollup_id: RollupId::new(U256::from(rollup_id)),
                                 destination: Address::ZERO,
                                 value: U256::ZERO,
                                 data: prior.return_data.clone(),
                                 failed: !prior.call_success,
                                 source_address: Address::ZERO,
-                                source_rollup: U256::ZERO,
+                                source_rollup: RollupId::MAINNET,
                                 scope: vec![],
                             };
                             let result_hash =
@@ -3084,13 +3084,13 @@ async fn trace_and_detect_internal_calls(
                             );
                             let sim_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Call,
-                                rollup_id: U256::from(rollup_id),
+                                rollup_id: RollupId::new(U256::from(rollup_id)),
                                 destination: prior.destination,
                                 value: prior.value,
                                 data: prior.calldata.clone(),
                                 failed: false,
                                 source_address: prior.source_address,
-                                source_rollup: U256::ZERO,
+                                source_rollup: RollupId::MAINNET,
                                 scope: vec![],
                             };
                             let exec_cd = crate::cross_chain::encode_execute_incoming_call_calldata(
@@ -3169,13 +3169,13 @@ async fn trace_and_detect_internal_calls(
                             // Accumulate this call's RESULT for future chaining.
                             let result_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Result,
-                                rollup_id: U256::from(rollup_id),
+                                rollup_id: RollupId::new(U256::from(rollup_id)),
                                 destination: Address::ZERO,
                                 value: U256::ZERO,
                                 data: final_ret_data,
                                 failed: !final_success,
                                 source_address: Address::ZERO,
-                                source_rollup: U256::ZERO,
+                                source_rollup: RollupId::MAINNET,
                                 scope: vec![],
                             };
                             let result_hash =
@@ -3189,13 +3189,13 @@ async fn trace_and_detect_internal_calls(
                             );
                             let sim_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Call,
-                                rollup_id: U256::from(rollup_id),
+                                rollup_id: RollupId::new(U256::from(rollup_id)),
                                 destination: call.destination,
                                 value: call.value,
                                 data: call.calldata.clone(),
                                 failed: false,
                                 source_address: call.source_address,
-                                source_rollup: U256::ZERO,
+                                source_rollup: RollupId::MAINNET,
                                 scope: vec![],
                             };
                             let exec_cd = crate::cross_chain::encode_execute_incoming_call_calldata(
@@ -3798,7 +3798,7 @@ async fn trace_and_detect_internal_calls(
                             }
                             let cont = crate::table_builder::build_continuation_entries(
                                 &analyzed,
-                                alloy_primitives::U256::from(rollup_id),
+                                crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                             );
                             let mut l2_entries = cont.l2_entries;
                             for e in &mut l2_entries {
@@ -3853,7 +3853,7 @@ async fn trace_and_detect_internal_calls(
 
                             let sim_action = crate::cross_chain::CrossChainAction {
                                 action_type: crate::cross_chain::CrossChainActionType::Call,
-                                rollup_id: U256::from(rollup_id),
+                                rollup_id: RollupId::new(U256::from(rollup_id)),
                                 // Entry point for `executeIncomingCrossChainCall` — the
                                 // FIRST root call in non-reentrant patterns so the entry
                                 // chain executes cumulatively. BFS still extracts the
@@ -3864,7 +3864,7 @@ async fn trace_and_detect_internal_calls(
                                 data: call_calldata,
                                 failed: false,
                                 source_address: call_source,
-                                source_rollup: U256::ZERO,
+                                source_rollup: RollupId::MAINNET,
                                 scope: vec![],
                             };
                             let exec_calldata =

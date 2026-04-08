@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cross_chain::{
     CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    ICrossChainManagerL2,
+    ICrossChainManagerL2, RollupId,
 };
 
 /// Direction of a cross-chain call.
@@ -200,7 +200,7 @@ fn reorder_for_swap_and_pop(entries: &mut Vec<CrossChainExecutionEntry>) {
 ///
 /// Used as terminal entries in the execution table — signals that a call
 /// completed with no return data and no further continuation.
-fn result_void(rollup_id: U256) -> CrossChainAction {
+fn result_void(rollup_id: RollupId) -> CrossChainAction {
     // The `data` field must match what Solidity's `_processCallAtScope` builds.
     // `executeOnBehalf` uses assembly `return(add(result, 0x20), mload(result))`
     // which returns the RAW inner call result, NOT ABI-encoded `bytes memory`.
@@ -214,7 +214,7 @@ fn result_void(rollup_id: U256) -> CrossChainAction {
         data: vec![],
         failed: false,
         source_address: alloy_primitives::Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope: vec![],
     }
 }
@@ -263,7 +263,7 @@ fn result_void(rollup_id: U256) -> CrossChainAction {
 /// `ContinuationEntries` with L2 and L1 entries (state deltas are empty).
 pub fn build_continuation_entries(
     calls: &[DetectedCall],
-    our_rollup_id: U256,
+    our_rollup_id: RollupId,
 ) -> ContinuationEntries {
     if calls.is_empty() {
         return ContinuationEntries {
@@ -273,7 +273,7 @@ pub fn build_continuation_entries(
         };
     }
 
-    let mainnet_rollup_id = U256::ZERO;
+    let mainnet_rollup_id = RollupId::MAINNET;
     let l2_result_void = result_void(our_rollup_id);
     let l1_result_void = result_void(mainnet_rollup_id);
     let empty_deltas: Vec<CrossChainStateDelta> = vec![];
@@ -421,7 +421,7 @@ pub fn build_continuation_entries(
                         data: child.delivery_return_data.clone(),
                         failed: child.l2_delivery_failed,
                         source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
+                        source_rollup: RollupId::MAINNET,
                         scope: vec![],
                     }
                 };
@@ -457,7 +457,7 @@ pub fn build_continuation_entries(
                         data: current_call.l2_return_data.clone(),
                         failed: current_call.l2_delivery_failed,
                         source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
+                        source_rollup: RollupId::MAINNET,
                         scope: vec![],
                     }
                 } else {
@@ -490,7 +490,7 @@ pub fn build_continuation_entries(
                             data: vec![],
                             failed: false,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     } else {
@@ -502,7 +502,7 @@ pub fn build_continuation_entries(
                             data: child.delivery_return_data.clone(),
                             failed: child.l2_delivery_failed,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     }
@@ -554,7 +554,7 @@ pub fn build_continuation_entries(
                             data: child.delivery_return_data.clone(),
                             failed: child.l2_delivery_failed,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     };
@@ -576,7 +576,7 @@ pub fn build_continuation_entries(
                         data: current_call.l2_return_data.clone(),
                         failed: current_call.l2_delivery_failed,
                         source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
+                        source_rollup: RollupId::MAINNET,
                         scope: vec![],
                     }
                 } else {
@@ -780,7 +780,7 @@ pub fn build_continuation_entries(
                             data: detected.l2_return_data.clone(),
                             failed: detected.l2_delivery_failed,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     } else {
@@ -832,7 +832,7 @@ pub fn build_continuation_entries(
                             data: child.delivery_return_data.clone(),
                             failed: child.l2_delivery_failed,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     } else {
@@ -850,7 +850,7 @@ pub fn build_continuation_entries(
                             data: detected.l2_return_data.clone(),
                             failed: detected.l2_delivery_failed,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     } else {
@@ -899,7 +899,7 @@ pub fn build_continuation_entries(
                             data: detected.l2_return_data.clone(),
                             failed: detected.l2_delivery_failed,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     } else {
@@ -936,7 +936,7 @@ pub fn build_continuation_entries(
                                 data: child.delivery_return_data.clone(),
                                 failed: child.l2_delivery_failed,
                                 source_address: Address::ZERO,
-                                source_rollup: U256::ZERO,
+                                source_rollup: RollupId::MAINNET,
                                 scope: vec![],
                             }
                         } else {
@@ -954,7 +954,7 @@ pub fn build_continuation_entries(
                                 data: detected.l2_return_data.clone(),
                                 failed: detected.l2_delivery_failed,
                                 source_address: Address::ZERO,
-                                source_rollup: U256::ZERO,
+                                source_rollup: RollupId::MAINNET,
                                 scope: vec![],
                             }
                         } else {
@@ -1056,8 +1056,8 @@ pub fn analyze_continuation_calls(
     calls: &[L1DetectedCall],
     our_rollup_id: u64,
 ) -> Vec<DetectedCall> {
-    let our_rollup = U256::from(our_rollup_id);
-    let mainnet_rollup = U256::ZERO;
+    let our_rollup = RollupId::new(U256::from(our_rollup_id));
+    let mainnet_rollup = RollupId::MAINNET;
 
     // Count L1→L2 calls (for is_continuation tracking).
     let mut l1_to_l2_count = 0usize;
@@ -1223,8 +1223,8 @@ pub fn analyze_l2_to_l1_continuation_calls(
     return_calls: &[L2ReturnCall],
     our_rollup_id: u64,
 ) -> Vec<DetectedCall> {
-    let our_rollup = U256::from(our_rollup_id);
-    let mainnet_rollup = U256::ZERO;
+    let our_rollup = RollupId::new(U256::from(our_rollup_id));
+    let mainnet_rollup = RollupId::MAINNET;
 
     if l2_calls.is_empty() {
         return vec![];
@@ -1363,7 +1363,7 @@ fn find_children(detected: &[DetectedCall], parent_idx: usize) -> Vec<(usize, &D
 fn push_reentrant_child_entries(
     children: &[(usize, &DetectedCall)],
     detected: &[DetectedCall],
-    our_rollup_id: U256,
+    our_rollup_id: RollupId,
     parent_idx: usize,
     empty_deltas: &[CrossChainStateDelta],
     l1_result_void: &CrossChainAction,
@@ -1408,7 +1408,7 @@ fn push_reentrant_child_entries(
             data: child.call_action.data.clone(),
             failed: false,
             source_address: trigger_source,
-            source_rollup: U256::ZERO, // L1
+            source_rollup: RollupId::MAINNET, // L1
             scope: vec![],
         };
         let child_trigger_hash = compute_action_hash(&child_trigger);
@@ -1435,7 +1435,7 @@ fn push_reentrant_child_entries(
             let leaf_result_rollup = if is_return_call {
                 our_rollup_id
             } else {
-                U256::ZERO
+                RollupId::MAINNET
             };
             let leaf_next = if child_return_data.is_empty() && !child_failed {
                 result_void(leaf_result_rollup)
@@ -1448,7 +1448,7 @@ fn push_reentrant_child_entries(
                     data: child_return_data.clone(),
                     failed: child_failed,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
@@ -1475,7 +1475,7 @@ fn push_reentrant_child_entries(
             };
             let execution = CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::ZERO, // L1, where the call executes
+                rollup_id: RollupId::MAINNET, // L1, where the call executes
                 destination: child.call_action.destination, // L1 target
                 value: child.call_action.value,
                 data: child.call_action.data.clone(),
@@ -1527,7 +1527,7 @@ fn push_reentrant_child_entries(
             let child_result_rollup = if is_return_call {
                 our_rollup_id
             } else {
-                U256::ZERO
+                RollupId::MAINNET
             };
             let child_scope_result = if child_scope_data.is_empty() && !child_scope_failed {
                 result_void(child_result_rollup)
@@ -1540,7 +1540,7 @@ fn push_reentrant_child_entries(
                     data: child_scope_data.clone(),
                     failed: child_scope_failed,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
@@ -1611,7 +1611,7 @@ fn push_reentrant_child_entries(
 /// * `rlp_encoded_tx` - RLP-encoded L2 transaction for the L2TX trigger on L1
 pub fn build_l2_to_l1_continuation_entries(
     detected: &[DetectedCall],
-    our_rollup_id: U256,
+    our_rollup_id: RollupId,
     rlp_encoded_tx: &[u8],
     tx_reverts: bool,
 ) -> L2ToL1ContinuationEntries {
@@ -1622,7 +1622,7 @@ pub fn build_l2_to_l1_continuation_entries(
         };
     }
 
-    let mainnet_rollup_id = U256::ZERO;
+    let mainnet_rollup_id = RollupId::MAINNET;
     let l1_result_void = result_void(mainnet_rollup_id);
     let empty_deltas: Vec<CrossChainStateDelta> = vec![];
 
@@ -1692,7 +1692,7 @@ pub fn build_l2_to_l1_continuation_entries(
         call_orig_idx: usize,
         call: &DetectedCall,
         detected: &[DetectedCall],
-        our_rollup_id: U256,
+        our_rollup_id: RollupId,
         l2_result_void: &CrossChainAction,
         l1_result_void: &CrossChainAction,
         empty_deltas: &[CrossChainStateDelta],
@@ -1763,7 +1763,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 data: first_child.call_action.data.clone(),
                 failed: false,
                 source_address: cr_source,
-                source_rollup: U256::ZERO, // MAINNET
+                source_rollup: RollupId::MAINNET, // MAINNET
                 scope: first_child_scope,
             };
 
@@ -1815,7 +1815,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     data: child.call_action.data.clone(),
                     failed: false,
                     source_address: ccr_source,
-                    source_rollup: U256::ZERO, // MAINNET
+                    source_rollup: RollupId::MAINNET, // MAINNET
                     scope: sibling_scope,
                 };
 
@@ -1849,7 +1849,7 @@ pub fn build_l2_to_l1_continuation_entries(
                             data: prev_child.l2_return_data.clone(),
                             failed: prev_child.l2_delivery_failed,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
+                            source_rollup: RollupId::MAINNET,
                             scope: vec![],
                         }
                     };
@@ -1886,7 +1886,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     data: first_child_l2_data.clone(),
                     failed: last_child_l2_failed,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
@@ -1908,13 +1908,13 @@ pub fn build_l2_to_l1_continuation_entries(
                 } else {
                     CrossChainAction {
                         action_type: CrossChainActionType::Result,
-                        rollup_id: U256::ZERO,
+                        rollup_id: RollupId::MAINNET,
                         destination: Address::ZERO,
                         value: U256::ZERO,
                         data: call.delivery_return_data.clone(),
                         failed: call.l2_delivery_failed,
                         source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
+                        source_rollup: RollupId::MAINNET,
                         scope: vec![],
                     }
                 };
@@ -1951,13 +1951,13 @@ pub fn build_l2_to_l1_continuation_entries(
             } else {
                 CrossChainAction {
                     action_type: CrossChainActionType::Result,
-                    rollup_id: U256::ZERO,
+                    rollup_id: RollupId::MAINNET,
                     destination: Address::ZERO,
                     value: U256::ZERO,
                     data: call.delivery_return_data.clone(),
                     failed: call.l2_delivery_failed,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
@@ -2062,7 +2062,7 @@ pub fn build_l2_to_l1_continuation_entries(
 
         let delivery = CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::ZERO,
+            rollup_id: RollupId::MAINNET,
             destination: l2_call.call_action.destination,
             value: l2_call.call_action.value,
             data: l2_call.call_action.data.clone(),
@@ -2082,17 +2082,17 @@ pub fn build_l2_to_l1_continuation_entries(
         // Compute delivery RESULT for this call (used as trigger for next call).
         let delivery_result =
             if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
-                result_void(U256::ZERO)
+                result_void(RollupId::MAINNET)
             } else {
                 CrossChainAction {
                     action_type: CrossChainActionType::Result,
-                    rollup_id: U256::ZERO,
+                    rollup_id: RollupId::MAINNET,
                     destination: Address::ZERO,
                     value: U256::ZERO,
                     data: l2_call.delivery_return_data.clone(),
                     failed: l2_call.l2_delivery_failed,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
@@ -2108,7 +2108,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 data: rlp_encoded_tx.to_vec(),
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
+                source_rollup: RollupId::MAINNET,
                 scope: vec![],
             };
             let trigger_hash = compute_action_hash(&trigger);
@@ -2156,7 +2156,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 };
                 CrossChainAction {
                     action_type: CrossChainActionType::Call,
-                    rollup_id: U256::ZERO,
+                    rollup_id: RollupId::MAINNET,
                     destination: next_call.call_action.destination,
                     value: next_call.call_action.value,
                     data: next_call.call_action.data.clone(),
@@ -2175,7 +2175,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     data: vec![],
                     failed: false,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
@@ -2211,17 +2211,17 @@ pub fn build_l2_to_l1_continuation_entries(
             // Scope resolution entry for this call (same pattern as delivery RESULT).
             let scope_result =
                 if l2_call.delivery_return_data.is_empty() && !l2_call.l2_delivery_failed {
-                    result_void(U256::ZERO)
+                    result_void(RollupId::MAINNET)
                 } else {
                     CrossChainAction {
                         action_type: CrossChainActionType::Result,
-                        rollup_id: U256::ZERO,
+                        rollup_id: RollupId::MAINNET,
                         destination: Address::ZERO,
                         value: U256::ZERO,
                         data: l2_call.delivery_return_data.clone(),
                         failed: l2_call.l2_delivery_failed,
                         source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
+                        source_rollup: RollupId::MAINNET,
                         scope: vec![],
                     }
                 };
@@ -2245,7 +2245,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 };
                 CrossChainAction {
                     action_type: CrossChainActionType::Call,
-                    rollup_id: U256::ZERO,
+                    rollup_id: RollupId::MAINNET,
                     destination: next_call.call_action.destination,
                     value: next_call.call_action.value,
                     data: next_call.call_action.data.clone(),
@@ -2264,7 +2264,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     data: vec![],
                     failed: false,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
@@ -2293,7 +2293,7 @@ pub fn build_l2_to_l1_continuation_entries(
                 };
                 CrossChainAction {
                     action_type: CrossChainActionType::Call,
-                    rollup_id: U256::ZERO,
+                    rollup_id: RollupId::MAINNET,
                     destination: next_call.call_action.destination,
                     value: next_call.call_action.value,
                     data: next_call.call_action.data.clone(),
@@ -2312,7 +2312,7 @@ pub fn build_l2_to_l1_continuation_entries(
                     data: vec![],
                     failed: false,
                     source_address: Address::ZERO,
-                    source_rollup: U256::ZERO,
+                    source_rollup: RollupId::MAINNET,
                     scope: vec![],
                 }
             };
