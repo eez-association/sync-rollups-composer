@@ -169,6 +169,7 @@ Path: user → composer RPC → driver queue → confirmation → forward upstre
 - **`docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md`** — formal spec extracted from Solidity. NOT modified.
 - **`CLAUDE.md > Lessons Learned — Hard-Won Rules`** — ~50 critical rules. The refactor encodes them in the type system (see `INVARIANT_MAP.md`).
 - **`contracts/sync-rollups-protocol/`** — Solidity submodule. NOT modified.
+- **`contracts/sync-rollups-protocol/script/e2e/`** — protocol-side E2E suite (21 scenarios) used by PLAN step 0.8 as the baseline source. Each scenario has `Deploy*`, `ExecuteNetwork[L2]`, and `ComputeExpected` Solidity scripts; `script/e2e/shared/run-network.sh` drives them against the running devnet-eez. The `EXPECTED_L1_HASHES` / `EXPECTED_L2_HASHES` / `EXPECTED_L2_CALL_HASHES` outputs are the canonical "what the composer must produce" specification — they are deterministic across runs because they are computed from the action structures by the protocol Solidity. See `contracts/sync-rollups-protocol/script/e2e/README.md` for the complete catalog and the verification semantics.
 
 ## 6. Relationship with the PLAN
 
