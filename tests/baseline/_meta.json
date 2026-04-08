@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-04-08T09:05:41Z",
+  "repo_sha": "d3dc8ae00a8b4569b73ea1e60948bfe451b83905",
+  "submodule_sha": "5d4cfe88f2a94950d7bdd34b61c72ddab0ba3836",
+  "l1_rpc": "http://localhost:18545",
+  "l2_rpc": "http://localhost:18546",
+  "rollups_address": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "manager_l2_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "l2_rollup_id": 1,
+  "scenarios_total": 10,
+  "scenarios_captured": 10,
+  "scenarios_failed": 0
+}

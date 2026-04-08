@@ -1,0 +1,24 @@
+{
+  "scenario": "flash-loan",
+  "schema_version": 1,
+  "expected": {
+    "l1_hashes": [
+      "0xe73a34ae73b9a73671a359b1217607e2c98cc8659dde785b459ba6a4ca616510",
+      "0x13e857c8098adbe32e26e13d1caf2652a282dce6b4a012a9559cd9fd96b0fa46",
+      "0x5df10216867e32cf12a60f62c3156f7f154564d086a23325600c18b111efbdb3"
+    ],
+    "l2_hashes": [
+      "0x6373ee6abf0584e755970395eedeebf2c6dd4aecd30b71984ba8af5f86b9f3f3",
+      "0xae11e1d94f89b47eb9701448f24aac0af59d206a3b788a2bbbb22ff1b7a3e0df",
+      "0x11d52fac1a4eaa64fbaddc13ad4c5744d9986bc15b80c8ca29340e695d3e1c5e"
+    ],
+    "l2_call_hashes": [
+      "0x71ebedfc850a002516f45480ae26aee0c4845cb9fa96c1f66e887d1291fe8259"
+    ]
+  },
+  "user_tx": {
+    "target": "0x3Aa5ebB10DC797CAC828524e59A333d0A371443c",
+    "value": "0",
+    "calldata": "0x61461954"
+  }
+}

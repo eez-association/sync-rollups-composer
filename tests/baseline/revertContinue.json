@@ -1,0 +1,23 @@
+{
+  "scenario": "revertContinue",
+  "schema_version": 1,
+  "expected": {
+    "l1_hashes": [
+      "0x487cf1f8a560e9fc537309a4032db54219151075e34b1ce8794857f61d28e73e",
+      "0xd2f64740c50f9956e8f18ee185b8fce90edb8d63cc6bdaeef79a827e6209a54c"
+    ],
+    "l2_hashes": [
+      "0x5706f83407f82d6774134aa10314ba8b304cd891aae89389a16a5066d653a2e7",
+      "0x5144f86eefe70efec372e23b9a2e976cd7f19f0a0f6cea737bb045a3bcdd5efa",
+      "0x87b2ebac37ea1c5980a82ee7ddfad59d2ada67b77e183f81f1bc7feb0f12cba2"
+    ],
+    "l2_call_hashes": [
+      "0x56ca4038f085621b189207145f04283b579b39ac0e0ee59ca93f65d214adf7f4"
+    ]
+  },
+  "user_tx": {
+    "target": "0x7a2088a1bFc9d81c55368AE168C2C02570cB814F",
+    "value": "0",
+    "calldata": "0x61461954"
+  }
+}
