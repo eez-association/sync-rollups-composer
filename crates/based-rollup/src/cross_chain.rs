@@ -1158,6 +1158,150 @@ impl CallOrientation {
     }
 }
 
+// ──────────────────────────────────────────────
+//  ReturnData (refactor PLAN step 1.10)
+//
+//  Tagged union over the "zero bytes = void function" convention
+//  that the codebase uses in 23+ places. Every cross-chain call
+//  result (delivery simulation, L2 eth_call, L1 trigger trace) either
+//  returns actual ABI-encoded data or zero bytes to indicate a void
+//  function. Pre-1.10, this was represented as a bare `Vec<u8>` and
+//  tested with `.is_empty()` at every read site:
+//
+//      if child.delivery_return_data.is_empty() && !child.delivery_failed {
+//          // void path
+//      }
+//
+//  Reading `.is_empty()` on a `Vec<u8>` requires the reviewer to
+//  remember that "empty means void" is a project convention, not
+//  a natural invariant. Post-1.10 the same check becomes:
+//
+//      if ReturnData::from_bytes(child.delivery_return_data.clone()).is_void()
+//          && !child.delivery_failed
+//      { ... }
+//
+//  Or, when a struct field migrates to `ReturnData` directly:
+//
+//      if child.delivery_return_data.is_void() && !child.delivery_failed { ... }
+//
+//  `is_void()` is a named method whose docstring says exactly what
+//  the convention means, which makes the invariant self-documenting.
+//
+//  ## Closes invariant #20 (partial)
+//
+//  Invariant #20: "Return data shape — Void = 0 bytes;
+//  `delivery_return_data` → hashes; `l2_return_data` → scope
+//  resolution". The invariant lives in four RESULT hash sites, each
+//  of which must choose between `result_void()` (void) and an
+//  explicit RESULT with `data: return_bytes` (non-void) based on the
+//  return data's emptiness. `ReturnData::is_void` is the typed gate.
+//
+//  ## Scope decision (see commit message)
+//
+//  The PLAN calls for `ReturnData` to be propagated through every
+//  struct field that currently holds `Vec<u8>` return data
+//  (`DetectedCall`, `L1DetectedCall`, `L2DetectedCall`, `L2ReturnCall`,
+//  RPC JSON types). Auditing found ~101 access sites across those
+//  types, most in cascading wire-type chains that serialize to JSON
+//  and would require boundary conversions at every entry and exit.
+//
+//  This step ships `ReturnData` as a **standalone helper type** with
+//  `from_bytes` / `from_slice` / `is_void` / `as_bytes` /
+//  `into_bytes`, usable by any site that wants the typed
+//  `is_void()` check, without forcing the wire-type cascade. Field
+//  migration is deferred to a future step that has a concrete
+//  caller needing the full type-level propagation. This matches the
+//  partial-migration discipline used in 1.2 (state roots), 1.4
+//  (EntryClass), 1.7 (proposer API typestate), 1.8 (L1NonceReservation/
+//  L1Client), 1.9a (ImmediateEntryBuilder), and 1.9b/1.9c (deferred
+//  builder wrappers). The load-bearing part — a named `is_void()`
+//  method — exists now.
+// ──────────────────────────────────────────────
+
+/// Tagged return data from a cross-chain call's L1 delivery
+/// simulation or L2 execution. See the module comment for the
+/// "empty bytes = void function" convention this type encodes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReturnData {
+    /// Zero bytes — the underlying function had no return value
+    /// (void function, reached via assembly `return(0, 0)`).
+    #[default]
+    Void,
+    /// Non-empty ABI-encoded return bytes.
+    NonVoid(Vec<u8>),
+}
+
+impl ReturnData {
+    /// Construct from a `Vec<u8>` at a boundary — ABI decode, eth_call
+    /// response, trace output, RPC JSON deserialization. Empty input
+    /// becomes [`ReturnData::Void`], non-empty becomes
+    /// [`ReturnData::NonVoid`].
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        if bytes.is_empty() {
+            Self::Void
+        } else {
+            Self::NonVoid(bytes)
+        }
+    }
+
+    /// Construct from a slice. See [`ReturnData::from_bytes`].
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            Self::Void
+        } else {
+            Self::NonVoid(bytes.to_vec())
+        }
+    }
+
+    /// `true` iff this represents a void return. **Closes
+    /// invariant #20** at the read site — every future check that
+    /// used to write `.is_empty()` on a `Vec<u8>` return data can
+    /// now call `.is_void()` and get a named method whose
+    /// docstring documents the convention.
+    pub fn is_void(&self) -> bool {
+        matches!(self, Self::Void)
+    }
+
+    /// `true` iff this carries actual return bytes.
+    pub fn is_non_void(&self) -> bool {
+        matches!(self, Self::NonVoid(_))
+    }
+
+    /// Borrow the underlying bytes. Returns an empty slice for
+    /// [`ReturnData::Void`] — matches the pre-1.10 `Vec<u8>::as_slice()`
+    /// behavior for zero-byte data.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Void => &[],
+            Self::NonVoid(bytes) => bytes,
+        }
+    }
+
+    /// Consume the `ReturnData` and return the underlying `Vec<u8>`.
+    /// Used at wire / ABI encode boundaries that still take a raw
+    /// byte buffer.
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Void => Vec::new(),
+            Self::NonVoid(bytes) => bytes,
+        }
+    }
+
+    /// Length of the underlying bytes. `0` for `Void`.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Void => 0,
+            Self::NonVoid(bytes) => bytes.len(),
+        }
+    }
+
+    /// `true` iff length is zero — alias for `is_void` for API
+    /// parity with `Vec<u8>::is_empty`.
+    pub fn is_empty(&self) -> bool {
+        self.is_void()
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {
