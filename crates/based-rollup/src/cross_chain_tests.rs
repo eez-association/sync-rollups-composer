@@ -2265,7 +2265,7 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         return_data.clone(),
         false,
         vec![], // l1_delivery_scope: empty for tests (no deep nesting)
-        false,  // tx_reverts
+        crate::cross_chain::TxOutcome::Success,  // tx_reverts
     );
 
     // L2 table entry 0: CALL entry, nextAction = RESULT with delivery return data.
@@ -2330,7 +2330,7 @@ fn test_build_withdrawal_entries_still_void() {
         vec![],     // delivery_return_data: EOA recipient
         false,      // delivery_failed
         vec![],     // l1_delivery_scope
-        false,      // tx_reverts
+        crate::cross_chain::TxOutcome::Success,      // tx_reverts
     );
 
     // L2 RESULT entries should have empty data (EOA target, no return data).
@@ -2371,7 +2371,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         vec![],
         false,
         vec![], // l1_delivery_scope
-        false,  // tx_reverts
+        crate::cross_chain::TxOutcome::Success,  // tx_reverts
     );
 
     // Build entries with non-empty return data.
@@ -2386,7 +2386,7 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         return_data,
         false,
         vec![], // l1_delivery_scope
-        false,  // tx_reverts
+        crate::cross_chain::TxOutcome::Success,  // tx_reverts
     );
 
     // The CALL entry hash should be the same (same CALL action regardless of return data).
@@ -2426,7 +2426,7 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
         return_data.clone(),
         false,
         deep_scope.clone(),
-        false, // tx_reverts
+        crate::cross_chain::TxOutcome::Success, // tx_reverts
     );
 
     // Build with empty scope (direct call)
@@ -2440,7 +2440,7 @@ fn test_build_l2_to_l1_call_entries_deep_scope() {
         return_data.clone(),
         false,
         vec![],
-        false, // tx_reverts
+        crate::cross_chain::TxOutcome::Success, // tx_reverts
     );
 
     // L1 entry 0 nextAction (delivery CALL) must carry the deep scope.
@@ -2630,7 +2630,7 @@ fn test_build_l2_to_l1_call_entries_tx_reverts() {
         return_data.clone(),
         false, // delivery succeeded
         delivery_scope.clone(),
-        true, // tx_reverts!
+        crate::cross_chain::TxOutcome::Revert, // tx_outcome
     );
 
     // L2 entries: UNCHANGED — still 2 entries (CALL→RESULT pair)
@@ -2735,7 +2735,7 @@ fn test_build_l2_to_l1_call_entries_no_revert_unchanged() {
         vec![],
         false,
         vec![],
-        false, // tx_reverts=false
+        crate::cross_chain::TxOutcome::Success, // tx_reverts=false
     );
     assert_eq!(
         entries_normal.l1_deferred_entries.len(),
@@ -2765,7 +2765,7 @@ fn test_build_l2_to_l1_call_entries_revert_with_eth_value() {
         vec![],
         false,
         vec![],
-        true, // tx_reverts
+        crate::cross_chain::TxOutcome::Revert, // tx_outcome
     );
 
     assert_eq!(entries.l1_deferred_entries.len(), 3);

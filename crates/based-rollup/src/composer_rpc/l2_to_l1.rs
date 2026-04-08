@@ -411,7 +411,7 @@ async fn queue_l2_to_l1_multi_call_entries(
     detected_l2_calls: &[DetectedL2InternalCall],
     return_calls: &[DetectedReturnCall],
     _rollup_id: u64,
-    tx_reverts: bool,
+    tx_outcome: crate::cross_chain::TxOutcome,
 ) -> Option<()> {
     if detected_l2_calls.is_empty() {
         return None;
@@ -502,7 +502,7 @@ async fn queue_l2_to_l1_multi_call_entries(
             "returnCalls": rpc_return_calls,
             "gasPrice": 0,
             "rawL2Tx": raw_tx_hex,
-            "txReverts": tx_reverts
+            "txReverts": tx_outcome
         }],
         "id": 99992
     });
@@ -527,7 +527,7 @@ async fn queue_l2_to_l1_multi_call_entries(
                         first.value,
                         first.source_address,
                         first.trace_depth,
-                        tx_reverts,
+                        tx_outcome,
                     )
                     .await;
                 }
@@ -574,7 +574,7 @@ async fn queue_l2_to_l1_multi_call_entries(
         first.value,
         first.source_address,
         first.trace_depth,
-        tx_reverts,
+        tx_outcome,
     )
     .await
 }
@@ -590,7 +590,7 @@ async fn queue_l2_to_l1_fallback(
     value: U256,
     sender: Address,
     trace_depth: usize,
-    tx_reverts: bool,
+    tx_outcome: crate::cross_chain::TxOutcome,
 ) -> Option<()> {
     tracing::info!(
         target: "based_rollup::proxy",
@@ -611,7 +611,7 @@ async fn queue_l2_to_l1_fallback(
             "deliveryFailed": false,
             "rawL2Tx": raw_tx_hex,
             "l1DeliveryScope": l1_scope,
-            "txReverts": tx_reverts
+            "txReverts": tx_outcome
         }],
         "id": 99991
     });
@@ -620,7 +620,7 @@ async fn queue_l2_to_l1_fallback(
         target: "based_rollup::proxy",
         %destination,
         %sender,
-        tx_reverts,
+        tx_reverts = tx_outcome.is_revert(),
         trace_depth,
         request_json = %serde_json::to_string(&initiate_req).unwrap_or_default(),
         "queue_l2_to_l1_fallback: sending initiateL2CrossChainCall"
@@ -654,7 +654,7 @@ async fn queue_independent_calls_l2_to_l1(
     detected_calls: &[DetectedL2InternalCall],
     rollups_address: Address,
     rollup_id: u64,
-    tx_reverts: bool,
+    tx_outcome: crate::cross_chain::TxOutcome,
 ) -> bool {
     // 1. Run chained simulation to get correct per-call delivery return data.
     let chained_results = simulate_chained_delivery_l2_to_l1(
@@ -713,7 +713,7 @@ async fn queue_independent_calls_l2_to_l1(
                 "deliveryFailed": delivery_failed,
                 "rawL2Tx": raw_l2_tx,
                 "l1DeliveryScope": l1_scope,
-                "txReverts": tx_reverts
+                "txReverts": tx_outcome
             }],
             "id": 99970 + i as u64
         });
@@ -953,7 +953,7 @@ async fn enrich_return_calls_via_l2_trace(
                                             vec![],     // delivery_return_data placeholder
                                             false,      // delivery_failed placeholder
                                             vec![],     // l1_delivery_scope placeholder
-                                            false,      // tx_reverts
+                                            crate::cross_chain::TxOutcome::Success,      // tx_reverts
                                         );
                                     all_placeholder_entries.extend(placeholder.l2_table_entries);
                                 }
@@ -1414,7 +1414,7 @@ async fn try_chained_l2_enrichment(
                 vec![],     // delivery_return_data placeholder
                 false,      // delivery_failed placeholder
                 vec![],     // l1_delivery_scope placeholder
-                false,      // tx_reverts
+                crate::cross_chain::TxOutcome::Success,      // tx_reverts
             );
             all_placeholder_entries.extend(placeholder.l2_table_entries);
         }
@@ -1747,7 +1747,7 @@ async fn simulate_l1_delivery(
                 final_return_data.clone(), // use known data (from iterative discovery or previous iteration)
                 final_delivery_failed,     // use known failed flag
                 root_scope.to_vec(),       // l1_delivery_scope from trace depth
-                false,                     // tx_reverts (simulation path, not real queueing)
+                crate::cross_chain::TxOutcome::Success,                     // tx_reverts (simulation path, not real queueing)
             );
             call_entries.l1_deferred_entries
         } else {
@@ -1791,7 +1791,7 @@ async fn simulate_l1_delivery(
                 &analyzed,
                 crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                 rlp_encoded_tx,
-                false, // tx_reverts
+                crate::cross_chain::TxOutcome::Success, // tx_reverts
             );
 
             tracing::info!(
@@ -2594,7 +2594,7 @@ async fn simulate_l1_combined_delivery(
                     per_call_return_data[i].clone(),
                     per_call_delivery_failed[i],
                     call_scope.clone(),
-                    false, // tx_reverts
+                    crate::cross_chain::TxOutcome::Success, // tx_reverts
                 );
                 call_entries.l1_deferred_entries
             } else {
@@ -2640,7 +2640,7 @@ async fn simulate_l1_combined_delivery(
                     &analyzed,
                     crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                     rlp_encoded_tx,
-                    false, // tx_reverts
+                    crate::cross_chain::TxOutcome::Success, // tx_reverts
                 );
 
                 tracing::info!(
@@ -3932,7 +3932,7 @@ async fn trace_and_detect_l2_internal_calls(
                     call.delivery_return_data.clone(),
                     call.delivery_failed,
                     vec![], // l1_delivery_scope (irrelevant for L2 table loading)
-                    false,  // tx_reverts
+                    crate::cross_chain::TxOutcome::Success,  // tx_reverts
                 );
                 l2_table_entries.extend(call_entries.l2_table_entries);
             }
@@ -4275,13 +4275,13 @@ async fn trace_and_detect_l2_internal_calls(
     // Detect persistent revert: if the L2 tx STILL reverts after loading all entries,
     // the revert is from business logic (not missing entries). The L1 entries need
     // REVERT/REVERT_CONTINUE to undo cross-chain effects (§D.12 atomicity).
-    let tx_reverts = if top_level_error {
+    let tx_outcome = crate::cross_chain::TxOutcome::from_bool(if top_level_error {
         last_user_trace_had_error
     } else {
         false
-    };
+    });
 
-    if tx_reverts {
+    if tx_outcome.is_revert() {
         tracing::info!(
             target: "based_rollup::proxy",
             detected_calls = detected_calls.len(),
@@ -4350,7 +4350,7 @@ async fn trace_and_detect_l2_internal_calls(
                 &analyzed,
                 crate::cross_chain::RollupId::new(U256::from(rollup_id)),
                 &tx_bytes,
-                tx_reverts,
+                tx_outcome,
             );
 
             if !continuation.l2_entries.is_empty() {
@@ -4466,7 +4466,7 @@ async fn trace_and_detect_l2_internal_calls(
             &detected_calls,
             &early_return_calls,
             rollup_id,
-            tx_reverts,
+            tx_outcome,
         )
         .await
         .is_some();
@@ -4638,7 +4638,7 @@ async fn trace_and_detect_l2_internal_calls(
                 &detected_calls,
                 &all_return_calls,
                 rollup_id,
-                tx_reverts,
+                tx_outcome,
             )
             .await
             .is_some();
@@ -4656,7 +4656,7 @@ async fn trace_and_detect_l2_internal_calls(
                 &detected_calls,
                 rollups_address,
                 rollup_id,
-                tx_reverts,
+                tx_outcome,
             )
             .await;
         }
@@ -4808,7 +4808,7 @@ async fn trace_and_detect_l2_internal_calls(
             &all_detected_l2_calls,
             &all_return_calls,
             rollup_id,
-            tx_reverts,
+            tx_outcome,
         )
         .await
         .is_some();
@@ -5192,7 +5192,7 @@ async fn trace_and_detect_l2_internal_calls(
                 &all_l2_calls,
                 &return_calls_with_parent,
                 rollup_id,
-                tx_reverts,
+                tx_outcome,
             )
             .await
             .is_some();
@@ -5220,7 +5220,7 @@ async fn trace_and_detect_l2_internal_calls(
             "deliveryFailed": delivery_failed,
             "rawL2Tx": raw_tx_hex,
             "l1DeliveryScope": l1_scope,
-            "txReverts": tx_reverts
+            "txReverts": tx_outcome
         }],
         "id": 99988
     });
@@ -5374,7 +5374,7 @@ async fn simulate_l2_return_call_delivery(
             vec![],     // delivery_return_data placeholder
             false,      // delivery_failed placeholder
             vec![],     // l1_delivery_scope placeholder
-            false,      // tx_reverts
+            crate::cross_chain::TxOutcome::Success,      // tx_reverts
         );
 
         let mut detected_for_call: Vec<DetectedL2InternalCall> = Vec::new();

@@ -2349,8 +2349,8 @@ fn test_reorg_clears_all_cross_chain_state() {
             raw_l1_tx: Bytes::new(),
             extra_l2_entries: vec![],
             l1_entries: vec![],
-            tx_reverts: false,
-            l1_independent_entries: false,
+            tx_reverts: crate::cross_chain::TxOutcome::Success,
+            l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
         });
 
     assert!(!pending_cross_chain_entries.is_empty());

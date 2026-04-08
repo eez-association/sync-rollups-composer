@@ -498,7 +498,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
         call_c.clone(),
         call_d.clone(),
     ];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
 
     // ── L2 entries: 5 total ──
     assert_eq!(
@@ -824,7 +824,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
         &[d1_root.clone(), d1_child.clone()],
         l2_id,
         &[0xc0],
-        false,
+        crate::cross_chain::TxOutcome::Success,
     );
 
     // depth-2 scenario (root + child + grandchild).
@@ -836,7 +836,7 @@ fn test_l2_to_l1_depth2_child_not_orphaned() {
         &[d2_root, d2_child, d2_grand.clone()],
         l2_id,
         &[0xc0],
-        false,
+        crate::cross_chain::TxOutcome::Success,
     );
 
     // depth-2 must produce strictly more entries than depth-1.
@@ -927,7 +927,7 @@ fn test_l2_to_l1_depth1_regression() {
     let call_c = make_l2_to_l1_detected(dest_c, vec![0xC1], src_c, l2_id, Some(1), 1);
 
     let detected = vec![call_a.clone(), call_b.clone(), call_c.clone()];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
 
     // ── L2 entries: exactly 3 ──
     assert_eq!(
@@ -1218,7 +1218,7 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
 
     // L2 entries: 2 (CALL + scope resolution)
     assert_eq!(cont.l2_entries.len(), 2, "should have 2 L2 entries");
@@ -1353,7 +1353,7 @@ fn test_l2_mixed_void_nonvoid_children() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
 
     // Should have L2 entries: CALL(parent) → callReturn[0] for child_a,
     // then RESULT(void) → callReturn[1] for child_b (transition uses child_a's void data),
@@ -1458,7 +1458,7 @@ fn test_l1_reentrant_child_delivery_return_data() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
 
     // L1 entries should include the delivery RESULT with non-void data
     let void_l1 = result_void(RollupId::MAINNET);
@@ -1549,7 +1549,7 @@ fn test_void_children_still_use_result_void() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
 
     // All RESULT entries should use result_void hashes
     let void_l2_hash = compute_action_hash(&result_void(l2_id));

@@ -161,9 +161,9 @@ pub struct L2CrossChainCallParams {
     #[serde(default)]
     pub l1_delivery_scope: Vec<U256>,
     /// Whether the L2 tx reverts AFTER making cross-chain calls.
-    /// When true, L1 entries include REVERT/REVERT_CONTINUE to undo L1 state changes.
+    /// When `Revert`, L1 entries include REVERT/REVERT_CONTINUE to undo L1 state changes.
     #[serde(default)]
-    pub tx_reverts: bool,
+    pub tx_reverts: crate::cross_chain::TxOutcome,
 }
 
 /// A queued cross-chain call with its entry pair, gas price, and raw L1 tx.
@@ -193,10 +193,10 @@ pub struct QueuedCrossChainCall {
     /// Empty for simple deposits (legacy path applies).
     pub l1_entries: Vec<CrossChainExecutionEntry>,
     /// Whether the L2 tx reverts after cross-chain calls (atomicity revert).
-    pub tx_reverts: bool,
+    pub tx_reverts: crate::cross_chain::TxOutcome,
     /// L1 entries are independent (not chained state deltas). For L1→L2 partial
     /// revert: the reverted call's state is rolled back by try/catch on L1.
-    pub l1_independent_entries: bool,
+    pub l1_independent_entries: crate::cross_chain::EntryGroupMode,
 }
 
 /// A queued L2→L1 call with L2 table entries and L1 deferred entries.
@@ -224,7 +224,7 @@ pub struct QueuedL2ToL1Call {
     /// Simple withdrawals = 1. Multi-call patterns with N root L2→L1 calls = N.
     pub trigger_count: usize,
     /// Whether the L2 tx reverts after cross-chain calls (atomicity revert).
-    pub tx_reverts: bool,
+    pub tx_reverts: crate::cross_chain::TxOutcome,
 }
 
 /// Result of simulating a contract call.
@@ -328,7 +328,7 @@ pub struct BuildL2ToL1ExecutionTableParams {
     pub raw_l2_tx: Bytes,
     /// Whether the L2 tx reverts AFTER making cross-chain calls.
     #[serde(default)]
-    pub tx_reverts: bool,
+    pub tx_reverts: crate::cross_chain::TxOutcome,
 }
 
 /// A single L2→L1 call for the reverse multi-call continuation execution table builder.
@@ -683,8 +683,8 @@ where
                 raw_l1_tx: params.raw_l1_tx.clone(),
                 extra_l2_entries: vec![],
                 l1_entries: vec![],
-                tx_reverts: false,
-                l1_independent_entries: false,
+                tx_reverts: crate::cross_chain::TxOutcome::Success,
+                l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
             });
         }
 
@@ -773,7 +773,7 @@ where
 
         let call_id = entries.l2_table_entries[0].action_hash;
 
-        if params.tx_reverts {
+        if params.tx_reverts.is_revert() {
             tracing::info!(
                 target: "based_rollup::rpc",
                 destination = %params.destination,
@@ -781,7 +781,7 @@ where
                 delivery_return_data_hex = %format!("0x{}", hex::encode(&params.delivery_return_data)),
                 delivery_return_data_len = params.delivery_return_data.len(),
                 delivery_failed = params.delivery_failed,
-                tx_reverts = params.tx_reverts,
+                tx_reverts = params.tx_reverts.is_revert(),
                 l2_entries = entries.l2_table_entries.len(),
                 l1_entries = entries.l1_deferred_entries.len(),
                 %call_id,
@@ -963,7 +963,7 @@ where
                 raw_l1_tx: params.raw_l1_tx.clone(),
                 extra_l2_entries: continuation.l2_entries,
                 l1_entries: continuation.l1_entries,
-                tx_reverts: false,
+                tx_reverts: crate::cross_chain::TxOutcome::Success,
                 l1_independent_entries: continuation.l1_independent_entries,
             });
         }

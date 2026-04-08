@@ -277,8 +277,8 @@ fn case_withdrawal_simple() -> MirrorCase {
         vec![0xc0],       // RLP-encoded L2TX trigger payload (sentinel)
         vec![],           // delivery_return_data
         false,            // delivery_failed
-        vec![U256::ZERO], // l1_delivery_scope
-        false,            // tx_reverts
+        vec![U256::ZERO],                          // l1_delivery_scope
+        crate::cross_chain::TxOutcome::Success,    // tx_outcome
     );
     let l2_entries = entries.l2_table_entries;
     let l1_entries = entries.l1_deferred_entries;
@@ -341,7 +341,7 @@ fn case_ping_pong_depth_2() -> MirrorCase {
     let call_d = detected_l2_to_l1(addr_dest_d(), vec![0xD1], addr_src_d(), Some(2), 2);
 
     let detected = vec![call_a, call_b, call_c, call_d];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
     let all_action_hashes = MirrorCase::collect_hashes(&result.l1_entries, &result.l2_entries);
     MirrorCase {
         name: "ping_pong_depth_2",
@@ -374,7 +374,7 @@ fn case_ping_pong_depth_3() -> MirrorCase {
     let call_d = detected_l2_to_l1(addr_dest_d(), vec![0xD1], addr_src_d(), Some(2), 3);
 
     let detected = vec![call_a, call_b, call_c, call_d];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], false);
+    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
     let all_action_hashes = MirrorCase::collect_hashes(&result.l1_entries, &result.l2_entries);
     MirrorCase {
         name: "ping_pong_depth_3",

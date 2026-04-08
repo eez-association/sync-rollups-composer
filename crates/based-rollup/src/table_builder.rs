@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cross_chain::{
     ActionHash, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
-    CrossChainStateDelta, ICrossChainManagerL2, ParentLink, RollupId, ScopePath,
+    CrossChainStateDelta, EntryGroupMode, ICrossChainManagerL2, ParentLink, RollupId, ScopePath,
+    TxOutcome,
 };
 
 /// Direction of a cross-chain call.
@@ -92,10 +93,10 @@ pub struct ContinuationEntries {
     pub l2_entries: Vec<CrossChainExecutionEntry>,
     /// Entries posted to L1 via `postBatch`.
     pub l1_entries: Vec<CrossChainExecutionEntry>,
-    /// When true, L1 entries are independent (not chained). The reverted call's
+    /// When `Independent`, L1 entries are not chained. The reverted call's
     /// state change is rolled back by try/catch, so subsequent entries see the
     /// PRE-revert state. Used by the driver to override state deltas.
-    pub l1_independent_entries: bool,
+    pub l1_independent_entries: EntryGroupMode,
 }
 
 /// Compute the action hash for a `CrossChainAction` using Solidity ABI encoding.
@@ -277,7 +278,7 @@ pub fn build_continuation_entries(
         return ContinuationEntries {
             l2_entries: vec![],
             l1_entries: vec![],
-            l1_independent_entries: false,
+            l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
         };
     }
 
@@ -986,7 +987,7 @@ pub fn build_continuation_entries(
     ContinuationEntries {
         l2_entries,
         l1_entries,
-        l1_independent_entries: has_partial_revert,
+        l1_independent_entries: EntryGroupMode::from_bool(has_partial_revert),
     }
 }
 
@@ -1627,7 +1628,7 @@ pub fn build_l2_to_l1_continuation_entries(
     detected: &[DetectedCall],
     our_rollup_id: RollupId,
     rlp_encoded_tx: &[u8],
-    tx_reverts: bool,
+    tx_outcome: TxOutcome,
 ) -> L2ToL1ContinuationEntries {
     if detected.is_empty() {
         return L2ToL1ContinuationEntries {
@@ -2360,13 +2361,13 @@ pub fn build_l2_to_l1_continuation_entries(
         }
     }
 
-    // When tx_reverts=true, replace the last L1 entry's terminal RESULT with
+    // When tx_outcome=Revert, replace the last L1 entry's terminal RESULT with
     // REVERT and append a REVERT_CONTINUE → terminal RESULT entry.
     // This ensures all L1 state changes are undone via ScopeReverted (§D.12).
     // REVERT scope=[0] targets the first child scope of _resolveScopes.
     // This is ALWAYS [0] regardless of delivery depth — per protocol tests
     // revertCounterL2 and deepScopeRevert both use REVERT(scope=[0]).
-    if tx_reverts && !l1_entries.is_empty() {
+    if tx_outcome.is_revert() && !l1_entries.is_empty() {
         use crate::cross_chain::{compute_revert_continue_hash, revert_action};
 
         let last = l1_entries

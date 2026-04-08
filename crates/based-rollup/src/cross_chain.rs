@@ -871,6 +871,187 @@ impl<'de> serde::Deserialize<'de> for ParentLink {
     }
 }
 
+// ──────────────────────────────────────────────
+//  TxOutcome + EntryGroupMode (refactor PLAN step 1.4)
+//
+//  Two semantic enums that replace boolean fields whose meaning was
+//  not visible at the call site. The refactor target was named in
+//  PLAN §6 invariants and §8 step 1.4: every place that branches on
+//  `tx_reverts: bool` and `l1_independent_entries: bool` should have
+//  a self-documenting type, not a true/false flag.
+//
+//  ## What this step does NOT introduce
+//
+//  PLAN §8 1.4 also names a third internal helper enum:
+//
+//      enum EntryClass { Trigger, Continuation, Result, RevertContinue }
+//
+//  As of step 1.4 there is no single concentrated call site that
+//  benefits from a 4-way classification. The closest candidate is
+//  `partition_entries` (which currently does a 2-way split into
+//  `(table_entries, trigger_entries)`) and the `entry_counts` loop
+//  in `driver.rs` (which already filters by 3 different criteria
+//  inline). Neither is a clean win for an `EntryClass` switch.
+//
+//  Per the same partial-migration discipline used in step 1.2 (where
+//  `SpeculativeStateRoot` and `NewStateRoot` were left as scaffolding
+//  rather than fake migrations), `EntryClass` is **deferred to a
+//  later step** that has a real consumer. Likely candidates:
+//
+//    - 1.4b (`QueuedCallRequest::{Simple, WithContinuations}`) — if
+//      the dispatch needs to discriminate continuation entries.
+//    - 2.4 (`ProtocolTxPlan` with stages) — if the planner needs to
+//      tag entries by class as it iterates.
+//    - 2.5 (`VerificationDecision`) — if the verify path needs to
+//      classify by entry kind.
+//
+//  Adding it as dead-code scaffolding now would violate the CLAUDE.md
+//  rule "Don't create helpers, utilities, or abstractions for one-time
+//  operations" and would not make the code any more correct.
+// ──────────────────────────────────────────────
+
+/// Outcome of an L2 user transaction that initiated cross-chain calls.
+///
+/// Replaces the previous `tx_reverts: bool` field, which was
+/// notorious for being read backwards (`if tx_reverts { … }` is the
+/// "the user's tx FAILED" branch, but at glance it can read like
+/// "the tx works in some reverted state"). The named variants make
+/// the intent obvious at every call site:
+///
+/// - **`Success`** — the L2 tx executed all its cross-chain calls
+///   and committed the changes. Entries are processed normally.
+/// - **`Revert`** — the L2 tx made cross-chain calls and then
+///   reverted. The L1 entries must include `REVERT` /
+///   `REVERT_CONTINUE` actions so the protocol can roll back the
+///   side effects (spec §D.12).
+///
+/// Wire compatibility: `#[serde(into / from = "bool")]` keeps the
+/// JSON representation byte-identical (`true` = `Revert`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TxOutcome {
+    /// The L2 user transaction succeeded after making cross-chain
+    /// calls. The corresponding boolean is `false`.
+    #[default]
+    Success,
+    /// The L2 user transaction reverted after making cross-chain
+    /// calls. Triggers the spec §D.12 `REVERT` / `REVERT_CONTINUE`
+    /// path. The corresponding boolean is `true`.
+    Revert,
+}
+
+impl TxOutcome {
+    /// Construct from a `bool` at a JSON / wire boundary. `false`
+    /// becomes `Success`, `true` becomes `Revert`.
+    pub fn from_bool(reverts: bool) -> Self {
+        if reverts {
+            Self::Revert
+        } else {
+            Self::Success
+        }
+    }
+
+    /// Convert back to the legacy `tx_reverts: bool` representation.
+    pub fn as_bool(self) -> bool {
+        matches!(self, Self::Revert)
+    }
+
+    /// `true` iff the L2 tx reverted after making cross-chain calls.
+    pub fn is_revert(&self) -> bool {
+        matches!(self, Self::Revert)
+    }
+
+    /// `true` iff the L2 tx succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success)
+    }
+}
+
+impl serde::Serialize for TxOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_bool().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TxOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(TxOutcome::from_bool)
+    }
+}
+
+/// State-delta chaining mode for a group of L1 deferred entries.
+///
+/// Replaces the previous `l1_independent_entries: bool` field. The
+/// boolean was used to distinguish two structurally distinct entry
+/// arrangements:
+///
+/// - **`Chained`** — every entry's `currentState` matches the
+///   previous entry's `newState`, forming a chain
+///   `clean → root1 → root2 → … → speculative`. This is the default
+///   for normal cross-chain entries (deposits, withdrawals, multi-call
+///   continuations).
+/// - **`Independent`** — every entry in the group sees the SAME
+///   `currentState` (the pre-revert root). Used for L1→L2 partial
+///   revert patterns where the L1 try/catch rolls back the
+///   reverted call's state, so subsequent entries must observe the
+///   pre-revert state, not the chained intermediate root.
+///
+/// Wire compatibility: `#[serde(into / from = "bool")]` keeps the
+/// JSON representation byte-identical (`true` = `Independent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EntryGroupMode {
+    /// Entries form a chained delta sequence
+    /// (`prev.newState == curr.currentState`). The default. Boolean
+    /// equivalent: `false`.
+    #[default]
+    Chained,
+    /// Entries are independent — each sees the same pre-revert
+    /// `currentState`. Used for L1→L2 partial-revert patterns.
+    /// Boolean equivalent: `true`.
+    Independent,
+}
+
+impl EntryGroupMode {
+    /// Construct from a `bool` at a JSON / wire boundary. `false`
+    /// becomes `Chained`, `true` becomes `Independent`.
+    pub fn from_bool(independent: bool) -> Self {
+        if independent {
+            Self::Independent
+        } else {
+            Self::Chained
+        }
+    }
+
+    /// Convert back to the legacy `l1_independent_entries: bool`
+    /// representation.
+    pub fn as_bool(self) -> bool {
+        matches!(self, Self::Independent)
+    }
+
+    /// `true` iff entries in this group are independent (override
+    /// chained currentState with the pre-revert root).
+    pub fn is_independent(&self) -> bool {
+        matches!(self, Self::Independent)
+    }
+
+    /// `true` iff entries in this group form a chained delta
+    /// sequence.
+    pub fn is_chained(&self) -> bool {
+        matches!(self, Self::Chained)
+    }
+}
+
+impl serde::Serialize for EntryGroupMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_bool().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EntryGroupMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(EntryGroupMode::from_bool)
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {
@@ -1501,7 +1682,7 @@ pub fn build_l2_to_l1_call_entries(
     delivery_return_data: Vec<u8>,
     delivery_failed: bool,
     l1_delivery_scope: Vec<U256>,
-    tx_reverts: bool,
+    tx_outcome: TxOutcome,
 ) -> WithdrawalEntries {
     // Construct the `RollupId` once from the u64 config value — this is
     // the point where a config-level u64 crosses into the domain's
@@ -1609,12 +1790,12 @@ pub fn build_l2_to_l1_call_entries(
     // between the L2 tx entry and the proxy call in the L2 trace.
     // Example: SCA→SCB→proxy = scope=[0,0] (2 levels of wrapping).
     //
-    // For REVERT entries (tx_reverts=true): the delivery CALL scope must be at
+    // For REVERT entries (tx_outcome=Revert): the delivery CALL scope must be at
     // least [0] so that _resolveScopes enters newScope([0]), giving REVERT a
     // scope frame to match against. With scope=[], the CALL executes at root
     // scope via _processCallAtScope directly — no newScope frame to catch
     // ScopeReverted (per revertCounterL2 protocol E2E test).
-    let effective_scope = if tx_reverts && l1_delivery_scope.is_empty() {
+    let effective_scope = if tx_outcome.is_revert() && l1_delivery_scope.is_empty() {
         vec![U256::ZERO] // minimum scope=[0] for REVERT matching
     } else {
         l1_delivery_scope.clone()
@@ -1687,14 +1868,14 @@ pub fn build_l2_to_l1_call_entries(
         -I256::try_from(value).unwrap_or(I256::ZERO)
     };
 
-    // When tx_reverts=true, Entry 1's nextAction becomes REVERT and we add
+    // When tx_outcome=Revert, Entry 1's nextAction becomes REVERT and we add
     // a REVERT_CONTINUE entry (Entry 2). The scope revert mechanism in
     // Rollups.sol undoes the delivery call's L1 state changes.
     //
     // Entry 2's ether_delta = 0 because _etherDelta is RESET to 0 after
     // each _applyStateDeltas call (Rollups.sol:517). No ETH flows between
     // Entry 1 and Entry 2 consumption.
-    let l1_deferred_entries = if tx_reverts {
+    let l1_deferred_entries = if tx_outcome.is_revert() {
         // REVERT scope is ALWAYS [0] — the first child scope of _resolveScopes.
         // This is independent of the delivery scope (which can be [0], [0,0], etc.).
         // REVERT([0]) is caught by newScope([0]) → ScopeReverted bubbles to
@@ -1761,7 +1942,7 @@ pub fn build_l2_to_l1_call_entries(
         ]
     };
 
-    if tx_reverts {
+    if tx_outcome.is_revert() {
         tracing::info!(
             target: "based_rollup::cross_chain",
             l2_entries = l2_table_entries.len(),

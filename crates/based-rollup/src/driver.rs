@@ -132,9 +132,9 @@ pub struct Driver<P, Pool> {
     pending_l1_entries: Vec<CrossChainExecutionEntry>,
     /// Index of the first entry in each trigger group within `pending_l1_entries`.
     pending_l1_group_starts: Vec<usize>,
-    /// Per-group flag: true means entries in this group are independent
-    /// (not chained state deltas). Used for L1→L2 partial revert.
-    pending_l1_independent: Vec<bool>,
+    /// Per-group mode: `Independent` means entries in this group are not
+    /// chained state deltas. Used for L1→L2 partial revert.
+    pending_l1_independent: Vec<crate::cross_chain::EntryGroupMode>,
     /// Trigger metadata for groups that need L1 trigger txs (`executeL2TX`).
     /// Indexed by group. `None` for protocol-triggered groups (deposits).
     pending_l1_trigger_metadata: Vec<Option<TriggerMetadata>>,
@@ -1329,7 +1329,8 @@ where
                     self.pending_l1_entries
                         .extend(w.l1_deferred_entries.iter().cloned());
                     self.pending_l1_group_starts.push(group_start);
-                    self.pending_l1_independent.push(false); // L2→L1 calls are always chained
+                    self.pending_l1_independent
+                        .push(crate::cross_chain::EntryGroupMode::Chained); // L2→L1 calls are always chained
                     self.pending_l1_trigger_metadata.push(Some(TriggerMetadata {
                         user: w.user,
                         amount: w.amount,
@@ -1692,7 +1693,9 @@ where
                 // in the group to use intermediate_roots[k] as currentState.
                 let num_groups = self.pending_l1_group_starts.len();
                 for k in 0..num_groups {
-                    if k >= self.pending_l1_independent.len() || !self.pending_l1_independent[k] {
+                    if k >= self.pending_l1_independent.len()
+                        || self.pending_l1_independent[k].is_chained()
+                    {
                         continue;
                     }
                     if k >= intermediate_roots.len() {
