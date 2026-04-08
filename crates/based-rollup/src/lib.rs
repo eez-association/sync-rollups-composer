@@ -18,6 +18,13 @@ pub mod proposer;
 pub mod rpc;
 pub mod table_builder;
 
+/// Test-only DSL and helpers reachable from sibling unit tests under
+/// `crates/based-rollup/src/`. Gated behind `test-utils` so it does
+/// not contribute to release builds. See [`test_support::mirror_case`]
+/// for the L1↔L2 mirror DSL (refactor PLAN step 0.5).
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support;
+
 use crate::config::RollupConfig;
 use crate::consensus::RollupConsensus;
 use reth_node_builder::{BuilderContext, components::ConsensusBuilder, node::FullNodeTypes};

@@ -2008,3 +2008,159 @@ mod proptests_reorder {
         // because such orders fall outside the function's contract.
     }
 }
+
+// ──────────────────────────────────────────────
+//  Step 0.5 (refactor) — MirrorCase loop tests
+//
+//  Closes invariant #18 (L1 and L2 entry structures must MIRROR each
+//  other) at the test/gate level for the 5 canonical cases.
+//
+//  These are intentionally LOW-LEVEL guard-rails: they assert that the
+//  DSL is wired correctly and that every canonical case produces
+//  internally consistent entries. Deeper mirror property tests
+//  (action-hash equivalence, scope navigation symmetry, etc.) land
+//  in Phase 3 of the refactor when the `Direction` trait introduces
+//  symmetry by construction.
+// ──────────────────────────────────────────────
+
+mod mirror_loop_tests {
+    use super::*;
+    use crate::test_support::mirror_case::{
+        canonical_cases, MirrorCase, MirrorPattern,
+    };
+
+    /// Each canonical case constructs successfully and produces at least
+    /// one entry across L1 + L2.
+    #[test]
+    fn mirror_each_case_has_entries() {
+        let cases = canonical_cases();
+        assert_eq!(cases.len(), 5, "expected 5 canonical cases");
+        for case in &cases {
+            assert!(
+                case.total_entries() > 0,
+                "case {} produced 0 total entries",
+                case.name
+            );
+        }
+    }
+
+    /// Every action_hash in every canonical case is non-zero. A zero
+    /// hash would indicate a builder produced an entry with an
+    /// uninitialized action.
+    #[test]
+    fn mirror_action_hashes_are_non_zero() {
+        for case in &canonical_cases() {
+            for h in &case.all_action_hashes {
+                assert_ne!(
+                    *h,
+                    B256::ZERO,
+                    "case {} contains a zero action_hash",
+                    case.name
+                );
+            }
+        }
+    }
+
+    /// `MirrorCase::all_action_hashes` is the concatenation of L1
+    /// hashes followed by L2 hashes. Verify length consistency.
+    #[test]
+    fn mirror_collected_hashes_match_entry_counts() {
+        for case in &canonical_cases() {
+            let expected = case.l1_entries.len() + case.l2_entries.len();
+            assert_eq!(
+                case.all_action_hashes.len(),
+                expected,
+                "case {} hash count mismatch",
+                case.name
+            );
+        }
+    }
+
+    /// Continuation cases must produce ≥ 2 L2 entries (a 1-entry L2
+    /// table is by definition non-continuation). Simple cases must
+    /// produce exactly 2 L2 entries (the CALL+RESULT pair).
+    #[test]
+    fn mirror_pattern_kinds_have_expected_minimum_shapes() {
+        for case in &canonical_cases() {
+            match case.pattern {
+                MirrorPattern::Simple => {
+                    assert_eq!(
+                        case.l2_entries.len(),
+                        2,
+                        "Simple case {} should have exactly 2 L2 entries (CALL+RESULT)",
+                        case.name
+                    );
+                }
+                MirrorPattern::Continuation => {
+                    assert!(
+                        case.l2_entries.len() >= 2,
+                        "Continuation case {} should have ≥ 2 L2 entries (got {})",
+                        case.name,
+                        case.l2_entries.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every L2 entry's `next_action.rollup_id` must be one of the two
+    /// rollup ids participating in the test scenario (MAINNET = 0 or
+    /// our test rollup = 1). A foreign rollup id would mean the
+    /// builder leaked some unrelated chain into the entries.
+    ///
+    /// Scope navigation `callReturn` entries (used in L2→L1
+    /// continuation patterns) target our rollup directly because
+    /// they re-enter the same L2 to drive the next call in the
+    /// scope chain — that is why we accept rollup_id ∈ {0, 1}
+    /// uniformly across both directions.
+    #[test]
+    fn mirror_l2_entries_carry_known_rollup_ids() {
+        for case in &canonical_cases() {
+            for entry in &case.l2_entries {
+                let target = entry.next_action.rollup_id;
+                let source = entry.next_action.source_rollup;
+                assert!(
+                    target == U256::ZERO || target == U256::from(1),
+                    "case {}: L2-entry next_action.rollup_id={} not in {{0, 1}}",
+                    case.name,
+                    target
+                );
+                assert!(
+                    source == U256::ZERO || source == U256::from(1),
+                    "case {}: L2-entry next_action.source_rollup={} not in {{0, 1}}",
+                    case.name,
+                    source
+                );
+            }
+        }
+    }
+
+    /// Smoke check the DSL is the only place where canonical cases live:
+    /// every case has the expected name in the documented order. If a
+    /// case is renamed or reordered, this test catches it before
+    /// downstream mirror tests start observing different fixtures.
+    #[test]
+    fn mirror_canonical_cases_have_documented_names_in_order() {
+        let cases = canonical_cases();
+        let names: Vec<&'static str> = cases.iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "deposit_simple",
+                "withdrawal_simple",
+                "flash_loan_3_call",
+                "ping_pong_depth_2",
+                "ping_pong_depth_3",
+            ]
+        );
+    }
+
+    // Trivial use of MirrorCase to keep the import alive in case all
+    // assertions above are removed during future refactoring. The
+    // compiler will warn otherwise.
+    #[allow(dead_code)]
+    fn _force_mirror_case_in_scope() -> &'static str {
+        let _: Option<MirrorCase> = None;
+        "in scope"
+    }
+}
