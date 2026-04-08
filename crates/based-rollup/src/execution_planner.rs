@@ -6,8 +6,8 @@
 
 use crate::config::RollupConfig;
 use crate::cross_chain::{
-    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    ICrossChainManagerL2, RollupId, ScopePath,
+    ActionHash, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
+    CrossChainStateDelta, ICrossChainManagerL2, RollupId, ScopePath,
 };
 use crate::evm_config::RollupEvmConfig;
 use crate::rpc::{SimulationResult, entry_to_serializable};
@@ -157,7 +157,7 @@ where
         return_data: Bytes::from(entry.next_action.data.clone()),
         pre_state_root,
         post_state_root,
-        action_hash,
+        action_hash: action_hash.as_b256(),
         execution_entry: entry_to_serializable(&entry),
     })
 }
@@ -165,7 +165,7 @@ where
 /// Compute the action hash for an L2TX action wrapping the given RLP-encoded transaction.
 ///
 /// Matches Solidity: `keccak256(abi.encode(Action({ actionType: L2TX, data: rlpTx, ... })))`
-pub fn compute_l2tx_action_hash(rollup_id: u64, rlp_tx: &[u8]) -> B256 {
+pub fn compute_l2tx_action_hash(rollup_id: u64, rlp_tx: &[u8]) -> ActionHash {
     let sol_action = ICrossChainManagerL2::Action {
         actionType: ICrossChainManagerL2::ActionType::L2TX,
         rollupId: U256::from(rollup_id),
@@ -178,7 +178,9 @@ pub fn compute_l2tx_action_hash(rollup_id: u64, rlp_tx: &[u8]) -> B256 {
         scope: vec![],
     };
 
-    keccak256(ICrossChainManagerL2::Action::abi_encode(&sol_action))
+    ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &sol_action,
+    )))
 }
 
 /// Simulate a simple contract call against current L2 state and return
@@ -362,7 +364,7 @@ pub fn build_state_only_entry(
             new_state: post_state_root,
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::ZERO,
+        action_hash: ActionHash::ZERO,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
             rollup_id: RollupId::new(U256::from(rollup_id)),

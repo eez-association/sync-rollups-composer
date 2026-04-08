@@ -171,7 +171,7 @@ sol! {
 /// Consumed events map: actionHash → Vec of consumed CALL actions.
 /// Vec preserves duplicate consumed events with the same actionHash
 /// (e.g., CallTwice calling increment() twice produces 2 events with same hash).
-pub type ConsumedMap = std::collections::HashMap<B256, Vec<CrossChainAction>>;
+pub type ConsumedMap = std::collections::HashMap<ActionHash, Vec<CrossChainAction>>;
 
 /// Check if a set of cross-chain calls contains duplicates (same action identity).
 /// Uses full 4-tuple (destination, calldata, value, sourceAddress) matching the
@@ -441,6 +441,243 @@ impl std::fmt::Display for ScopePath {
     }
 }
 
+// ──────────────────────────────────────────────
+//  State-root newtypes (refactor PLAN step 1.2)
+//
+//  Four zero-cost wrappers over `B256` that distinguish the four
+//  semantically distinct hash slots in the cross-chain protocol:
+//
+//    - `CleanStateRoot`        — the post-block state root WITHOUT
+//                                cross-chain entries applied; what L1
+//                                sees as the rollup's current state.
+//    - `SpeculativeStateRoot`  — the post-block state root WITH
+//                                cross-chain entries applied; what
+//                                reth holds locally before postBatch
+//                                lands.
+//    - `NewStateRoot`          — the per-entry "new state" produced
+//                                by a single state delta (the
+//                                `newState` field of a `StateDelta`).
+//    - `ActionHash`            — `keccak256(abi.encode(action))`,
+//                                the lookup key for execution entries.
+//
+//  The PLAN groups them in step 1.2 because they all close invariant
+//  #3 ("NEVER align state roots by overwriting `pre_state_root`") and
+//  related anti-patterns. The most load-bearing of the four is
+//  [`CleanStateRoot`]: making it impossible to construct one outside
+//  the canonical `compute_intermediate_roots` path means you can no
+//  longer paper over a divergence by writing a freshly-computed value
+//  back into the slot that L1 sees.
+//
+//  ## Migration scope (step 1.2 partial)
+//
+//  Per PLAN §8 (option B from the user check-in), this step:
+//
+//    1. Introduces all four newtypes with their boundary constructors
+//       (this commit).
+//    2. Migrates [`CleanStateRoot`] (7 callsites — closes invariant #3
+//       at the type level).
+//    3. Migrates [`ActionHash`] (183 callsites — biggest mechanical
+//       cascade, closes the "passing a state root where an action
+//       hash is expected" class of bugs).
+//    4. Leaves [`SpeculativeStateRoot`] and [`NewStateRoot`] as
+//       scaffolding only — the field name already discriminates them
+//       (`state_root` vs `clean_state_root` on `PendingBlock`,
+//       `current_state` vs `new_state` on `CrossChainStateDelta`),
+//       so cascade cost outweighs marginal benefit until a future
+//       refactor needs to disambiguate them.
+//
+//  When step 1.2b lands a real caller for the deferred two, the
+//  scaffolding is ready and migration is mechanical.
+//
+//  ## Boundary discipline
+//
+//  Every newtype follows the same shape (mirrors `RollupId` from
+//  step 1.1a):
+//
+//    - `pub(crate) fn new(B256) -> Self` — internal-only constructor
+//      for code that already has a validated value.
+//    - `pub fn from_abi_boundary(B256) -> Self` — explicit ABI decode
+//      entry point. Grep `from_abi_boundary` to audit every site.
+//    - `pub fn from_log_boundary(B256) -> Self` — explicit event-log
+//      decode entry point.
+//    - `pub fn as_b256(&self) -> B256` — read-only view for ABI
+//      encode boundaries and equality checks against raw `B256`.
+// ──────────────────────────────────────────────
+
+/// The post-block state root WITHOUT cross-chain entries applied.
+///
+/// This is what L1 sees as the rollup's canonical state — the
+/// `currentState` field of the next batch's `postBatch` call. It is
+/// computed by trial-executing every non-trigger transaction in the
+/// block and reading the resulting state root, effectively rolling
+/// back any cross-chain entry effects.
+///
+/// **Closes invariant #3** ("NEVER align state roots by overwriting
+/// `pre_state_root`") at the type level: a `CleanStateRoot` cannot
+/// be constructed from a freshly-computed `B256` outside the
+/// canonical `compute_intermediate_roots` path (which uses
+/// `pub(crate) new`). Code that wants to "make a mismatch go away"
+/// by assigning a different value into the slot will not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct CleanStateRoot(B256);
+
+impl CleanStateRoot {
+    /// Module-private constructor. Only callable from inside the
+    /// `cross_chain` module and its sibling tests. The canonical
+    /// production caller is `Driver::compute_intermediate_roots`,
+    /// which trial-executes the block and pulls `roots[0]`.
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `B256` decoded at an ABI boundary — for
+    /// example, the `stateRoot` field returned by the
+    /// `Rollups.rollups(rollupId)` view call.
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `B256` taken from a log topic.
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Read-only view of the underlying hash. Used at ABI encode
+    /// boundaries and inside equality checks against raw `B256`.
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for CleanStateRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// The post-block state root WITH cross-chain entries applied.
+///
+/// This is what reth holds locally as the canonical block state
+/// after executing every transaction (including the protocol txs
+/// that consume cross-chain entries). It is the value of
+/// `BuiltBlock.state_root` and `PendingBlock.state_root`.
+///
+/// **Scaffolding only in step 1.2.** No fields are migrated to this
+/// type yet — see the module comment above for the rationale. The
+/// type exists so a future step (1.2b or later) can flip
+/// `BuiltBlock.state_root` and propagate without an API change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+#[repr(transparent)]
+#[allow(dead_code)]
+pub struct SpeculativeStateRoot(B256);
+
+#[allow(dead_code)]
+impl SpeculativeStateRoot {
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+}
+
+/// The "new state" produced by a single cross-chain state delta.
+///
+/// Distinct from [`CleanStateRoot`] because a `NewStateRoot` is the
+/// per-entry intermediate result inside a chain of deltas, not the
+/// post-block rollback state. In the chain
+/// `clean → root1 → root2 → ... → speculative`, every arrow's RHS
+/// is a `NewStateRoot` (and the next arrow's LHS).
+///
+/// **Scaffolding only in step 1.2.** Field name (`new_state`) already
+/// discriminates from `current_state`. Migration deferred per the
+/// module comment above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+#[repr(transparent)]
+#[allow(dead_code)]
+pub struct NewStateRoot(B256);
+
+#[allow(dead_code)]
+impl NewStateRoot {
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+}
+
+/// `keccak256(abi.encode(action))` — the lookup key the on-chain
+/// `_consumeExecution` function uses to find the execution entry
+/// matching a given cross-chain action.
+///
+/// Distinct from any state root: an `ActionHash` identifies a
+/// specific action (`CALL(target, data, ...)`, `RESULT(...)`, etc.)
+/// and is computed by hashing the ABI-encoded `Action` struct, not
+/// by trial-executing a block.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct ActionHash(B256);
+
+impl ActionHash {
+    /// Module-private constructor. The canonical caller is
+    /// `table_builder::compute_action_hash` (and its in-module
+    /// equivalents in `cross_chain.rs`), which keccaks an
+    /// ABI-encoded `Action`.
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `B256` decoded at an ABI boundary — for
+    /// example, the `actionHash` field of an
+    /// `ICrossChainManagerL2::ExecutionEntry` decoded from a
+    /// `BatchPosted` event.
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from an event-log topic.
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Read-only view of the underlying hash. Used at ABI encode
+    /// boundaries and inside equality checks against raw `B256`.
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+
+    /// The all-zero `ActionHash`, used as a sentinel by some
+    /// pre-execution and immediate-entry helpers (entries whose
+    /// `actionHash == 0` are immediate, not lookup-keyed).
+    pub const ZERO: Self = Self(B256::ZERO);
+}
+
+impl std::fmt::Display for ActionHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {
@@ -478,7 +715,7 @@ pub struct CrossChainStateDelta {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossChainExecutionEntry {
     pub state_deltas: Vec<CrossChainStateDelta>,
-    pub action_hash: B256,
+    pub action_hash: ActionHash,
     pub next_action: CrossChainAction,
 }
 
@@ -561,11 +798,11 @@ pub fn revert_continue_action(rollup_id: RollupId) -> CrossChainAction {
 /// Compute the deterministic action hash for REVERT_CONTINUE.
 ///
 /// `keccak256(abi.encode(Action{REVERT_CONTINUE, rollupId, 0, 0, "", true, 0, 0, []}))`
-pub fn compute_revert_continue_hash(rollup_id: RollupId) -> B256 {
+pub fn compute_revert_continue_hash(rollup_id: RollupId) -> ActionHash {
     let action = revert_continue_action(rollup_id);
-    keccak256(ICrossChainManagerL2::Action::abi_encode(
+    ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &action.to_sol_action(),
-    ))
+    )))
 }
 
 impl CrossChainStateDelta {
@@ -585,7 +822,7 @@ impl CrossChainExecutionEntry {
     fn to_sol(&self) -> ICrossChainManagerL2::ExecutionEntry {
         ICrossChainManagerL2::ExecutionEntry {
             stateDeltas: self.state_deltas.iter().map(|d| d.to_sol()).collect(),
-            actionHash: self.action_hash,
+            actionHash: self.action_hash.as_b256(),
             nextAction: self.next_action.to_sol_action(),
         }
     }
@@ -799,7 +1036,7 @@ pub fn build_block_entries(
                         new_state: *post_state_root,
                         ether_delta: I256::ZERO,
                     }],
-                    action_hash: B256::ZERO, // immediate — applied during postBatch()
+                    action_hash: ActionHash::ZERO, // immediate — applied during postBatch()
                     next_action: CrossChainAction {
                         action_type: CrossChainActionType::L2Tx,
                         rollup_id: RollupId::MAINNET,
@@ -833,7 +1070,7 @@ pub fn build_aggregate_block_entry(
             new_state: post_state_root,
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::ZERO, // immediate — applied during postBatch()
+        action_hash: ActionHash::ZERO, // immediate — applied during postBatch()
         next_action: CrossChainAction {
             action_type: CrossChainActionType::L2Tx,
             rollup_id: RollupId::MAINNET,
@@ -941,7 +1178,7 @@ impl CrossChainExecutionEntry {
                 .iter()
                 .map(CrossChainStateDelta::from_sol)
                 .collect(),
-            action_hash: sol.actionHash,
+            action_hash: ActionHash::from_abi_boundary(sol.actionHash),
             next_action: CrossChainAction::from_sol(&sol.nextAction)?,
         })
     }
@@ -1003,12 +1240,12 @@ pub fn build_cross_chain_call_entries(
         scope: ScopePath::root(),
     };
 
-    let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    let call_action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &call_action.to_sol_action(),
-    ));
-    let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    )));
+    let result_action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &result_action.to_sol_action(),
-    ));
+    )));
 
     let call_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
@@ -1114,12 +1351,12 @@ pub fn build_l2_to_l1_call_entries(
         scope: ScopePath::root(),
     };
 
-    let l2_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    let l2_call_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l2_call_action.to_sol_action(),
-    ));
-    let l2_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    )));
+    let l2_result_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l2_result_action.to_sol_action(),
-    ));
+    )));
 
     let l2_table_entries = vec![
         CrossChainExecutionEntry {
@@ -1160,9 +1397,9 @@ pub fn build_l2_to_l1_call_entries(
         source_rollup: RollupId::MAINNET, // MAINNET_ROLLUP_ID = 0
         scope: ScopePath::root(),
     };
-    let l1_trigger_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    let l1_trigger_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l1_trigger_action.to_sol_action(),
-    ));
+    )));
 
     tracing::debug!(
         target: "based_rollup::cross_chain",
@@ -1220,9 +1457,9 @@ pub fn build_l2_to_l1_call_entries(
         source_rollup: RollupId::MAINNET,
         scope: ScopePath::root(),
     };
-    let l1_delivery_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    let l1_delivery_result_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l1_delivery_result.to_sol_action(),
-    ));
+    )));
 
     // Entry 2 nextAction: terminal RESULT for L2TX (per SYNC_ROLLUPS_PROTOCOL_SPEC §C.6).
     // Always void with rollupId = triggering rollupId (L2). This applies regardless of
@@ -1421,14 +1658,16 @@ pub fn convert_l1_entries_to_l2_pairs(
     // Build a lookup: hash(CALL action) → Vec of CALL actions (occurrence-aware).
     // Multiple consumed events with the same actionHash are preserved so that
     // duplicate-call patterns (e.g., CallTwice) can be matched 1:1.
-    let mut action_map: std::collections::HashMap<B256, Vec<&CrossChainAction>> =
+    let mut action_map: std::collections::HashMap<ActionHash, Vec<&CrossChainAction>> =
         std::collections::HashMap::new();
     for a in call_actions {
-        let hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&a.to_sol_action()));
+        let hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+            &a.to_sol_action(),
+        )));
         action_map.entry(hash).or_default().push(a);
     }
     // Track which occurrence of each hash has been consumed so far.
-    let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
+    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> = std::collections::HashMap::new();
 
     // Detect if this batch has continuation entries (multi-call patterns).
     // Continuation entries have nextAction.action_type == CALL.
@@ -1471,9 +1710,9 @@ pub fn convert_l1_entries_to_l2_pairs(
                 next_action: (*call_action).clone(),
             };
             // Reconstruct RESULT table entry
-            let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+            let result_action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
                 &entry.next_action.to_sol_action(),
-            ));
+            )));
             let result_entry = CrossChainExecutionEntry {
                 state_deltas: vec![],
                 action_hash: result_action_hash,
@@ -1526,10 +1765,12 @@ pub fn reconstruct_continuation_l2_entries(
     // Build lookup: hash(action) → action for all consumed actions.
     // This includes CALL triggers (consumed by executeCrossChainCall) and
     // RESULT actions (consumed by scope resolution via _consumeExecution).
-    let action_map: HashMap<B256, &CrossChainAction> = call_actions
+    let action_map: HashMap<ActionHash, &CrossChainAction> = call_actions
         .iter()
         .map(|a| {
-            let hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&a.to_sol_action()));
+            let hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+                &a.to_sol_action(),
+            )));
             (hash, a)
         })
         .collect();
@@ -1547,7 +1788,7 @@ pub fn reconstruct_continuation_l2_entries(
     // Uses Vec to preserve multiple entries with the same hash — the protocol
     // supports duplicate calls (e.g., CallTwice calling increment() twice
     // produces two entries with the same action_hash).
-    let mut l1_entry_map: std::collections::HashMap<B256, Vec<&CrossChainExecutionEntry>> =
+    let mut l1_entry_map: std::collections::HashMap<ActionHash, Vec<&CrossChainExecutionEntry>> =
         std::collections::HashMap::new();
     for entry in l1_entries.iter() {
         l1_entry_map
@@ -1557,7 +1798,7 @@ pub fn reconstruct_continuation_l2_entries(
     }
     // Track consumption index per hash for occurrence-aware matching.
     // Each lookup consumes the NEXT entry, not always the first (#256).
-    let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
+    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> = std::collections::HashMap::new();
 
     let mut continuation_entries = Vec::new();
 
@@ -1619,8 +1860,8 @@ pub fn reconstruct_continuation_l2_entries(
             source_rollup: call_c_scoped.source_rollup,
             scope: ScopePath::root(),
         };
-        let call_c_unscoped_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
-            &call_c_unscoped.to_sol_action(),
+        let call_c_unscoped_hash = ActionHash::new(keccak256(
+            ICrossChainManagerL2::Action::abi_encode(&call_c_unscoped.to_sol_action()),
         ));
 
         // Look up inner call result: hash(CALL_C_unscoped) → RESULT(inner_data)
@@ -1656,9 +1897,9 @@ pub fn reconstruct_continuation_l2_entries(
             source_rollup: RollupId::MAINNET,
             scope: ScopePath::root(),
         };
-        let scope_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        let scope_result_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
             &scope_result_for_lookup.to_sol_action(),
-        ));
+        )));
 
         // Look up scope resolution: hash(scope_RESULT) → RESULT(delivery_data)
         // Occurrence-aware: consume the NEXT matching entry (#256).
@@ -1698,9 +1939,9 @@ pub fn reconstruct_continuation_l2_entries(
             source_rollup: RollupId::MAINNET,
             scope: ScopePath::root(),
         };
-        let result_our_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        let result_our_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
             &result_our_rollup.to_sol_action(),
-        ));
+        )));
         continuation_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
             action_hash: result_our_hash,
@@ -1833,7 +2074,7 @@ pub fn parse_execution_consumed_logs(logs: &[Log]) -> ConsumedMap {
             );
             continue;
         }
-        let action_hash = topics[1];
+        let action_hash = ActionHash::from_log_boundary(topics[1]);
 
         // Decode the full Action from event data
         match ICrossChainManagerL2::ExecutionConsumed::decode_log_data(&log.inner.data) {
@@ -2280,9 +2521,9 @@ pub fn partition_entries(
         // table entries (action_hash=hash(RESULT), next_action=CALL_B).
         let is_call_to_us = entry.next_action.action_type == CrossChainActionType::Call
             && entry.next_action.rollup_id == our_rollup_id;
-        let next_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        let next_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
             &entry.next_action.to_sol_action(),
-        ));
+        )));
         if is_call_to_us && next_hash == entry.action_hash {
             trigger_entries.push(entry.clone());
         } else {
@@ -2485,7 +2726,7 @@ pub fn filter_block_by_trigger_prefix(
 pub fn compute_consumed_trigger_prefix(
     receipts: &[alloy_consensus::Receipt<alloy_primitives::Log>],
     ccm_address: Address,
-    l1_consumed_remaining: &mut std::collections::HashMap<B256, usize>,
+    l1_consumed_remaining: &mut std::collections::HashMap<ActionHash, usize>,
     trigger_tx_indices: &[usize],
 ) -> usize {
     let sig = execution_consumed_signature_hash();
@@ -2498,7 +2739,7 @@ pub fn compute_consumed_trigger_prefix(
         };
 
         // Collect all actionHashes from ExecutionConsumed events in this tx's receipt
-        let action_hashes: Vec<B256> = receipt
+        let action_hashes: Vec<ActionHash> = receipt
             .logs
             .iter()
             .filter(|log| {
@@ -2506,7 +2747,7 @@ pub fn compute_consumed_trigger_prefix(
                     && log.data.topics().len() >= 2
                     && log.data.topics()[0] == sig
             })
-            .map(|log| log.data.topics()[1])
+            .map(|log| ActionHash::from_log_boundary(log.data.topics()[1]))
             .collect();
 
         if action_hashes.is_empty() {

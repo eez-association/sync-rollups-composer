@@ -79,7 +79,7 @@ pub struct DeferredFiltering {
     /// The snapshot is taken BEFORE the current batch's entries are consumed
     /// from `remaining`, so the driver can independently determine which
     /// triggers were consumed using the same FIFO semantics as L1.
-    pub l1_consumed_remaining: std::collections::HashMap<B256, usize>,
+    pub l1_consumed_remaining: std::collections::HashMap<crate::cross_chain::ActionHash, usize>,
 
     /// All L2 execution entries from this batch (unfiltered).
     ///
@@ -271,7 +271,7 @@ impl DerivationPipeline {
         // MUST be shared (not rebuilt per-batch) because the same actionHash can appear
         // in multiple batches. On L1, entries are consumed FIFO across batches, so
         // the remaining count must decrement across batches in order.
-        let mut remaining: std::collections::HashMap<B256, usize> =
+        let mut remaining: std::collections::HashMap<crate::cross_chain::ActionHash, usize> =
             consumed_map.iter().map(|(k, v)| (*k, v.len())).collect();
 
         for log in logs {
@@ -362,7 +362,7 @@ impl DerivationPipeline {
             let remaining_snapshot_for_generic_filtering = remaining.clone();
 
             for entry in &entries {
-                if entry.action_hash == B256::ZERO {
+                if entry.action_hash == crate::cross_chain::ActionHash::ZERO {
                     // Immediate entry — extract final state root from StateDelta
                     if let Some(delta) = entry.state_deltas.first() {
                         batch_final_state_root = delta.new_state;
@@ -452,15 +452,16 @@ impl DerivationPipeline {
             // All deferred entries in a REVERT batch belong to the REVERT group.
             // Entry verification hold ensures REVERT batches are not mixed with
             // normal deposits — the builder submits them in their own postBatch.
-            let revert_action_hashes: std::collections::HashSet<B256> = if batch_has_revert {
-                entries
-                    .iter()
-                    .filter(|e| e.action_hash != B256::ZERO) // skip immediate
-                    .map(|e| e.action_hash)
-                    .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+            let revert_action_hashes: std::collections::HashSet<crate::cross_chain::ActionHash> =
+                if batch_has_revert {
+                    entries
+                        .iter()
+                        .filter(|e| e.action_hash != crate::cross_chain::ActionHash::ZERO) // skip immediate
+                        .map(|e| e.action_hash)
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
 
             let mut effective_state_root = batch_final_state_root;
             let our_rollup_id = crate::cross_chain::RollupId::new(U256::from(self.config.rollup_id));

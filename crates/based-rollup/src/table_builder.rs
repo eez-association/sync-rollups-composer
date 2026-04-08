@@ -12,8 +12,8 @@ use alloy_sol_types::SolType;
 use serde::{Deserialize, Serialize};
 
 use crate::cross_chain::{
-    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    ICrossChainManagerL2, RollupId, ScopePath,
+    ActionHash, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
+    CrossChainStateDelta, ICrossChainManagerL2, RollupId, ScopePath,
 };
 
 /// Direction of a cross-chain call.
@@ -100,10 +100,17 @@ pub struct ContinuationEntries {
 /// Compute the action hash for a `CrossChainAction` using Solidity ABI encoding.
 ///
 /// `actionHash = keccak256(abi.encode(action))`
-pub fn compute_action_hash(action: &CrossChainAction) -> B256 {
-    keccak256(ICrossChainManagerL2::Action::abi_encode(
+///
+/// This is one of the canonical sites that constructs an [`ActionHash`].
+/// It calls `ActionHash::new` directly, which is `pub(crate)` — every
+/// other call site must either go through this helper, through one of
+/// the other named computation helpers (`compute_revert_continue_hash`,
+/// `compute_l2tx_action_hash`), or through the `from_*_boundary`
+/// constructors.
+pub fn compute_action_hash(action: &CrossChainAction) -> ActionHash {
+    ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &action.to_sol_action(),
-    ))
+    )))
 }
 
 /// Reorder entries within same-`action_hash` groups so that Solidity's
@@ -141,7 +148,7 @@ fn reorder_for_swap_and_pop(entries: &mut Vec<CrossChainExecutionEntry>) {
     // FIFO+swap-and-pop within the group produces the correct consumption order.
 
     // Build a map from action_hash → list of indices (in order of appearance).
-    let mut groups: HashMap<B256, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<ActionHash, Vec<usize>> = HashMap::new();
     for (i, entry) in entries.iter().enumerate() {
         groups.entry(entry.action_hash).or_default().push(i);
     }
@@ -157,7 +164,7 @@ fn reorder_for_swap_and_pop(entries: &mut Vec<CrossChainExecutionEntry>) {
     let mut reordered: Vec<CrossChainExecutionEntry> = Vec::with_capacity(entries.len());
 
     // Collect multi-entry groups first.
-    let mut multi_group_hashes: Vec<B256> = groups
+    let mut multi_group_hashes: Vec<ActionHash> = groups
         .iter()
         .filter(|(_, v)| v.len() >= 2)
         .map(|(h, _)| *h)
@@ -757,8 +764,8 @@ pub fn build_continuation_entries(
             };
             let l1_entry_deltas = vec![CrossChainStateDelta {
                 rollup_id: our_rollup_id,
-                current_state: alloy_primitives::B256::ZERO,
-                new_state: alloy_primitives::B256::ZERO,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
                 ether_delta,
             }];
 
@@ -877,8 +884,8 @@ pub fn build_continuation_entries(
             };
             let l1_entry_deltas = vec![CrossChainStateDelta {
                 rollup_id: our_rollup_id,
-                current_state: alloy_primitives::B256::ZERO,
-                new_state: alloy_primitives::B256::ZERO,
+                current_state: B256::ZERO,
+                new_state: B256::ZERO,
                 ether_delta,
             }];
 
@@ -2125,8 +2132,8 @@ pub fn build_l2_to_l1_continuation_entries(
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
                     rollup_id: our_rollup_id,
-                    current_state: alloy_primitives::B256::ZERO,
-                    new_state: alloy_primitives::B256::ZERO,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
                     ether_delta: alloy_primitives::I256::ZERO,
                 }],
                 action_hash: trigger_hash,
@@ -2186,8 +2193,8 @@ pub fn build_l2_to_l1_continuation_entries(
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
                     rollup_id: our_rollup_id,
-                    current_state: alloy_primitives::B256::ZERO,
-                    new_state: alloy_primitives::B256::ZERO,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
                     ether_delta: delivery_ether_delta,
                 }],
                 action_hash: delivery_result_hash,
@@ -2274,8 +2281,8 @@ pub fn build_l2_to_l1_continuation_entries(
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
                     rollup_id: our_rollup_id,
-                    current_state: alloy_primitives::B256::ZERO,
-                    new_state: alloy_primitives::B256::ZERO,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
                     ether_delta: delivery_ether_delta,
                 }],
                 action_hash: delivery_result_hash,
@@ -2330,8 +2337,8 @@ pub fn build_l2_to_l1_continuation_entries(
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
                     rollup_id: our_rollup_id,
-                    current_state: alloy_primitives::B256::ZERO,
-                    new_state: alloy_primitives::B256::ZERO,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
                     ether_delta: delivery_ether_delta,
                 }],
                 action_hash: delivery_result_hash,
@@ -2374,8 +2381,8 @@ pub fn build_l2_to_l1_continuation_entries(
             l1_entries.push(CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
                     rollup_id: our_rollup_id,
-                    current_state: alloy_primitives::B256::ZERO,
-                    new_state: alloy_primitives::B256::ZERO,
+                    current_state: B256::ZERO,
+                    new_state: B256::ZERO,
                     ether_delta: alloy_primitives::I256::ZERO,
                 }],
                 action_hash: compute_revert_continue_hash(our_rollup_id),
@@ -2475,8 +2482,8 @@ pub fn build_l2_to_l1_continuation_entries(
                     CrossChainExecutionEntry {
                         state_deltas: vec![CrossChainStateDelta {
                             rollup_id: our_rollup_id,
-                            current_state: alloy_primitives::B256::ZERO,
-                            new_state: alloy_primitives::B256::ZERO,
+                            current_state: B256::ZERO,
+                            new_state: B256::ZERO,
                             ether_delta: alloy_primitives::I256::ZERO,
                         }],
                         action_hash: compute_revert_continue_hash(our_rollup_id),

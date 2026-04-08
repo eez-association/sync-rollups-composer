@@ -5,7 +5,7 @@
 //! entries), block calldata, and a proof.
 
 use crate::config::RollupConfig;
-use crate::cross_chain::CrossChainExecutionEntry;
+use crate::cross_chain::{CleanStateRoot, CrossChainExecutionEntry};
 use alloy_network::EthereumWallet;
 use alloy_primitives::Address;
 use alloy_primitives::{B256, Bytes, U256};
@@ -29,7 +29,7 @@ pub struct PendingBlock {
     pub l2_block_number: u64,
     pub pre_state_root: B256,
     pub state_root: B256,
-    pub clean_state_root: B256,
+    pub clean_state_root: CleanStateRoot,
     pub encoded_transactions: Bytes,
     /// Intermediate state roots for cross-chain entries (deposits and/or withdrawals).
     /// Empty when no cross-chain entries in this block.
@@ -327,7 +327,7 @@ impl Proposer {
             let last_post = blocks.last().expect("non-empty").clean_state_root;
             all_entries.push(crate::cross_chain::build_aggregate_block_entry(
                 first_pre,
-                last_post,
+                last_post.as_b256(),
                 self.config.rollup_id,
             ));
         }

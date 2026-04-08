@@ -346,7 +346,7 @@ fn test_action_hash_determinism() {
     let hash1 = compute_action_hash(&action);
     let hash2 = compute_action_hash(&action);
     assert_eq!(hash1, hash2, "Action hash must be deterministic");
-    assert_ne!(hash1, B256::ZERO, "Action hash must not be zero");
+    assert_ne!(hash1, ActionHash::ZERO, "Action hash must not be zero");
 }
 
 /// Test two L1→L2 calls with a continuation but no children.
@@ -688,7 +688,7 @@ fn test_l2_to_l1_depth2_entry_generation() {
     let child_trigger_d_hash = compute_action_hash(&child_trigger_d);
 
     // Helper: find entry by action_hash
-    let find_l1 = |hash: B256| -> Vec<&CrossChainExecutionEntry> {
+    let find_l1 = |hash: ActionHash| -> Vec<&CrossChainExecutionEntry> {
         result
             .l1_entries
             .iter()
@@ -1600,7 +1600,7 @@ fn test_void_children_still_use_result_void() {
 fn mk_reorder_entry(hash_byte: u8, seq: u64) -> CrossChainExecutionEntry {
     CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: B256::with_last_byte(hash_byte),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(hash_byte)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
             rollup_id: RollupId::new(U256::from(1)),
@@ -1698,11 +1698,11 @@ fn test_reorder_for_swap_and_pop_groups_first_then_singletons() {
     ];
     reorder_for_swap_and_pop(&mut entries);
     // Multi-group [hash=1] sits first.
-    assert_eq!(entries[0].action_hash, B256::with_last_byte(1));
-    assert_eq!(entries[1].action_hash, B256::with_last_byte(1));
-    assert_eq!(entries[2].action_hash, B256::with_last_byte(1));
+    assert_eq!(entries[0].action_hash, ActionHash::new(B256::with_last_byte(1)));
+    assert_eq!(entries[1].action_hash, ActionHash::new(B256::with_last_byte(1)));
+    assert_eq!(entries[2].action_hash, ActionHash::new(B256::with_last_byte(1)));
     // Singleton last.
-    assert_eq!(entries[3].action_hash, B256::with_last_byte(2));
+    assert_eq!(entries[3].action_hash, ActionHash::new(B256::with_last_byte(2)));
     assert_eq!(entries[3].next_action.value, U256::from(99));
 }
 
@@ -1721,7 +1721,7 @@ fn test_reorder_for_swap_and_pop_solidity_swap_and_pop_yields_fifo_n3() {
 
     // Simulate consumption: pop "the first entry matching action_hash A"
     // 3 times in a row.
-    let target_hash = B256::with_last_byte(1);
+    let target_hash = ActionHash::new(B256::with_last_byte(1));
     let mut consumed_order = Vec::new();
     while let Some(idx) = storage.iter().position(|e| e.action_hash == target_hash) {
         consumed_order.push(storage[idx].next_action.value.to::<u64>());
@@ -1745,7 +1745,7 @@ fn test_reorder_for_swap_and_pop_solidity_swap_and_pop_yields_fifo_n5() {
     let mut storage = original.clone();
     reorder_for_swap_and_pop(&mut storage);
 
-    let target_hash = B256::with_last_byte(7);
+    let target_hash = ActionHash::new(B256::with_last_byte(7));
     let mut consumed_order = Vec::new();
     while let Some(idx) = storage.iter().position(|e| e.action_hash == target_hash) {
         consumed_order.push(storage[idx].next_action.value.to::<u64>());
@@ -1783,7 +1783,7 @@ fn test_reorder_for_swap_and_pop_with_interleaved_other_groups() {
     // should NOT disturb the hash=1 ordering.
     let s2_idx = storage
         .iter()
-        .position(|e| e.action_hash == B256::with_last_byte(2))
+        .position(|e| e.action_hash == ActionHash::new(B256::with_last_byte(2)))
         .unwrap();
     let last = storage.len() - 1;
     storage.swap(s2_idx, last);
@@ -1791,7 +1791,7 @@ fn test_reorder_for_swap_and_pop_with_interleaved_other_groups() {
 
     let s3_idx = storage
         .iter()
-        .position(|e| e.action_hash == B256::with_last_byte(3))
+        .position(|e| e.action_hash == ActionHash::new(B256::with_last_byte(3)))
         .unwrap();
     let last = storage.len() - 1;
     storage.swap(s3_idx, last);
@@ -1801,7 +1801,7 @@ fn test_reorder_for_swap_and_pop_with_interleaved_other_groups() {
     let mut consumed = Vec::new();
     while let Some(idx) = storage
         .iter()
-        .position(|e| e.action_hash == B256::with_last_byte(1))
+        .position(|e| e.action_hash == ActionHash::new(B256::with_last_byte(1)))
     {
         consumed.push(storage[idx].next_action.value.to::<u64>());
         let last = storage.len() - 1;
@@ -1863,7 +1863,7 @@ mod proptests_reorder {
         /// `reorder_for_swap_and_pop` is a no-op when no group has 3+ entries.
         #[test]
         fn reorder_noop_when_all_groups_smaller_than_three(input in arb_entry_list()) {
-            let mut counts: HashMap<B256, usize> = HashMap::new();
+            let mut counts: HashMap<ActionHash, usize> = HashMap::new();
             for e in &input {
                 *counts.entry(e.action_hash).or_insert(0) += 1;
             }
@@ -1888,7 +1888,7 @@ mod proptests_reorder {
         /// have interleaved 2-groups and that is intentionally preserved.
         #[test]
         fn reorder_groups_are_contiguous_when_reordered(input in arb_entry_list()) {
-            let mut counts: HashMap<B256, usize> = HashMap::new();
+            let mut counts: HashMap<ActionHash, usize> = HashMap::new();
             for e in &input {
                 *counts.entry(e.action_hash).or_insert(0) += 1;
             }
@@ -1901,8 +1901,8 @@ mod proptests_reorder {
             let mut copy = input;
             reorder_for_swap_and_pop(&mut copy);
 
-            let mut closed: std::collections::BTreeSet<B256> = std::collections::BTreeSet::new();
-            let mut last_hash: Option<B256> = None;
+            let mut closed: std::collections::BTreeSet<ActionHash> = std::collections::BTreeSet::new();
+            let mut last_hash: Option<ActionHash> = None;
             for e in &copy {
                 if Some(e.action_hash) != last_hash {
                     if let Some(prev) = last_hash {
@@ -1923,7 +1923,7 @@ mod proptests_reorder {
         /// of the docstring's "Proof (N=3)".
         #[test]
         fn reorder_preserves_first_entry_when_reordered(input in arb_entry_list()) {
-            let mut counts: HashMap<B256, usize> = HashMap::new();
+            let mut counts: HashMap<ActionHash, usize> = HashMap::new();
             for e in &input {
                 *counts.entry(e.action_hash).or_insert(0) += 1;
             }
@@ -1932,7 +1932,7 @@ mod proptests_reorder {
                 return Ok(());
             }
 
-            let mut first_input_per_hash: HashMap<B256, &CrossChainExecutionEntry> = HashMap::new();
+            let mut first_input_per_hash: HashMap<ActionHash, &CrossChainExecutionEntry> = HashMap::new();
             for e in &input {
                 first_input_per_hash.entry(e.action_hash).or_insert(e);
             }
@@ -1940,7 +1940,7 @@ mod proptests_reorder {
             let mut copy = input.clone();
             reorder_for_swap_and_pop(&mut copy);
 
-            let mut last_hash: Option<B256> = None;
+            let mut last_hash: Option<ActionHash> = None;
             for e in &copy {
                 if Some(e.action_hash) != last_hash {
                     let expected = first_input_per_hash[&e.action_hash];
@@ -1957,7 +1957,7 @@ mod proptests_reorder {
         /// the multi-group's swap-and-pop order.
         #[test]
         fn reorder_multigroups_precede_singletons_when_reordered(input in arb_entry_list()) {
-            let mut counts: HashMap<B256, usize> = HashMap::new();
+            let mut counts: HashMap<ActionHash, usize> = HashMap::new();
             for e in &input {
                 *counts.entry(e.action_hash).or_insert(0) += 1;
             }
@@ -1966,7 +1966,7 @@ mod proptests_reorder {
                 return Ok(());
             }
 
-            let multi_hashes: std::collections::BTreeSet<B256> = counts
+            let multi_hashes: std::collections::BTreeSet<ActionHash> = counts
                 .iter()
                 .filter(|&(_, n)| *n >= 2)
                 .map(|(&h, _)| h)
@@ -2053,7 +2053,7 @@ mod mirror_loop_tests {
             for h in &case.all_action_hashes {
                 assert_ne!(
                     *h,
-                    B256::ZERO,
+                    ActionHash::ZERO,
                     "case {} contains a zero action_hash",
                     case.name
                 );

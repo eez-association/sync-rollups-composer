@@ -11,7 +11,7 @@ fn test_entry_to_serializable_roundtrip() {
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(0xCC),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xCC)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
             rollup_id: RollupId::new(U256::from(1)),
@@ -27,7 +27,7 @@ fn test_entry_to_serializable_roundtrip() {
 
     let serializable = entry_to_serializable(&entry);
     assert_eq!(serializable.state_deltas.len(), 1);
-    assert_eq!(serializable.action_hash, entry.action_hash);
+    assert_eq!(serializable.action_hash, entry.action_hash.as_b256());
     assert_eq!(serializable.next_action.action_type, "RESULT");
     assert_eq!(serializable.next_action.scope.len(), 2);
 }
@@ -89,7 +89,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
 
     let make_entry = |hash_byte: u8| CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: B256::with_last_byte(hash_byte),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(hash_byte)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
             rollup_id: RollupId::new(U256::from(1)),

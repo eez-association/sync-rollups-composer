@@ -285,7 +285,7 @@ fn test_build_entries_same_pre_post_root() {
         "pre and post state roots should both equal the same value"
     );
     // action_hash should still be non-zero (it hashes the tx data, not roots)
-    assert_ne!(entries[0].action_hash, B256::ZERO);
+    assert_ne!(entries[0].action_hash, crate::cross_chain::ActionHash::ZERO);
 }
 
 // ── build_entries_from_encoded tests ──
@@ -304,7 +304,7 @@ fn test_build_entries_from_encoded_produces_valid_entry() {
     assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(42)));
     assert_eq!(entry.state_deltas[0].current_state, pre);
     assert_eq!(entry.state_deltas[0].new_state, post);
-    assert_ne!(entry.action_hash, B256::ZERO);
+    assert_ne!(entry.action_hash, crate::cross_chain::ActionHash::ZERO);
     assert_eq!(entry.next_action.action_type, CrossChainActionType::Result);
 }
 
@@ -392,7 +392,7 @@ fn test_build_entries_from_encoded_large_rlp_100_plus_txs() {
         1,
         "should produce exactly one entry per block"
     );
-    assert_ne!(entries[0].action_hash, B256::ZERO);
+    assert_ne!(entries[0].action_hash, crate::cross_chain::ActionHash::ZERO);
 
     // Verify consistency with build_entries_for_block
     let entries_from_txs = build_entries_for_block(1, pre, post, &txs);
@@ -447,7 +447,7 @@ fn test_e2e_pipeline_roundtrip_build_to_load_execution_table() {
     let builder_entries = build_entries_from_encoded(rollup_id, pre_root, post_root, &rlp_buf);
     assert_eq!(builder_entries.len(), 1);
     let original_entry = &builder_entries[0];
-    assert_ne!(original_entry.action_hash, B256::ZERO);
+    assert_ne!(original_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
     assert_eq!(original_entry.state_deltas[0].current_state, pre_root);
     assert_eq!(original_entry.state_deltas[0].new_state, post_root);
 
@@ -532,7 +532,7 @@ fn test_e2e_pipeline_roundtrip_build_to_load_execution_table() {
     let final_sol = &decoded_load.entries[0];
     assert_eq!(
         B256::from(final_sol.actionHash),
-        original_entry.action_hash,
+        original_entry.action_hash.as_b256(),
         "action_hash must survive full pipeline"
     );
     assert_eq!(final_sol.stateDeltas.len(), 1);
@@ -642,7 +642,7 @@ fn test_e2e_pipeline_multi_tx_block_action_hash_consistency() {
 
     assert_eq!(
         B256::from(final_decoded.entries[0].actionHash),
-        entries_from_encoded[0].action_hash,
+        entries_from_encoded[0].action_hash.as_b256(),
         "action hash for 5-tx block must survive full pipeline"
     );
 }
@@ -690,7 +690,7 @@ fn test_cross_path_action_hash_consistency_l2tx() {
             compute_action_hash_from_params(&params).expect("L2TX is a valid action type");
 
         assert_eq!(
-            hash_l2tx,
+            hash_l2tx.as_b256(),
             hash_rpc,
             "cross-path hash mismatch for rollup_id={}, data_len={}: \
              compute_l2tx_action_hash={:?} vs compute_action_hash_from_params={:?}",
@@ -759,11 +759,13 @@ fn test_cross_path_action_hash_with_real_transaction() {
         "path (1) build_entries_for_block != path (2) build_entries_from_encoded"
     );
     assert_eq!(
-        hash_path1, hash_path3,
+        hash_path1.as_b256(),
+        hash_path3,
         "path (1) build_entries_for_block != path (3) compute_action_hash_from_params"
     );
     assert_eq!(
-        hash_path2, hash_path3,
+        hash_path2.as_b256(),
+        hash_path3,
         "path (2) build_entries_from_encoded != path (3) compute_action_hash_from_params"
     );
 }
@@ -830,7 +832,8 @@ fn test_cross_path_action_hash_multi_tx_property() {
             tx_count
         );
         assert_eq!(
-            hash1, hash3,
+            hash1.as_b256(),
+            hash3,
             "paths (1) and (3) disagree for tx_count={}",
             tx_count
         );
@@ -1050,7 +1053,7 @@ fn test_composability_invariant_contract_deployment() {
     let entry = assert_pipeline_invariant(1, pre, post, &[tx]);
 
     // Contract deploy specific: action hash covers the bytecode
-    assert_ne!(entry.action_hash, B256::ZERO);
+    assert_ne!(entry.action_hash, crate::cross_chain::ActionHash::ZERO);
     assert_eq!(entry.state_deltas[0].current_state, pre);
     assert_eq!(entry.state_deltas[0].new_state, post);
 }
@@ -1170,7 +1173,7 @@ fn test_composability_invariant_mixed_block() {
     assert_eq!(entry.state_deltas.len(), 1);
     assert_eq!(entry.state_deltas[0].current_state, pre);
     assert_eq!(entry.state_deltas[0].new_state, post);
-    assert_ne!(entry.action_hash, B256::ZERO);
+    assert_ne!(entry.action_hash, crate::cross_chain::ActionHash::ZERO);
 
     // The action hash must differ from any single-tx hash
     let single_entry = build_entries_for_block(1, pre, post, &all_txs[..1]);
@@ -1408,7 +1411,7 @@ fn test_composability_invariant_full_pipeline_all_tx_types() {
     assert_eq!(final_decoded.entries.len(), 1);
     assert_eq!(
         B256::from(final_decoded.entries[0].actionHash),
-        builder_entries[0].action_hash,
+        builder_entries[0].action_hash.as_b256(),
         "action hash must survive the full builder → L1 → fullnode → L2 pipeline"
     );
     assert_eq!(
@@ -1436,7 +1439,7 @@ fn test_build_state_only_entry_different_roots_produces_entry() {
     // action_hash must be zero for immediate application
     assert_eq!(
         entry.action_hash,
-        B256::ZERO,
+        crate::cross_chain::ActionHash::ZERO,
         "state-only entry must have zero action hash"
     );
 
@@ -1472,7 +1475,7 @@ fn test_state_only_entry_l1_pipeline_roundtrip() {
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0].action_hash,
-        B256::ZERO,
+        crate::cross_chain::ActionHash::ZERO,
         "state-only entry must have actionHash=0"
     );
 
@@ -1514,7 +1517,7 @@ fn test_state_only_entry_l1_pipeline_roundtrip() {
     let derived_entry = &derived[0].entry;
     assert_eq!(
         derived_entry.action_hash,
-        B256::ZERO,
+        crate::cross_chain::ActionHash::ZERO,
         "actionHash=0 must survive L1 event roundtrip"
     );
     assert_eq!(derived_entry.state_deltas[0].current_state, pre);
@@ -1561,8 +1564,8 @@ fn test_cross_chain_call_result_pair_l1_pipeline_roundtrip() {
         true,
         return_data.clone(),
     );
-    assert_ne!(call_entry.action_hash, B256::ZERO);
-    assert_ne!(result_entry.action_hash, B256::ZERO);
+    assert_ne!(call_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
+    assert_ne!(result_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
     assert_ne!(call_entry.action_hash, result_entry.action_hash);
 
     // Step 2: Convert to L1 format and roundtrip through postBatch → BatchPosted → parse
@@ -1618,7 +1621,7 @@ fn test_cross_chain_call_result_pair_l1_pipeline_roundtrip() {
     assert_eq!(final_decoded.entries.len(), 1);
     assert_eq!(
         B256::from(final_decoded.entries[0].actionHash),
-        call_entry.action_hash
+        call_entry.action_hash.as_b256()
     );
 }
 
@@ -1679,7 +1682,8 @@ fn test_cross_chain_entry_action_hash_is_keccak_of_next_action() {
         let call_sol = call_entry.next_action.to_sol_action();
         let expected_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&call_sol));
         assert_eq!(
-            call_entry.action_hash, expected_call_hash,
+            call_entry.action_hash.as_b256(),
+            expected_call_hash,
             "case {i}: CALL action_hash must be keccak256(abi.encode(next_action))"
         );
 
@@ -1687,7 +1691,8 @@ fn test_cross_chain_entry_action_hash_is_keccak_of_next_action() {
         let result_sol = result_entry.next_action.to_sol_action();
         let expected_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&result_sol));
         assert_eq!(
-            result_entry.action_hash, expected_result_hash,
+            result_entry.action_hash.as_b256(),
+            expected_result_hash,
             "case {i}: RESULT action_hash must be keccak256(abi.encode(next_action))"
         );
     }
@@ -1729,7 +1734,7 @@ fn test_pending_block_state_root_matches_execution_entry_delta() {
         l2_block_number: 42,
         pre_state_root,
         state_root: post_state_root,
-        clean_state_root: post_state_root,
+        clean_state_root: crate::cross_chain::CleanStateRoot::new(post_state_root),
         encoded_transactions: alloy_primitives::Bytes::from(rlp_buf.clone()),
         intermediate_roots: vec![],
     };
@@ -1815,13 +1820,13 @@ fn test_mixed_empty_and_nonempty_blocks_chain_state_deltas() {
     // action_hash semantics differ
     assert_ne!(
         e0[0].action_hash,
-        B256::ZERO,
+        crate::cross_chain::ActionHash::ZERO,
         "non-empty block has non-zero hash"
     );
-    assert_eq!(e1[0].action_hash, B256::ZERO, "empty block has zero hash");
+    assert_eq!(e1[0].action_hash, crate::cross_chain::ActionHash::ZERO, "empty block has zero hash");
     assert_ne!(
         e2[0].action_hash,
-        B256::ZERO,
+        crate::cross_chain::ActionHash::ZERO,
         "non-empty block has non-zero hash"
     );
 }

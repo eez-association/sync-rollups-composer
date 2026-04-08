@@ -689,7 +689,7 @@ where
         }
 
         // Return the CALL action hash as a tracking identifier.
-        Ok(call_id)
+        Ok(call_id.as_b256())
     }
 
     fn simulate_call(&self, destination: Address, data: Bytes) -> RpcResult<SimulateCallResult> {
@@ -823,7 +823,7 @@ where
             });
         }
 
-        Ok(call_id)
+        Ok(call_id.as_b256())
     }
 
     fn build_execution_table(
@@ -971,7 +971,7 @@ where
         Ok(BuildExecutionTableResult {
             l2_entry_count: l2_count,
             l1_entry_count: l1_count,
-            call_id,
+            call_id: call_id.as_b256(),
         })
     }
 
@@ -1194,7 +1194,7 @@ where
         Ok(BuildExecutionTableResult {
             l2_entry_count: l2_count,
             l1_entry_count: l1_count,
-            call_id,
+            call_id: call_id.as_b256(),
         })
     }
 }
@@ -1251,7 +1251,7 @@ pub fn entry_to_serializable(entry: &CrossChainExecutionEntry) -> SerializableEx
                 ether_delta: d.ether_delta,
             })
             .collect(),
-        action_hash: entry.action_hash,
+        action_hash: entry.action_hash.as_b256(),
         next_action: action_to_serializable(&entry.next_action),
     }
 }

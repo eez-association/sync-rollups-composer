@@ -902,13 +902,13 @@ mod filtering_invariants_tests {
     #[test]
     fn test_compute_consumed_trigger_prefix_all_consumed_when_map_full() {
         let ccm = Address::with_last_byte(0xAB);
-        let h1 = B256::with_last_byte(0x01);
-        let h2 = B256::with_last_byte(0x02);
-        let h3 = B256::with_last_byte(0x03);
+        let h1 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01));
+        let h2 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02));
+        let h3 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03));
         let receipts = vec![
-            mk_trigger_receipt(ccm, h1),
-            mk_trigger_receipt(ccm, h2),
-            mk_trigger_receipt(ccm, h3),
+            mk_trigger_receipt(ccm, h1.as_b256()),
+            mk_trigger_receipt(ccm, h2.as_b256()),
+            mk_trigger_receipt(ccm, h3.as_b256()),
         ];
         let mut map = std::collections::HashMap::new();
         map.insert(h1, 1);
@@ -929,13 +929,13 @@ mod filtering_invariants_tests {
         // map, so the prefix must stop at 1 (first one consumed) and the
         // map must NOT be decremented for the second or third.
         let ccm = Address::with_last_byte(0xAB);
-        let h1 = B256::with_last_byte(0x01);
-        let h2 = B256::with_last_byte(0x02);
-        let h3 = B256::with_last_byte(0x03);
+        let h1 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01));
+        let h2 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02));
+        let h3 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03));
         let receipts = vec![
-            mk_trigger_receipt(ccm, h1),
-            mk_trigger_receipt(ccm, h2),
-            mk_trigger_receipt(ccm, h3),
+            mk_trigger_receipt(ccm, h1.as_b256()),
+            mk_trigger_receipt(ccm, h2.as_b256()),
+            mk_trigger_receipt(ccm, h3.as_b256()),
         ];
         let mut map = std::collections::HashMap::new();
         map.insert(h1, 1);
@@ -956,9 +956,9 @@ mod filtering_invariants_tests {
         // A trigger tx that consumes 2 entries: if EITHER is missing in the
         // map, the entire trigger tx is rejected (no partial decrement).
         let ccm = Address::with_last_byte(0xAB);
-        let ha = B256::with_last_byte(0x0A);
-        let hb = B256::with_last_byte(0x0B);
-        let receipts = vec![mk_trigger_receipt_multi(ccm, &[ha, hb])];
+        let ha = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x0A));
+        let hb = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x0B));
+        let receipts = vec![mk_trigger_receipt_multi(ccm, &[ha.as_b256(), hb.as_b256()])];
         let mut map = std::collections::HashMap::new();
         map.insert(ha, 1);
         // hb intentionally missing.
@@ -976,13 +976,13 @@ mod filtering_invariants_tests {
         // 3 trigger txs, only the first 2 reachable in the map. The map
         // must reflect exactly 2 decrements after the call.
         let ccm = Address::with_last_byte(0xAB);
-        let h1 = B256::with_last_byte(0x01);
-        let h2 = B256::with_last_byte(0x02);
-        let h3 = B256::with_last_byte(0x03);
+        let h1 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01));
+        let h2 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02));
+        let h3 = crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03));
         let receipts = vec![
-            mk_trigger_receipt(ccm, h1),
-            mk_trigger_receipt(ccm, h2),
-            mk_trigger_receipt(ccm, h3),
+            mk_trigger_receipt(ccm, h1.as_b256()),
+            mk_trigger_receipt(ccm, h2.as_b256()),
+            mk_trigger_receipt(ccm, h3.as_b256()),
         ];
         let mut map = std::collections::HashMap::new();
         map.insert(h1, 1);
@@ -1120,7 +1120,10 @@ mod filtering_invariants_tests {
                 // Pre-populate the map with `map_population` of the trigger hashes.
                 let mut map = std::collections::HashMap::new();
                 for i in 0..(map_population as usize).min(trigger_count) {
-                    map.insert(B256::with_last_byte(i as u8), 1);
+                    map.insert(
+                        crate::cross_chain::ActionHash::new(B256::with_last_byte(i as u8)),
+                        1,
+                    );
                 }
 
                 let k = compute_consumed_trigger_prefix(
@@ -1151,14 +1154,19 @@ mod filtering_invariants_tests {
                 // Map M_full has every hash present.
                 let mut map_full = std::collections::HashMap::new();
                 for i in 0..trigger_count {
-                    map_full.insert(B256::with_last_byte(i as u8), 1);
+                    map_full.insert(
+                        crate::cross_chain::ActionHash::new(B256::with_last_byte(i as u8)),
+                        1,
+                    );
                 }
                 let mut map_partial = map_full.clone();
                 // Remove the first `drop_first` hashes from `map_partial`,
                 // keeping the rest. Since the prefix walks from index 0,
                 // dropping the first hash always reduces k to 0.
                 for i in 0..(drop_first as usize).min(trigger_count) {
-                    map_partial.remove(&B256::with_last_byte(i as u8));
+                    map_partial.remove(&crate::cross_chain::ActionHash::new(
+                        B256::with_last_byte(i as u8),
+                    ));
                 }
 
                 let k_full = compute_consumed_trigger_prefix(

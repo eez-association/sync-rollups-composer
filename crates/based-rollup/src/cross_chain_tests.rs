@@ -9,7 +9,7 @@ fn test_execution_entry_serialization_roundtrip() {
             new_state: B256::with_last_byte(0xFF),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(0x42),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0x42)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
             rollup_id: RollupId::new(U256::from(1)),
@@ -165,7 +165,7 @@ fn test_encode_load_execution_table_roundtrip() {
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::try_from(1_000_000i128).unwrap(),
         }],
-        action_hash: B256::with_last_byte(0x42),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0x42)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
             rollup_id: RollupId::new(U256::from(2)),
@@ -225,7 +225,7 @@ fn test_encode_load_execution_table_multiple_entries() {
                 new_state: B256::with_last_byte(0x22),
                 ether_delta: I256::try_from(999_999_999_999i128).unwrap(),
             }],
-            action_hash: B256::with_last_byte(0xAA),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: RollupId::new(U256::from(10)),
@@ -253,7 +253,7 @@ fn test_encode_load_execution_table_multiple_entries() {
                     ether_delta: I256::ZERO,
                 },
             ],
-            action_hash: B256::with_last_byte(0xBB),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xBB)),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Revert,
                 rollup_id: RollupId::new(U256::from(20)),
@@ -268,7 +268,7 @@ fn test_encode_load_execution_table_multiple_entries() {
         },
         CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: B256::with_last_byte(0xCC),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xCC)),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::L2Tx,
                 rollup_id: RollupId::new(U256::from(30)),
@@ -356,7 +356,7 @@ fn test_from_sol_execution_entry_roundtrip() {
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::try_from(100i64).unwrap(),
         }],
-        action_hash: B256::with_last_byte(0xFF),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xFF)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
             rollup_id: RollupId::new(U256::from(1)),
@@ -492,7 +492,7 @@ fn test_parse_batch_posted_logs_mixed_rollup_ids_partial_match() {
         1,
         "only the entry with rollup_id=1 delta should match"
     );
-    assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0xAA));
+    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)));
     assert_eq!(result[0].l1_block_number, 200);
 }
 
@@ -600,7 +600,7 @@ fn test_from_sol_execution_entry_multi_delta_roundtrip() {
 
     let rust_entry = CrossChainExecutionEntry::from_sol(&sol_entry).expect("valid entry");
     assert_eq!(rust_entry.state_deltas.len(), 2);
-    assert_eq!(rust_entry.action_hash, B256::with_last_byte(0xDD));
+    assert_eq!(rust_entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xDD)));
     assert_eq!(
         rust_entry.next_action.action_type,
         CrossChainActionType::L2Tx
@@ -787,7 +787,7 @@ fn test_parse_batch_posted_logs_matches_via_next_action_rollup_id_not_state_delt
         1,
         "entry must match via nextAction.rollupId even without state delta match"
     );
-    assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0x42));
+    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x42)));
     assert_eq!(result[0].l1_block_number, 100);
     assert_eq!(
         result[0].entry.next_action.rollup_id,
@@ -914,19 +914,19 @@ fn test_parse_batch_posted_logs_preserves_l1_block_ordering() {
         result[0].l1_block_number, 100,
         "first entry should be from first log"
     );
-    assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0x01));
+    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01)));
 
     assert_eq!(
         result[1].l1_block_number, 200,
         "second entry should be from second log"
     );
-    assert_eq!(result[1].entry.action_hash, B256::with_last_byte(0x02));
+    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02)));
 
     assert_eq!(
         result[2].l1_block_number, 150,
         "third entry should be from third log"
     );
-    assert_eq!(result[2].entry.action_hash, B256::with_last_byte(0x03));
+    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03)));
 }
 
 #[test]
@@ -995,9 +995,9 @@ fn test_parse_batch_posted_logs_multiple_entries_per_log_same_block() {
     }
 
     // Order should be preserved
-    assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0xAA));
-    assert_eq!(result[1].entry.action_hash, B256::with_last_byte(0xBB));
-    assert_eq!(result[2].entry.action_hash, B256::with_last_byte(0xCC));
+    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)));
+    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xBB)));
+    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xCC)));
 }
 
 #[test]
@@ -1050,7 +1050,7 @@ fn test_parse_batch_posted_logs_match_via_both_delta_and_action() {
         1,
         "entry matching via both paths should appear exactly once"
     );
-    assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0xDD));
+    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xDD)));
 }
 
 // ── encode_post_batch_calldata tests ──
@@ -1066,7 +1066,7 @@ fn test_encode_post_batch_calldata_selector_matches() {
             new_state: B256::with_last_byte(0x01),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(0xAA),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
             rollup_id: RollupId::new(U256::from(1)),
@@ -1110,7 +1110,7 @@ fn test_encode_post_batch_calldata_multiple_entries() {
             new_state: B256::with_last_byte(n.wrapping_add(1)),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(n.wrapping_add(0x10)),
+        action_hash: ActionHash::new(B256::with_last_byte(n.wrapping_add(0x10))),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
             rollup_id: RollupId::new(U256::from(n as u64)),
@@ -1153,7 +1153,7 @@ fn test_encode_post_batch_calldata_roundtrip_decode() {
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::try_from(-1_000_000i128).expect("valid i256"),
         }],
-        action_hash: B256::with_last_byte(0xFF),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xFF)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
             rollup_id: RollupId::new(U256::from(42)),
@@ -1296,19 +1296,19 @@ fn test_parse_batch_posted_logs_preserves_intra_log_entry_order_mixed_action_typ
     assert_eq!(result.len(), 3, "all 3 entries should match our rollup");
 
     // Verify ordering preserved: CALL(0x01), RESULT(0x02), CALL(0x03)
-    assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0x01));
+    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01)));
     assert_eq!(
         result[0].entry.next_action.action_type,
         CrossChainActionType::Call
     );
 
-    assert_eq!(result[1].entry.action_hash, B256::with_last_byte(0x02));
+    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02)));
     assert_eq!(
         result[1].entry.next_action.action_type,
         CrossChainActionType::Result
     );
 
-    assert_eq!(result[2].entry.action_hash, B256::with_last_byte(0x03));
+    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03)));
     assert_eq!(
         result[2].entry.next_action.action_type,
         CrossChainActionType::Call
@@ -1371,16 +1371,16 @@ fn test_parse_batch_posted_logs_multi_log_multi_entry_preserves_global_order() {
     assert_eq!(result.len(), 4);
 
     // Global order: log1[0], log1[1], log2[0], log2[1]
-    assert_eq!(result[0].entry.action_hash, B256::with_last_byte(0x10));
+    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x10)));
     assert_eq!(result[0].l1_block_number, 100);
 
-    assert_eq!(result[1].entry.action_hash, B256::with_last_byte(0x11));
+    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x11)));
     assert_eq!(result[1].l1_block_number, 100);
 
-    assert_eq!(result[2].entry.action_hash, B256::with_last_byte(0x20));
+    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x20)));
     assert_eq!(result[2].l1_block_number, 200);
 
-    assert_eq!(result[3].entry.action_hash, B256::with_last_byte(0x21));
+    assert_eq!(result[3].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x21)));
     assert_eq!(result[3].l1_block_number, 200);
 }
 
@@ -1621,11 +1621,13 @@ fn test_build_entries_matches_integration_test() {
             .unwrap();
 
     assert_eq!(
-        call_entry.action_hash, expected_call_hash,
+        call_entry.action_hash.as_b256(),
+        expected_call_hash,
         "build_cross_chain_call_entries CALL hash must match"
     );
     assert_eq!(
-        result_entry.action_hash, expected_result_hash,
+        result_entry.action_hash.as_b256(),
+        expected_result_hash,
         "build_cross_chain_call_entries RESULT hash must match"
     );
 
@@ -1780,8 +1782,8 @@ fn test_build_cross_chain_call_entries_empty_data() {
     assert!(result_entry.next_action.data.is_empty());
     assert!(!result_entry.next_action.failed);
     // Action hashes should be non-zero
-    assert_ne!(call_entry.action_hash, B256::ZERO);
-    assert_ne!(result_entry.action_hash, B256::ZERO);
+    assert_ne!(call_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
+    assert_ne!(result_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
 }
 
 #[test]
@@ -2016,7 +2018,7 @@ fn test_build_block_entries_creates_immediate_entries() {
     assert_eq!(entries.len(), 2);
     // All entries should be immediate (actionHash == 0)
     for entry in &entries {
-        assert_eq!(entry.action_hash, B256::ZERO);
+        assert_eq!(entry.action_hash, crate::cross_chain::ActionHash::ZERO);
         assert_eq!(entry.state_deltas.len(), 1);
         assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(1)));
     }
@@ -2048,7 +2050,7 @@ fn test_decode_post_batch_calldata_roundtrip() {
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::ZERO,
+        action_hash: crate::cross_chain::ActionHash::ZERO,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::L2Tx,
             rollup_id: RollupId::MAINNET,
@@ -2127,8 +2129,8 @@ fn test_parse_execution_consumed_logs_extracts_topic1() {
 
     let consumed = parse_execution_consumed_logs(&[log1, log2]);
     assert_eq!(consumed.len(), 2);
-    assert!(consumed.contains_key(&action_hash_1));
-    assert!(consumed.contains_key(&action_hash_2));
+    assert!(consumed.contains_key(&ActionHash::from_log_boundary(action_hash_1)));
+    assert!(consumed.contains_key(&ActionHash::from_log_boundary(action_hash_2)));
 }
 
 #[test]
@@ -2167,7 +2169,7 @@ fn test_parse_execution_consumed_deduplicates() {
     // Same log twice
     let consumed = parse_execution_consumed_logs(&[log.clone(), log]);
     assert_eq!(consumed.len(), 1);
-    assert!(consumed.contains_key(&action_hash));
+    assert!(consumed.contains_key(&ActionHash::from_log_boundary(action_hash)));
 }
 
 #[test]
@@ -2291,7 +2293,8 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         &l2_entry_0.next_action.to_sol_action(),
     ));
     assert_eq!(
-        l2_entry_1.action_hash, expected_hash,
+        l2_entry_1.action_hash.as_b256(),
+        expected_hash,
         "L2 entry 1 action_hash must match hash of the RESULT action"
     );
 
@@ -2577,7 +2580,7 @@ fn test_compute_revert_continue_hash_deterministic() {
     );
 
     // Hash is non-zero
-    assert_ne!(hash1, B256::ZERO, "hash must not be zero");
+    assert_ne!(hash1, ActionHash::ZERO, "hash must not be zero");
 }
 
 #[test]
@@ -2600,7 +2603,8 @@ fn test_revert_continue_hash_matches_manual_abi_encode() {
     ));
     let helper_hash = compute_revert_continue_hash(rollup_id);
     assert_eq!(
-        manual_hash, helper_hash,
+        manual_hash,
+        helper_hash.as_b256(),
         "compute_revert_continue_hash must match manual ABI encode + keccak256"
     );
 }
@@ -2807,7 +2811,7 @@ fn test_attach_generic_state_deltas_revert_group() {
                 new_state: B256::ZERO,
                 ether_delta: I256::ZERO,
             }],
-            action_hash: B256::with_last_byte(0xAA),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: RollupId::MAINNET,
@@ -2827,7 +2831,7 @@ fn test_attach_generic_state_deltas_revert_group() {
                 new_state: B256::ZERO,
                 ether_delta: I256::ZERO,
             }],
-            action_hash: B256::with_last_byte(0xBB),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xBB)),
             next_action: revert_action(rollup_id_u256, ScopePath::root()),
         },
         CrossChainExecutionEntry {
@@ -2898,7 +2902,7 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
                 new_state: B256::ZERO,
                 ether_delta: I256::ZERO,
             }],
-            action_hash: B256::with_last_byte(0xAA),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
                 rollup_id: RollupId::MAINNET,
@@ -2918,7 +2922,7 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
                 new_state: B256::ZERO,
                 ether_delta: I256::ZERO,
             }],
-            action_hash: B256::with_last_byte(0xBB),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xBB)),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Result,
                 rollup_id: rollup_id_u256,
@@ -3026,7 +3030,9 @@ fn mk_trigger_entry(our_rollup_id: RollupId, dest: Address) -> CrossChainExecuti
         source_rollup: RollupId::MAINNET,
         scope: ScopePath::root(),
     };
-    let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
+    let action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &action.to_sol_action(),
+    )));
     CrossChainExecutionEntry {
         state_deltas: vec![],
         action_hash,
@@ -3053,7 +3059,7 @@ fn mk_continuation_entry(our_rollup_id: RollupId) -> CrossChainExecutionEntry {
     CrossChainExecutionEntry {
         state_deltas: vec![],
         // action_hash is *something else* — NOT hash(next_action).
-        action_hash: B256::with_last_byte(0xFE),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xFE)),
         next_action: action,
     }
 }
@@ -3073,7 +3079,9 @@ fn mk_foreign_entry(our_rollup_id: RollupId) -> CrossChainExecutionEntry {
         source_rollup: RollupId::MAINNET,
         scope: ScopePath::root(),
     };
-    let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
+    let action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &action.to_sol_action(),
+    )));
     CrossChainExecutionEntry {
         state_deltas: vec![],
         action_hash,
@@ -3314,9 +3322,9 @@ mod proptests_filtering {
             // Triggers are EXACTLY the entries whose action_hash == hash(next_action)
             // AND whose next_action is a Call to our_id. Verify the classifier.
             for t in &triggers {
-                let next_hash = keccak256(
+                let next_hash = ActionHash::new(keccak256(
                     ICrossChainManagerL2::Action::abi_encode(&t.next_action.to_sol_action()),
-                );
+                ));
                 prop_assert_eq!(next_hash, t.action_hash);
                 prop_assert_eq!(t.next_action.action_type, CrossChainActionType::Call);
                 prop_assert_eq!(t.next_action.rollup_id, our_id);

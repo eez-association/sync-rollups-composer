@@ -1617,6 +1617,12 @@ where
             let has_entries = has_rpc_entries || num_user_triggers > 0;
 
             let mut intermediate_roots = Vec::new();
+            // The clean state root is constructed exactly here. This is the
+            // canonical (and currently only) call site that turns a raw
+            // `B256` into a `CleanStateRoot`. `cross_chain::CleanStateRoot::new`
+            // is `pub(crate)`, so any future attempt to fabricate a clean
+            // root from a freshly-computed value somewhere else (the
+            // anti-pattern that invariant #3 forbids) will not compile.
             let clean_state_root = if has_entries {
                 match self.compute_intermediate_roots(
                     next_l2_block.saturating_sub(1),
@@ -1638,7 +1644,7 @@ where
                             "computed unified intermediate state roots"
                         );
                         intermediate_roots = roots;
-                        clean
+                        crate::cross_chain::CleanStateRoot::new(clean)
                     }
                     Err(err) => {
                         error!(
@@ -1655,11 +1661,12 @@ where
                         self.pending_l1_group_starts.clear();
                         self.pending_l1_independent.clear();
                         self.pending_l1_trigger_metadata.clear();
-                        built.state_root // No entries → speculative IS clean
+                        // No entries → speculative IS clean.
+                        crate::cross_chain::CleanStateRoot::new(built.state_root)
                     }
                 }
             } else {
-                built.state_root
+                crate::cross_chain::CleanStateRoot::new(built.state_root)
             };
 
             // Attach correct state deltas to all pending L1 entries using the
@@ -1723,7 +1730,7 @@ where
                     let next_action_hash = alloy_primitives::keccak256(&next_action_encoded);
                     // abi.encode(bytes32, bytes32) = 64 bytes concatenated
                     let mut composite_input = Vec::with_capacity(64);
-                    composite_input.extend_from_slice(e.action_hash.as_slice());
+                    composite_input.extend_from_slice(e.action_hash.as_b256().as_slice());
                     composite_input.extend_from_slice(next_action_hash.as_slice());
                     let composite = alloy_primitives::keccak256(&composite_input);
                     debug!(
@@ -1870,7 +1877,7 @@ where
                 if root != B256::ZERO {
                     if let Some(pos) = self.pending_submissions.iter().rposition(|b| {
                         b.state_root == root
-                            || b.clean_state_root == root
+                            || b.clean_state_root.as_b256() == root
                             || b.intermediate_roots.contains(&root)
                     }) {
                         // Drain blocks 0..=pos (already on-chain)
@@ -2288,10 +2295,12 @@ where
                                         ),
                                     );
 
-                                let mut entry_counts: std::collections::HashMap<B256, usize> =
-                                    std::collections::HashMap::new();
+                                let mut entry_counts: std::collections::HashMap<
+                                    crate::cross_chain::ActionHash,
+                                    usize,
+                                > = std::collections::HashMap::new();
                                 for e in l1_entries.iter() {
-                                    if e.action_hash == alloy_primitives::B256::ZERO {
+                                    if e.action_hash == crate::cross_chain::ActionHash::ZERO {
                                         continue;
                                     }
                                     if e.next_action.action_type
@@ -2329,7 +2338,7 @@ where
                                         target: "based_rollup::driver",
                                         l1_block_number,
                                         consumed = consumed_total,
-                                        total = l1_entries.iter().filter(|e| e.action_hash != B256::ZERO).count(),
+                                        total = l1_entries.iter().filter(|e| e.action_hash != crate::cross_chain::ActionHash::ZERO).count(),
                                         "partial entry consumption — rewinding immediately"
                                     );
                                     let entry_block = self.pending_entry_verification_block;

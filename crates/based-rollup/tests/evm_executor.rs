@@ -522,7 +522,7 @@ fn test_cross_chain_incoming_call_executes_counter() {
 
     let result_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: result_action_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
         next_action: result_action,
     };
 
@@ -545,7 +545,7 @@ fn test_cross_chain_incoming_call_executes_counter() {
 
     let call_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: call_action_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(call_action_hash),
         next_action: call_action,
     };
 
@@ -864,7 +864,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
 
     let inner_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: inner_call_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(inner_call_hash),
         next_action: inner_result,
     };
 
@@ -887,7 +887,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
 
     let outer_result_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: outer_result_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(outer_result_hash),
         next_action: outer_result,
     };
 
@@ -909,7 +909,7 @@ fn test_cross_chain_nested_call_counter_and_proxy() {
 
     let trigger_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: trigger_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(trigger_hash),
         next_action: trigger_call,
     };
 
@@ -1050,7 +1050,7 @@ fn test_cross_chain_multi_entry_batch_three_increments() {
 
         all_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: result_action_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
             next_action: result_action,
         });
 
@@ -1072,7 +1072,7 @@ fn test_cross_chain_multi_entry_batch_three_increments() {
 
         all_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: call_action_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(call_action_hash),
             next_action: call_action,
         });
     }
@@ -1203,7 +1203,7 @@ fn test_cross_chain_multi_entry_different_destinations() {
 
         all_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: result_action_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
             next_action: result_action,
         });
 
@@ -1224,7 +1224,7 @@ fn test_cross_chain_multi_entry_different_destinations() {
 
         all_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: call_action_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(call_action_hash),
             next_action: call_action,
         });
     }
@@ -1387,22 +1387,22 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
     let _entries = [
         CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: result_action_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
             next_action: result_action,
         },
         CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: call_action_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(call_action_hash),
             next_action: call_action,
         },
         CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: extra_1_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(extra_1_hash),
             next_action: extra_1,
         },
         CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: extra_2_hash,
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(extra_2_hash),
             next_action: extra_2,
         },
     ];

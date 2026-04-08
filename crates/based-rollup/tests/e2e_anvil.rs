@@ -1148,7 +1148,7 @@ async fn test_proposer_submits_to_l1() {
         l2_block_number: 1,
         pre_state_root: B256::ZERO,
         state_root: dummy_state_root(1),
-        clean_state_root: dummy_state_root(1),
+        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(1)),
         encoded_transactions: payload.clone(),
         intermediate_roots: vec![],
     };
@@ -1249,7 +1249,7 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 1,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(1),
-            clean_state_root: dummy_state_root(1),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(1)),
             encoded_transactions: Bytes::from_static(b"batch1"),
             intermediate_roots: vec![],
         },
@@ -1257,7 +1257,7 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 2,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(2),
-            clean_state_root: dummy_state_root(2),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(2)),
             encoded_transactions: Bytes::from_static(b"batch2"),
             intermediate_roots: vec![],
         },
@@ -1265,7 +1265,7 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 3,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(3),
-            clean_state_root: dummy_state_root(3),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(3)),
             encoded_transactions: Bytes::from_static(b"batch3"),
             intermediate_roots: vec![],
         },
@@ -2334,7 +2334,7 @@ async fn test_proposer_reads_state_root_after_submissions() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
             encoded_transactions: Bytes::new(),
             intermediate_roots: vec![],
         })
@@ -2729,7 +2729,7 @@ async fn test_concurrent_proposer_submissions() {
         l2_block_number: 1,
         pre_state_root: B256::ZERO,
         state_root: dummy_state_root(1),
-        clean_state_root: dummy_state_root(1),
+        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(1)),
         encoded_transactions: Bytes::from_static(b"race"),
         intermediate_roots: vec![],
     };
@@ -2843,7 +2843,7 @@ async fn test_large_batch_chunking() {
                 l2_block_number: n,
                 pre_state_root: on_chain_root,
                 state_root: dummy_state_root(n),
-                clean_state_root: dummy_state_root(n),
+                clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
                 encoded_transactions: Bytes::from(format!("chunk_{n}").into_bytes()),
                 intermediate_roots: vec![],
             })
@@ -3061,7 +3061,7 @@ async fn test_proposer_backfill_from_local_chain() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
             encoded_transactions: Bytes::from(format!("p1_block_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -3098,7 +3098,7 @@ async fn test_proposer_backfill_from_local_chain() {
             l2_block_number: n,
             pre_state_root: dummy_state_root(3),
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
             encoded_transactions: Bytes::from(format!("p2_block_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -3670,7 +3670,7 @@ async fn test_proposer_max_batch_size() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
             encoded_transactions: Bytes::from(format!("prop_max_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -5149,7 +5149,8 @@ async fn test_cross_chain_load_execution_table_system_call() {
     );
     // First entry is CALL trigger with original action_hash and state_deltas
     assert_eq!(
-        decoded.entries[0].actionHash, entry.action_hash,
+        decoded.entries[0].actionHash,
+        entry.action_hash.as_b256(),
         "CALL entry action_hash should match original"
     );
     assert_eq!(
@@ -5189,7 +5190,7 @@ async fn test_cross_chain_action_hash_matches_solidity() {
     let rust_action_hash = compute_l2tx_action_hash(1, &rlp_tx);
     assert_ne!(
         rust_action_hash,
-        B256::ZERO,
+        based_rollup::cross_chain::ActionHash::from_abi_boundary(B256::ZERO),
         "action hash should be non-zero"
     );
 
@@ -6041,7 +6042,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     // L2 EVM execution, not L1 consumption, so empty deltas are correct.
     let result_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: result_action_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
         next_action: result_action,
     };
 
@@ -6065,7 +6066,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     // Same as result_entry: state_deltas populated by builder, not at creation time.
     let call_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: call_action_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(call_action_hash),
         next_action: call_action,
     };
 

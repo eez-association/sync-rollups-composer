@@ -39,14 +39,14 @@
 //! can build on it without retrofitting.
 
 use crate::cross_chain::{
-    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, RollupId, ScopePath,
-    build_cross_chain_call_entries, build_l2_to_l1_call_entries,
+    ActionHash, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, RollupId,
+    ScopePath, build_cross_chain_call_entries, build_l2_to_l1_call_entries,
 };
 use crate::table_builder::{
     CallDirection, DetectedCall, build_continuation_entries,
     build_l2_to_l1_continuation_entries,
 };
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, U256};
 
 /// Direction-agnostic enum identifying the canonical cross-chain pattern
 /// under test. Used by mirror tests to gate assertions that only apply
@@ -82,7 +82,7 @@ pub struct MirrorCase {
     pub direction: CallDirection,
     pub l1_entries: Vec<CrossChainExecutionEntry>,
     pub l2_entries: Vec<CrossChainExecutionEntry>,
-    pub all_action_hashes: Vec<B256>,
+    pub all_action_hashes: Vec<ActionHash>,
 }
 
 impl MirrorCase {
@@ -95,7 +95,7 @@ impl MirrorCase {
     fn collect_hashes(
         l1: &[CrossChainExecutionEntry],
         l2: &[CrossChainExecutionEntry],
-    ) -> Vec<B256> {
+    ) -> Vec<ActionHash> {
         let mut hashes = Vec::with_capacity(l1.len() + l2.len());
         for e in l1 {
             hashes.push(e.action_hash);
