@@ -1573,3 +1573,438 @@ fn test_void_children_still_use_result_void() {
         "void delivery → L1 uses result_void"
     );
 }
+
+// ──────────────────────────────────────────────
+//  Step 0.4 (refactor) — reorder_for_swap_and_pop invariants
+//
+//  Targets table_builder::reorder_for_swap_and_pop (table_builder.rs:124),
+//  which is private and only reachable from this sibling test file.
+//
+//  Properties verified:
+//    1. Multiset preservation (no entry lost or duplicated).
+//    2. No-op when every action_hash group has size ≤ 2 (matches the
+//       function's docstring claim).
+//    3. After reorder, every same-hash group is contiguous in the output.
+//    4. The first entry of each multi-hash group (by order of first
+//       appearance in the input) is preserved at the start of its
+//       contiguous block — this is what makes Solidity's swap-and-pop
+//       FIFO consumption correct (the spec docstring's "Proof (N=3)").
+//    5. End-to-end: simulating Solidity's swap-and-pop on the reordered
+//       array produces FIFO consumption order, for groups of any size.
+// ──────────────────────────────────────────────
+
+/// Test helper: build a CrossChainExecutionEntry whose `action_hash` is
+/// `B256::with_last_byte(hash_byte)` and whose `next_action.value` is
+/// `seq` so distinct entries within the same hash group are
+/// distinguishable for ordering assertions.
+fn mk_reorder_entry(hash_byte: u8, seq: u64) -> CrossChainExecutionEntry {
+    CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash: B256::with_last_byte(hash_byte),
+        next_action: CrossChainAction {
+            action_type: CrossChainActionType::Result,
+            rollup_id: U256::from(1),
+            destination: Address::ZERO,
+            value: U256::from(seq),
+            data: vec![],
+            failed: false,
+            source_address: Address::ZERO,
+            source_rollup: U256::ZERO,
+            scope: vec![],
+        },
+    }
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_empty() {
+    let mut entries: Vec<CrossChainExecutionEntry> = vec![];
+    reorder_for_swap_and_pop(&mut entries);
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_all_singletons_is_noop() {
+    let mut entries = vec![
+        mk_reorder_entry(1, 100),
+        mk_reorder_entry(2, 200),
+        mk_reorder_entry(3, 300),
+    ];
+    let original = entries.clone();
+    reorder_for_swap_and_pop(&mut entries);
+    assert_eq!(entries, original, "no group ≥ 3 means the function is a no-op");
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_all_pairs_is_noop() {
+    // Two pairs: hash 1 (twice) and hash 2 (twice). No group ≥ 3 → no-op.
+    let mut entries = vec![
+        mk_reorder_entry(1, 10),
+        mk_reorder_entry(2, 20),
+        mk_reorder_entry(1, 11),
+        mk_reorder_entry(2, 21),
+    ];
+    let original = entries.clone();
+    reorder_for_swap_and_pop(&mut entries);
+    assert_eq!(
+        entries, original,
+        "pair-only groups must not trigger any reorder"
+    );
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_n3_group_exact_layout() {
+    // Single group of 3 entries: input [E0, E1, E2] must become [E0, E2, E1]
+    // per the function's docstring "Proof (N=3)".
+    let mut entries = vec![
+        mk_reorder_entry(1, 0),
+        mk_reorder_entry(1, 1),
+        mk_reorder_entry(1, 2),
+    ];
+    reorder_for_swap_and_pop(&mut entries);
+    assert_eq!(entries[0].next_action.value, U256::from(0));
+    assert_eq!(entries[1].next_action.value, U256::from(2));
+    assert_eq!(entries[2].next_action.value, U256::from(1));
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_n4_group_exact_layout() {
+    // [E0, E1, E2, E3] must become [E0, E3, E2, E1]
+    // (E0 stays first, [E1..] reversed = [E3, E2, E1]).
+    let mut entries = vec![
+        mk_reorder_entry(1, 0),
+        mk_reorder_entry(1, 1),
+        mk_reorder_entry(1, 2),
+        mk_reorder_entry(1, 3),
+    ];
+    reorder_for_swap_and_pop(&mut entries);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| e.next_action.value.to::<u64>())
+            .collect::<Vec<_>>(),
+        vec![0u64, 3, 2, 1]
+    );
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_groups_first_then_singletons() {
+    // Mixed input: a 3-group + a singleton. After reorder the multi-group
+    // must come first (contiguous), then the singleton.
+    let mut entries = vec![
+        mk_reorder_entry(2, 99), // singleton
+        mk_reorder_entry(1, 0),
+        mk_reorder_entry(1, 1),
+        mk_reorder_entry(1, 2),
+    ];
+    reorder_for_swap_and_pop(&mut entries);
+    // Multi-group [hash=1] sits first.
+    assert_eq!(entries[0].action_hash, B256::with_last_byte(1));
+    assert_eq!(entries[1].action_hash, B256::with_last_byte(1));
+    assert_eq!(entries[2].action_hash, B256::with_last_byte(1));
+    // Singleton last.
+    assert_eq!(entries[3].action_hash, B256::with_last_byte(2));
+    assert_eq!(entries[3].next_action.value, U256::from(99));
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_solidity_swap_and_pop_yields_fifo_n3() {
+    // The whole point of this function: after reordering, simulating
+    // Solidity's _consumeExecution (forward scan + swap-and-pop) on the
+    // reordered array must consume entries in input order (FIFO).
+    let original = vec![
+        mk_reorder_entry(1, 0), // E0
+        mk_reorder_entry(1, 1), // E1
+        mk_reorder_entry(1, 2), // E2
+    ];
+    let mut storage = original.clone();
+    reorder_for_swap_and_pop(&mut storage);
+
+    // Simulate consumption: pop "the first entry matching action_hash A"
+    // 3 times in a row.
+    let target_hash = B256::with_last_byte(1);
+    let mut consumed_order = Vec::new();
+    while let Some(idx) = storage.iter().position(|e| e.action_hash == target_hash) {
+        consumed_order.push(storage[idx].next_action.value.to::<u64>());
+        // swap-and-pop
+        let last = storage.len() - 1;
+        storage.swap(idx, last);
+        storage.pop();
+    }
+
+    assert_eq!(
+        consumed_order,
+        vec![0u64, 1, 2],
+        "Solidity swap-and-pop on reordered array must yield FIFO"
+    );
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_solidity_swap_and_pop_yields_fifo_n5() {
+    let original: Vec<CrossChainExecutionEntry> =
+        (0..5u64).map(|i| mk_reorder_entry(7, i)).collect();
+    let mut storage = original.clone();
+    reorder_for_swap_and_pop(&mut storage);
+
+    let target_hash = B256::with_last_byte(7);
+    let mut consumed_order = Vec::new();
+    while let Some(idx) = storage.iter().position(|e| e.action_hash == target_hash) {
+        consumed_order.push(storage[idx].next_action.value.to::<u64>());
+        let last = storage.len() - 1;
+        storage.swap(idx, last);
+        storage.pop();
+    }
+
+    assert_eq!(
+        consumed_order,
+        vec![0u64, 1, 2, 3, 4],
+        "Solidity swap-and-pop on N=5 reordered must yield FIFO"
+    );
+}
+
+#[test]
+fn test_reorder_for_swap_and_pop_with_interleaved_other_groups() {
+    // The function moves multi-groups to the front so that consuming a
+    // singleton from the back (swap-and-pop) does NOT disrupt the multi-
+    // group's ordering. Verify by simulating mixed consumption.
+    //
+    // Input: [E0(hash=1), S0(hash=2), E1(hash=1), S1(hash=3), E2(hash=1)]
+    // After reorder, hash=1 group is at the front; consumption of S0/S1
+    // never touches it.
+    let mut storage = vec![
+        mk_reorder_entry(1, 0),
+        mk_reorder_entry(2, 50),
+        mk_reorder_entry(1, 1),
+        mk_reorder_entry(3, 60),
+        mk_reorder_entry(1, 2),
+    ];
+    reorder_for_swap_and_pop(&mut storage);
+
+    // First: consume singletons hash=2 and hash=3 (in any order). They
+    // should NOT disturb the hash=1 ordering.
+    let s2_idx = storage
+        .iter()
+        .position(|e| e.action_hash == B256::with_last_byte(2))
+        .unwrap();
+    let last = storage.len() - 1;
+    storage.swap(s2_idx, last);
+    storage.pop();
+
+    let s3_idx = storage
+        .iter()
+        .position(|e| e.action_hash == B256::with_last_byte(3))
+        .unwrap();
+    let last = storage.len() - 1;
+    storage.swap(s3_idx, last);
+    storage.pop();
+
+    // Now consume the hash=1 group; expected FIFO order.
+    let mut consumed = Vec::new();
+    while let Some(idx) = storage
+        .iter()
+        .position(|e| e.action_hash == B256::with_last_byte(1))
+    {
+        consumed.push(storage[idx].next_action.value.to::<u64>());
+        let last = storage.len() - 1;
+        storage.swap(idx, last);
+        storage.pop();
+    }
+    assert_eq!(consumed, vec![0u64, 1, 2]);
+}
+
+mod proptests_reorder {
+    use super::*;
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    /// Strategy: a single entry whose action_hash is drawn from a small
+    /// palette so that group sizes >1 are likely. `seq` is unique within
+    /// the test for verifiable ordering.
+    fn arb_entry(hash_palette: u8, seq: u64) -> CrossChainExecutionEntry {
+        mk_reorder_entry(hash_palette, seq)
+    }
+
+    fn arb_entry_list() -> impl Strategy<Value = Vec<CrossChainExecutionEntry>> {
+        prop_vec(0u8..4u8, 0..16usize).prop_map(|tags| {
+            tags.into_iter()
+                .enumerate()
+                .map(|(i, tag)| arb_entry(tag, i as u64))
+                .collect()
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        /// `reorder_for_swap_and_pop` preserves the multiset of entries.
+        #[test]
+        fn reorder_preserves_multiset(input in arb_entry_list()) {
+            let mut copy = input.clone();
+            reorder_for_swap_and_pop(&mut copy);
+
+            prop_assert_eq!(copy.len(), input.len());
+
+            let mut a = input.clone();
+            let mut b = copy.clone();
+            // Sort by (hash, value) so duplicates are ordered identically.
+            a.sort_by(|x, y| {
+                x.action_hash
+                    .cmp(&y.action_hash)
+                    .then(x.next_action.value.cmp(&y.next_action.value))
+            });
+            b.sort_by(|x, y| {
+                x.action_hash
+                    .cmp(&y.action_hash)
+                    .then(x.next_action.value.cmp(&y.next_action.value))
+            });
+            prop_assert_eq!(a, b);
+        }
+
+        /// `reorder_for_swap_and_pop` is a no-op when no group has 3+ entries.
+        #[test]
+        fn reorder_noop_when_all_groups_smaller_than_three(input in arb_entry_list()) {
+            let mut counts: HashMap<B256, usize> = HashMap::new();
+            for e in &input {
+                *counts.entry(e.action_hash).or_insert(0) += 1;
+            }
+            let any_large = counts.values().any(|&n| n >= 3);
+
+            let mut copy = input.clone();
+            reorder_for_swap_and_pop(&mut copy);
+
+            if !any_large {
+                prop_assert_eq!(
+                    copy, input,
+                    "no group ≥ 3 must produce a byte-identical no-op"
+                );
+            }
+        }
+
+        /// When the function actually reorders (input has at least one
+        /// group of size ≥ 3), every same-hash group is contiguous in the
+        /// output: each `action_hash` appears in exactly one contiguous
+        /// run. When the function is a no-op (all groups ≤ 2),
+        /// contiguity is NOT a property of the function — the input may
+        /// have interleaved 2-groups and that is intentionally preserved.
+        #[test]
+        fn reorder_groups_are_contiguous_when_reordered(input in arb_entry_list()) {
+            let mut counts: HashMap<B256, usize> = HashMap::new();
+            for e in &input {
+                *counts.entry(e.action_hash).or_insert(0) += 1;
+            }
+            let any_large = counts.values().any(|&n| n >= 3);
+            if !any_large {
+                // No precondition met → no contiguity guarantee.
+                return Ok(());
+            }
+
+            let mut copy = input;
+            reorder_for_swap_and_pop(&mut copy);
+
+            let mut closed: std::collections::BTreeSet<B256> = std::collections::BTreeSet::new();
+            let mut last_hash: Option<B256> = None;
+            for e in &copy {
+                if Some(e.action_hash) != last_hash {
+                    if let Some(prev) = last_hash {
+                        closed.insert(prev);
+                    }
+                    prop_assert!(
+                        !closed.contains(&e.action_hash),
+                        "after reorder, hash reappears after being interrupted"
+                    );
+                    last_hash = Some(e.action_hash);
+                }
+            }
+        }
+
+        /// When the function reorders, the first entry of each group
+        /// (by input order) is preserved at the start of its contiguous
+        /// block in the output. This is the FIFO-correctness property
+        /// of the docstring's "Proof (N=3)".
+        #[test]
+        fn reorder_preserves_first_entry_when_reordered(input in arb_entry_list()) {
+            let mut counts: HashMap<B256, usize> = HashMap::new();
+            for e in &input {
+                *counts.entry(e.action_hash).or_insert(0) += 1;
+            }
+            let any_large = counts.values().any(|&n| n >= 3);
+            if !any_large {
+                return Ok(());
+            }
+
+            let mut first_input_per_hash: HashMap<B256, &CrossChainExecutionEntry> = HashMap::new();
+            for e in &input {
+                first_input_per_hash.entry(e.action_hash).or_insert(e);
+            }
+
+            let mut copy = input.clone();
+            reorder_for_swap_and_pop(&mut copy);
+
+            let mut last_hash: Option<B256> = None;
+            for e in &copy {
+                if Some(e.action_hash) != last_hash {
+                    let expected = first_input_per_hash[&e.action_hash];
+                    prop_assert_eq!(e, expected);
+                    last_hash = Some(e.action_hash);
+                }
+            }
+        }
+
+        /// When the function reorders, the multi-group contiguous block
+        /// (entries from groups of size ≥ 2) precedes the singleton
+        /// block (entries from groups of size 1). This is the layout
+        /// invariant that lets singletons be consumed without disrupting
+        /// the multi-group's swap-and-pop order.
+        #[test]
+        fn reorder_multigroups_precede_singletons_when_reordered(input in arb_entry_list()) {
+            let mut counts: HashMap<B256, usize> = HashMap::new();
+            for e in &input {
+                *counts.entry(e.action_hash).or_insert(0) += 1;
+            }
+            let any_large = counts.values().any(|&n| n >= 3);
+            if !any_large {
+                return Ok(());
+            }
+
+            let multi_hashes: std::collections::BTreeSet<B256> = counts
+                .iter()
+                .filter(|&(_, n)| *n >= 2)
+                .map(|(&h, _)| h)
+                .collect();
+
+            let mut copy = input;
+            reorder_for_swap_and_pop(&mut copy);
+
+            // Walk forward; once we see the first singleton entry, no
+            // further multi-group entry may appear.
+            let mut singleton_block_started = false;
+            for e in &copy {
+                let is_multi = multi_hashes.contains(&e.action_hash);
+                if singleton_block_started {
+                    prop_assert!(
+                        !is_multi,
+                        "multi-group entry appears after singleton block started"
+                    );
+                } else if !is_multi {
+                    singleton_block_started = true;
+                }
+            }
+        }
+
+        // NOTE: end-to-end FIFO under arbitrary consumption interleavings
+        // is NOT a property of `reorder_for_swap_and_pop`. The function
+        // only guarantees FIFO when:
+        //   (a) the array contains a single multi-group + singletons, AND
+        //   (b) singletons are consumed BEFORE the multi-group (so the
+        //       multi-group sits alone at the front when its turn comes).
+        //
+        // This narrow consumption pattern is what real callers in
+        // table_builder.rs use (multi-call continuation chains are
+        // consumed in one user-tx burst, with no other consumptions
+        // interleaved). The unit tests
+        // `test_reorder_for_swap_and_pop_solidity_swap_and_pop_yields_fifo_*`
+        // exercise this pattern explicitly. We deliberately do NOT
+        // generate a proptest that drains arbitrary consumption orders,
+        // because such orders fall outside the function's contract.
+    }
+}
