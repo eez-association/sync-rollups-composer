@@ -2061,10 +2061,13 @@ async fn build_and_run_l1_postbatch_trace(
 
     // Sign ECDSA proof for postBatch in traceCallMany context.
     let trace_parent_hash = block_hash;
+    // `UNIX_EPOCH` is by definition ≤ now on any system with a sane clock; we
+    // still handle the rare SystemTime-before-epoch case defensively so there
+    // is no `.unwrap()` in production code.
     let trace_block_timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     let call_data_bytes = alloy_primitives::Bytes::new();
     let entry_hashes = crate::cross_chain::compute_entry_hashes(&entries, vk);

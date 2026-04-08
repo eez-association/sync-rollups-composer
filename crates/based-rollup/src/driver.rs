@@ -2901,9 +2901,9 @@ where
         };
         match send_result {
             Ok(tx_hash) => {
-                if !block_l2_numbers.is_empty() {
-                    let first = *block_l2_numbers.first().unwrap();
-                    let last = *block_l2_numbers.last().unwrap();
+                if let (Some(&first), Some(&last)) =
+                    (block_l2_numbers.first(), block_l2_numbers.last())
+                {
                     info!(
                         target: "based_rollup::driver",
                         block_count = block_l2_numbers.len(),

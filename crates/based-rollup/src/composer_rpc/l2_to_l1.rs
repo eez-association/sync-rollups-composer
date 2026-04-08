@@ -473,19 +473,22 @@ async fn queue_l2_to_l1_multi_call_entries(
                 "sourceAddress": format!("{}", rc.source_address)
             });
             if let Some(idx) = rc.parent_call_index.child_index() {
-                obj.as_object_mut().unwrap().insert(
+                obj.as_object_mut()
+                    .expect("serde_json::json!({ ... }) always yields an Object").insert(
                     "parentCallIndex".to_string(),
                     serde_json::Value::Number(serde_json::Number::from(idx.as_usize())),
                 );
             }
             if !rc.l2_return_data.is_empty() {
-                obj.as_object_mut().unwrap().insert(
+                obj.as_object_mut()
+                    .expect("serde_json::json!({ ... }) always yields an Object").insert(
                     "l2ReturnData".to_string(),
                     serde_json::Value::String(format!("0x{}", hex::encode(&rc.l2_return_data))),
                 );
             }
             if rc.l2_delivery_failed {
-                obj.as_object_mut().unwrap().insert(
+                obj.as_object_mut()
+                    .expect("serde_json::json!({ ... }) always yields an Object").insert(
                     "l2DeliveryFailed".to_string(),
                     serde_json::Value::Bool(true),
                 );
@@ -1842,10 +1845,11 @@ async fn simulate_l1_delivery(
         let trace_parent_hash = block_hash;
         // For traceCallMany simulation, we control the block timestamp via blockOverride.
         // Use current time — the override ensures consistency between signed proof and simulation.
+        // Fallback to 0 on the vanishingly rare SystemTime-before-epoch case.
         let trace_block_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         // Get verification key from Rollups contract.
         let vk =
@@ -2268,8 +2272,8 @@ async fn simulate_chained_delivery_l2_to_l1(
     let trace_block_number_val = block_number + 1;
     let trace_block_timestamp_val = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     // Step 4: Build debug_traceCallMany request with ONE bundle containing N delivery
     // calls. Each tx executes from the L1 proxy to the destination, seeing state
@@ -2690,8 +2694,8 @@ async fn simulate_l1_combined_delivery(
         let trace_parent_hash = block_hash;
         let trace_block_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         // Get verification key from Rollups contract.
         let vk =
