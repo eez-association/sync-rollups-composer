@@ -827,3 +827,402 @@ fn test_derivation_effective_state_root_with_consumed_deltas() {
         assert_eq!(effective_root, y, "none consumed → Y");
     }
 }
+
+// ──────────────────────────────────────────────
+//  Step 0.3 (refactor) — §4f filtering invariants
+//
+//  Closes invariants:
+//    #4  §4f filtering is per-call prefix counting, never all-or-nothing
+//        — see test_compute_consumed_trigger_prefix_* and the prefix
+//        monotonicity proptest below.
+//    #16 §4f filtering is generic on CrossChainCallExecuted events,
+//        not Bridge selectors — covered in cross_chain_tests.rs via
+//        test_identify_trigger_tx_indices_ignores_unrelated_event_signature.
+//
+//  Targets (all live in cross_chain.rs but tested here per the refactor
+//  PLAN.md, since the §4f filtering pipeline is owned by derivation):
+//    - cross_chain::compute_consumed_trigger_prefix (cross_chain.rs:2237)
+//    - cross_chain::filter_block_by_trigger_prefix  (cross_chain.rs:2196)
+// ──────────────────────────────────────────────
+
+#[cfg(test)]
+mod filtering_invariants_tests {
+    use crate::cross_chain::{
+        compute_consumed_trigger_prefix, execution_consumed_signature_hash,
+        filter_block_by_trigger_prefix,
+    };
+    use alloy_primitives::{Address, B256, Bytes, LogData};
+
+    /// Build a Receipt whose log[0] is the canonical ExecutionConsumed event
+    /// from `ccm_address` for `action_hash`.
+    fn mk_trigger_receipt(
+        ccm_address: Address,
+        action_hash: B256,
+    ) -> alloy_consensus::Receipt<alloy_primitives::Log> {
+        let sig = execution_consumed_signature_hash();
+        alloy_consensus::Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(true),
+            cumulative_gas_used: 0,
+            logs: vec![alloy_primitives::Log {
+                address: ccm_address,
+                data: LogData::new(vec![sig, action_hash], Bytes::new()).unwrap(),
+            }],
+        }
+    }
+
+    /// Build a Receipt whose ExecutionConsumed event lists multiple
+    /// action hashes (one per log).
+    fn mk_trigger_receipt_multi(
+        ccm_address: Address,
+        action_hashes: &[B256],
+    ) -> alloy_consensus::Receipt<alloy_primitives::Log> {
+        let sig = execution_consumed_signature_hash();
+        alloy_consensus::Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(true),
+            cumulative_gas_used: 0,
+            logs: action_hashes
+                .iter()
+                .map(|&h| alloy_primitives::Log {
+                    address: ccm_address,
+                    data: LogData::new(vec![sig, h], Bytes::new()).unwrap(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_compute_consumed_trigger_prefix_empty_indices_returns_zero() {
+        let ccm = Address::with_last_byte(0xAB);
+        let receipts: Vec<alloy_consensus::Receipt<alloy_primitives::Log>> = vec![];
+        let mut map = std::collections::HashMap::new();
+        let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[]);
+        assert_eq!(k, 0);
+    }
+
+    #[test]
+    fn test_compute_consumed_trigger_prefix_all_consumed_when_map_full() {
+        let ccm = Address::with_last_byte(0xAB);
+        let h1 = B256::with_last_byte(0x01);
+        let h2 = B256::with_last_byte(0x02);
+        let h3 = B256::with_last_byte(0x03);
+        let receipts = vec![
+            mk_trigger_receipt(ccm, h1),
+            mk_trigger_receipt(ccm, h2),
+            mk_trigger_receipt(ccm, h3),
+        ];
+        let mut map = std::collections::HashMap::new();
+        map.insert(h1, 1);
+        map.insert(h2, 1);
+        map.insert(h3, 1);
+
+        let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0, 1, 2]);
+        assert_eq!(k, 3, "all 3 trigger txs should be consumed");
+        // The map is decremented to 0 for each consumed hash.
+        assert_eq!(map[&h1], 0);
+        assert_eq!(map[&h2], 0);
+        assert_eq!(map[&h3], 0);
+    }
+
+    #[test]
+    fn test_compute_consumed_trigger_prefix_stops_at_first_missing_hash() {
+        // Three trigger txs; the *second* one's action hash is NOT in the
+        // map, so the prefix must stop at 1 (first one consumed) and the
+        // map must NOT be decremented for the second or third.
+        let ccm = Address::with_last_byte(0xAB);
+        let h1 = B256::with_last_byte(0x01);
+        let h2 = B256::with_last_byte(0x02);
+        let h3 = B256::with_last_byte(0x03);
+        let receipts = vec![
+            mk_trigger_receipt(ccm, h1),
+            mk_trigger_receipt(ccm, h2),
+            mk_trigger_receipt(ccm, h3),
+        ];
+        let mut map = std::collections::HashMap::new();
+        map.insert(h1, 1);
+        // h2 is intentionally absent.
+        map.insert(h3, 1); // present but unreachable due to prefix counting
+
+        let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0, 1, 2]);
+        assert_eq!(k, 1, "prefix should stop at the second trigger (h2 missing)");
+        // h1 was consumed, h3 must remain UN-decremented (prefix counting,
+        // never all-or-nothing).
+        assert_eq!(map[&h1], 0);
+        assert_eq!(map.get(&h2), None);
+        assert_eq!(map[&h3], 1, "h3 must NOT be decremented past the gap");
+    }
+
+    #[test]
+    fn test_compute_consumed_trigger_prefix_multi_hash_per_tx_atomic() {
+        // A trigger tx that consumes 2 entries: if EITHER is missing in the
+        // map, the entire trigger tx is rejected (no partial decrement).
+        let ccm = Address::with_last_byte(0xAB);
+        let ha = B256::with_last_byte(0x0A);
+        let hb = B256::with_last_byte(0x0B);
+        let receipts = vec![mk_trigger_receipt_multi(ccm, &[ha, hb])];
+        let mut map = std::collections::HashMap::new();
+        map.insert(ha, 1);
+        // hb intentionally missing.
+
+        let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0]);
+        assert_eq!(k, 0, "any missing hash within a tx rejects the tx");
+        assert_eq!(
+            map[&ha], 1,
+            "ha must NOT be decremented when the tx as a whole is rejected"
+        );
+    }
+
+    #[test]
+    fn test_compute_consumed_trigger_prefix_decrements_only_consumed() {
+        // 3 trigger txs, only the first 2 reachable in the map. The map
+        // must reflect exactly 2 decrements after the call.
+        let ccm = Address::with_last_byte(0xAB);
+        let h1 = B256::with_last_byte(0x01);
+        let h2 = B256::with_last_byte(0x02);
+        let h3 = B256::with_last_byte(0x03);
+        let receipts = vec![
+            mk_trigger_receipt(ccm, h1),
+            mk_trigger_receipt(ccm, h2),
+            mk_trigger_receipt(ccm, h3),
+        ];
+        let mut map = std::collections::HashMap::new();
+        map.insert(h1, 1);
+        map.insert(h2, 1);
+        // h3 missing — stops the prefix at 2.
+
+        let total_before: usize = map.values().sum();
+        let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0, 1, 2]);
+        let total_after: usize = map.values().sum();
+        assert_eq!(k, 2);
+        assert_eq!(
+            total_before - total_after,
+            2,
+            "exactly k entries should be decremented from the map"
+        );
+    }
+
+    /// Build an RLP-encoded list of `n` minimal legacy transactions, each
+    /// distinguishable by its nonce. Used as input to
+    /// `filter_block_by_trigger_prefix`.
+    fn encode_test_block(n: usize) -> Bytes {
+        use alloy_consensus::TxLegacy;
+        use alloy_primitives::TxKind;
+        let mut txs: Vec<reth_ethereum_primitives::TransactionSigned> = Vec::with_capacity(n);
+        for i in 0..n {
+            let tx = TxLegacy {
+                chain_id: Some(42069),
+                nonce: i as u64,
+                gas_price: 1_000_000_000,
+                gas_limit: 21_000,
+                to: TxKind::Call(Address::with_last_byte(0x01)),
+                value: alloy_primitives::U256::ZERO,
+                input: Default::default(),
+            };
+            let signed_legacy = alloy_consensus::Signed::new_unhashed(
+                tx,
+                alloy_primitives::Signature::new(
+                    alloy_primitives::U256::from(1),
+                    alloy_primitives::U256::from(2),
+                    false,
+                ),
+            );
+            txs.push(reth_ethereum_primitives::TransactionSigned::Legacy(
+                signed_legacy,
+            ));
+        }
+        let mut buf = Vec::new();
+        alloy_rlp::encode_list(&txs, &mut buf);
+        Bytes::from(buf)
+    }
+
+    /// Decode an RLP-encoded block back into the list of nonces (one per tx).
+    /// Lets tests inspect the post-filter ordering without comparing full
+    /// `TransactionSigned` structures.
+    fn decode_block_nonces(encoded: &Bytes) -> Vec<u64> {
+        use alloy_consensus::Transaction;
+        use alloy_rlp::Decodable;
+        let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
+            Decodable::decode(&mut encoded.as_ref()).unwrap();
+        txs.iter().map(|t| t.nonce()).collect()
+    }
+
+    #[test]
+    fn test_filter_block_by_trigger_prefix_empty_input() {
+        let out = filter_block_by_trigger_prefix(&Bytes::new(), &[], 0).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_filter_block_by_trigger_prefix_no_triggers_keeps_all() {
+        let block = encode_test_block(5);
+        let out = filter_block_by_trigger_prefix(&block, &[], 0).unwrap();
+        assert_eq!(decode_block_nonces(&out), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_filter_block_by_trigger_prefix_keep_count_exceeds_triggers() {
+        // 5 txs, 2 triggers (indices 1 and 3), keep_count = 5 → all kept.
+        let block = encode_test_block(5);
+        let out = filter_block_by_trigger_prefix(&block, &[1, 3], 5).unwrap();
+        assert_eq!(decode_block_nonces(&out), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_filter_block_by_trigger_prefix_removes_excess_triggers() {
+        // 5 txs, 3 triggers (indices 0, 2, 4), keep_count = 1 →
+        // only the first trigger (index 0) is kept; indices 2 and 4 are removed.
+        // Non-trigger indices (1 and 3) are kept.
+        let block = encode_test_block(5);
+        let out = filter_block_by_trigger_prefix(&block, &[0, 2, 4], 1).unwrap();
+        // Result: indices [0, 1, 3] → nonces [0, 1, 3].
+        assert_eq!(decode_block_nonces(&out), vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn test_filter_block_by_trigger_prefix_keep_zero_removes_all_triggers() {
+        // 4 txs, 2 triggers, keep_count = 0 → both triggers removed.
+        let block = encode_test_block(4);
+        let out = filter_block_by_trigger_prefix(&block, &[1, 3], 0).unwrap();
+        // Result: indices [0, 2] → nonces [0, 2].
+        assert_eq!(decode_block_nonces(&out), vec![0, 2]);
+    }
+
+    #[test]
+    fn test_filter_block_by_trigger_prefix_preserves_relative_order() {
+        // The order of the surviving txs must match the original order.
+        let block = encode_test_block(6);
+        // triggers at indices 1, 4. keep_count = 1 → drop index 4 only.
+        let out = filter_block_by_trigger_prefix(&block, &[1, 4], 1).unwrap();
+        assert_eq!(decode_block_nonces(&out), vec![0, 1, 2, 3, 5]);
+    }
+
+    mod proptests_filtering {
+        use super::*;
+        use proptest::collection::vec as prop_vec;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// `compute_consumed_trigger_prefix` is bounded by the number of
+            /// trigger indices it was given. Closes invariant #4: the
+            /// returned prefix is never larger than the input.
+            #[test]
+            fn compute_consumed_trigger_prefix_bounded_by_input(
+                trigger_count in 0usize..16,
+                map_population in 0u8..16,
+            ) {
+                let ccm = Address::with_last_byte(0xAB);
+                let receipts: Vec<_> = (0..trigger_count)
+                    .map(|i| mk_trigger_receipt(ccm, B256::with_last_byte(i as u8)))
+                    .collect();
+                let trigger_indices: Vec<usize> = (0..trigger_count).collect();
+
+                // Pre-populate the map with `map_population` of the trigger hashes.
+                let mut map = std::collections::HashMap::new();
+                for i in 0..(map_population as usize).min(trigger_count) {
+                    map.insert(B256::with_last_byte(i as u8), 1);
+                }
+
+                let k = compute_consumed_trigger_prefix(
+                    &receipts, ccm, &mut map, &trigger_indices,
+                );
+                prop_assert!(k <= trigger_count);
+                // The prefix never exceeds the number of consecutive
+                // populated hashes from the start.
+                prop_assert!(k <= (map_population as usize).min(trigger_count));
+            }
+
+            /// `compute_consumed_trigger_prefix` is monotonic in the map: if
+            /// you start with a map M₁ that is a subset of M₂ (same hashes,
+            /// possibly more), then k(M₁) ≤ k(M₂). Stronger consequence of
+            /// invariant #4: never accept fewer entries when *more* are
+            /// available.
+            #[test]
+            fn compute_consumed_trigger_prefix_monotonic_in_map(
+                trigger_count in 1usize..8,
+                drop_first in 0u8..8,
+            ) {
+                let ccm = Address::with_last_byte(0xAB);
+                let receipts: Vec<_> = (0..trigger_count)
+                    .map(|i| mk_trigger_receipt(ccm, B256::with_last_byte(i as u8)))
+                    .collect();
+                let trigger_indices: Vec<usize> = (0..trigger_count).collect();
+
+                // Map M_full has every hash present.
+                let mut map_full = std::collections::HashMap::new();
+                for i in 0..trigger_count {
+                    map_full.insert(B256::with_last_byte(i as u8), 1);
+                }
+                let mut map_partial = map_full.clone();
+                // Remove the first `drop_first` hashes from `map_partial`,
+                // keeping the rest. Since the prefix walks from index 0,
+                // dropping the first hash always reduces k to 0.
+                for i in 0..(drop_first as usize).min(trigger_count) {
+                    map_partial.remove(&B256::with_last_byte(i as u8));
+                }
+
+                let k_full = compute_consumed_trigger_prefix(
+                    &receipts, ccm, &mut map_full, &trigger_indices,
+                );
+                let k_partial = compute_consumed_trigger_prefix(
+                    &receipts, ccm, &mut map_partial, &trigger_indices,
+                );
+
+                // Adding more entries to the map never *decreases* the
+                // accepted prefix.
+                prop_assert!(k_full >= k_partial);
+            }
+
+            /// `filter_block_by_trigger_prefix` preserves all non-trigger txs
+            /// and at least the first `keep_count` triggers. Total surviving
+            /// count obeys: out_len == total - max(0, triggers_len - keep).
+            #[test]
+            fn filter_block_preserves_count_invariant(
+                total in 1usize..16,
+                trigger_indices in prop_vec(0usize..16, 0..8),
+                keep_count in 0usize..16,
+            ) {
+                // Normalize: dedupe trigger_indices and keep only those
+                // strictly less than `total` and sorted (the function's
+                // input contract).
+                let mut triggers: Vec<usize> = trigger_indices
+                    .into_iter()
+                    .filter(|&i| i < total)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                triggers.sort();
+
+                let block = encode_test_block(total);
+                let out = filter_block_by_trigger_prefix(&block, &triggers, keep_count).unwrap();
+                let out_nonces = decode_block_nonces(&out);
+
+                // Expected: total - max(0, triggers_len - keep_count).
+                let removed = triggers.len().saturating_sub(keep_count);
+                prop_assert_eq!(out_nonces.len(), total - removed);
+
+                // Every non-trigger nonce must survive.
+                let trigger_set: std::collections::BTreeSet<u64> =
+                    triggers.iter().map(|&i| i as u64).collect();
+                for n in 0u64..total as u64 {
+                    if !trigger_set.contains(&n) {
+                        prop_assert!(
+                            out_nonces.contains(&n),
+                            "non-trigger nonce {} was incorrectly removed",
+                            n
+                        );
+                    }
+                }
+
+                // The first `keep_count` trigger nonces must survive.
+                for &t in triggers.iter().take(keep_count) {
+                    prop_assert!(
+                        out_nonces.contains(&(t as u64)),
+                        "trigger nonce {} should have been kept",
+                        t
+                    );
+                }
+            }
+        }
+    }
+}

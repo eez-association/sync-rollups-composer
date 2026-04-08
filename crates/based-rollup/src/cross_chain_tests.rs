@@ -2945,3 +2945,417 @@ fn test_attach_generic_state_deltas_normal_group_with_flags() {
         "normal group: intermediate must differ from post"
     );
 }
+
+// ──────────────────────────────────────────────
+//  Step 0.3 (refactor) — filtering invariants tests
+//
+//  Closes invariants:
+//    #4  §4f filtering is per-call prefix counting (covered in derivation_tests)
+//    #16 §4f filtering is generic (CrossChainCallExecuted events,
+//        NOT Bridge selectors) — see test_identify_trigger_tx_indices_*
+//
+//  These tests target:
+//    - cross_chain::partition_entries           (cross_chain.rs:2022)
+//    - cross_chain::identify_trigger_tx_indices (cross_chain.rs:2172)
+// ──────────────────────────────────────────────
+
+/// Test helper: build a Receipt whose log[0] is the `ExecutionConsumed`
+/// event from `ccm_address` for `action_hash`.
+fn mk_trigger_receipt(
+    ccm_address: Address,
+    action_hash: B256,
+) -> alloy_consensus::Receipt<alloy_primitives::Log> {
+    use alloy_primitives::LogData;
+    let sig = execution_consumed_signature_hash();
+    alloy_consensus::Receipt {
+        status: alloy_consensus::Eip658Value::Eip658(true),
+        cumulative_gas_used: 0,
+        logs: vec![alloy_primitives::Log {
+            address: ccm_address,
+            data: LogData::new(vec![sig, action_hash], Bytes::new()).unwrap(),
+        }],
+    }
+}
+
+/// Test helper: build a Receipt with no `ExecutionConsumed` events at all.
+fn mk_non_trigger_receipt() -> alloy_consensus::Receipt<alloy_primitives::Log> {
+    alloy_consensus::Receipt {
+        status: alloy_consensus::Eip658Value::Eip658(true),
+        cumulative_gas_used: 0,
+        logs: vec![],
+    }
+}
+
+/// Test helper: build a Receipt whose log[0] uses a *random* topic[0] (NOT
+/// the `ExecutionConsumed` signature) but the same `ccm_address`. Used to
+/// prove invariant #16: only the canonical signature counts, no Bridge
+/// selectors are inspected.
+fn mk_unrelated_event_receipt(
+    ccm_address: Address,
+    fake_topic0: B256,
+) -> alloy_consensus::Receipt<alloy_primitives::Log> {
+    use alloy_primitives::LogData;
+    alloy_consensus::Receipt {
+        status: alloy_consensus::Eip658Value::Eip658(true),
+        cumulative_gas_used: 0,
+        logs: vec![alloy_primitives::Log {
+            address: ccm_address,
+            data: LogData::new(vec![fake_topic0, B256::ZERO], Bytes::new()).unwrap(),
+        }],
+    }
+}
+
+/// Test helper: build a CrossChainExecutionEntry whose `next_action` is a
+/// CALL targeting `our_rollup_id` with `action_hash == hash(next_action)`,
+/// i.e. an entry that `partition_entries` should classify as a TRIGGER.
+fn mk_trigger_entry(our_rollup_id: U256, dest: Address) -> CrossChainExecutionEntry {
+    let action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: our_rollup_id,
+        destination: dest,
+        value: U256::ZERO,
+        data: vec![],
+        failed: false,
+        source_address: Address::with_last_byte(0xAA),
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
+    CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash,
+        next_action: action,
+    }
+}
+
+/// Test helper: build a CrossChainExecutionEntry whose `action_hash`
+/// deliberately does NOT equal `hash(next_action)` (continuation-style),
+/// so `partition_entries` classifies it as a TABLE entry even though
+/// `next_action` targets our rollup.
+fn mk_continuation_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
+    let action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: our_rollup_id,
+        destination: Address::with_last_byte(0xC0),
+        value: U256::ZERO,
+        data: vec![0xC0, 0xC0],
+        failed: false,
+        source_address: Address::with_last_byte(0xAA),
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    CrossChainExecutionEntry {
+        state_deltas: vec![],
+        // action_hash is *something else* — NOT hash(next_action).
+        action_hash: B256::with_last_byte(0xFE),
+        next_action: action,
+    }
+}
+
+/// Test helper: build a CrossChainExecutionEntry that targets a *different*
+/// rollup, so `partition_entries` always classifies it as a TABLE entry.
+fn mk_foreign_entry(our_rollup_id: U256) -> CrossChainExecutionEntry {
+    let other = our_rollup_id + U256::from(1);
+    let action = CrossChainAction {
+        action_type: CrossChainActionType::Call,
+        rollup_id: other,
+        destination: Address::with_last_byte(0xF0),
+        value: U256::ZERO,
+        data: vec![],
+        failed: false,
+        source_address: Address::with_last_byte(0xAA),
+        source_rollup: U256::ZERO,
+        scope: vec![],
+    };
+    let action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&action.to_sol_action()));
+    CrossChainExecutionEntry {
+        state_deltas: vec![],
+        action_hash,
+        next_action: action,
+    }
+}
+
+#[test]
+fn test_partition_entries_empty() {
+    let our_id = U256::from(1);
+    let (table, triggers) = partition_entries(&[], our_id);
+    assert!(table.is_empty());
+    assert!(triggers.is_empty());
+}
+
+#[test]
+fn test_partition_entries_all_triggers() {
+    let our_id = U256::from(1);
+    let entries = vec![
+        mk_trigger_entry(our_id, Address::with_last_byte(0x01)),
+        mk_trigger_entry(our_id, Address::with_last_byte(0x02)),
+        mk_trigger_entry(our_id, Address::with_last_byte(0x03)),
+    ];
+    let (table, triggers) = partition_entries(&entries, our_id);
+    assert!(table.is_empty());
+    assert_eq!(triggers.len(), 3);
+    assert_eq!(triggers, entries);
+}
+
+#[test]
+fn test_partition_entries_all_table_when_action_hash_mismatches() {
+    let our_id = U256::from(1);
+    let entries = vec![
+        mk_continuation_entry(our_id),
+        mk_continuation_entry(our_id),
+    ];
+    let (table, triggers) = partition_entries(&entries, our_id);
+    assert_eq!(table.len(), 2);
+    assert!(triggers.is_empty());
+}
+
+#[test]
+fn test_partition_entries_foreign_rollup_goes_to_table() {
+    let our_id = U256::from(1);
+    let entries = vec![mk_foreign_entry(our_id), mk_foreign_entry(our_id)];
+    let (table, triggers) = partition_entries(&entries, our_id);
+    assert_eq!(table.len(), 2);
+    assert!(triggers.is_empty());
+}
+
+#[test]
+fn test_partition_entries_mixed_preserves_relative_order() {
+    let our_id = U256::from(1);
+    let t1 = mk_trigger_entry(our_id, Address::with_last_byte(0x01));
+    let t2 = mk_trigger_entry(our_id, Address::with_last_byte(0x02));
+    let cont = mk_continuation_entry(our_id);
+    let foreign = mk_foreign_entry(our_id);
+    let entries = vec![cont.clone(), t1.clone(), foreign.clone(), t2.clone()];
+    let (table, triggers) = partition_entries(&entries, our_id);
+    assert_eq!(table, vec![cont, foreign]);
+    assert_eq!(triggers, vec![t1, t2]);
+}
+
+#[test]
+fn test_partition_entries_disjoint_and_conserves_count() {
+    let our_id = U256::from(1);
+    let entries = vec![
+        mk_trigger_entry(our_id, Address::with_last_byte(0x01)),
+        mk_continuation_entry(our_id),
+        mk_trigger_entry(our_id, Address::with_last_byte(0x02)),
+        mk_foreign_entry(our_id),
+    ];
+    let (table, triggers) = partition_entries(&entries, our_id);
+    // Disjoint: no entry appears in both outputs.
+    for t in &table {
+        assert!(!triggers.contains(t));
+    }
+    // Conserves count.
+    assert_eq!(table.len() + triggers.len(), entries.len());
+}
+
+#[test]
+fn test_identify_trigger_tx_indices_empty_receipts() {
+    let ccm = Address::with_last_byte(0xAB);
+    let out = identify_trigger_tx_indices(&[], ccm);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn test_identify_trigger_tx_indices_detects_event() {
+    let ccm = Address::with_last_byte(0xAB);
+    let receipts = vec![
+        mk_non_trigger_receipt(),
+        mk_trigger_receipt(ccm, B256::with_last_byte(0x01)),
+        mk_non_trigger_receipt(),
+        mk_trigger_receipt(ccm, B256::with_last_byte(0x02)),
+    ];
+    let out = identify_trigger_tx_indices(&receipts, ccm);
+    assert_eq!(out, vec![1, 3]);
+}
+
+#[test]
+fn test_identify_trigger_tx_indices_ignores_wrong_address() {
+    // A receipt with the right signature but wrong contract address must NOT
+    // count as a trigger.
+    let ccm = Address::with_last_byte(0xAB);
+    let other = Address::with_last_byte(0xCD);
+    let receipts = vec![mk_trigger_receipt(other, B256::with_last_byte(0x01))];
+    let out = identify_trigger_tx_indices(&receipts, ccm);
+    assert!(
+        out.is_empty(),
+        "log from wrong contract must not be classified as a trigger"
+    );
+}
+
+#[test]
+fn test_identify_trigger_tx_indices_ignores_unrelated_event_signature() {
+    // Closes invariant #16: filtering is generic on the canonical
+    // ExecutionConsumed signature, NOT on Bridge selectors. A receipt
+    // emitting a *different* event from the same CCM address (e.g. what
+    // a Bridge selector check would have flagged) must NOT count.
+    let ccm = Address::with_last_byte(0xAB);
+    let fake_sig = B256::with_last_byte(0xEF);
+    let receipts = vec![mk_unrelated_event_receipt(ccm, fake_sig)];
+    let out = identify_trigger_tx_indices(&receipts, ccm);
+    assert!(
+        out.is_empty(),
+        "only the ExecutionConsumed signature counts, no other event"
+    );
+}
+
+#[test]
+fn test_identify_trigger_tx_indices_output_is_sorted_and_deduplicated() {
+    let ccm = Address::with_last_byte(0xAB);
+    let receipts = vec![
+        mk_trigger_receipt(ccm, B256::with_last_byte(0x01)),
+        mk_trigger_receipt(ccm, B256::with_last_byte(0x02)),
+        mk_trigger_receipt(ccm, B256::with_last_byte(0x03)),
+    ];
+    let out = identify_trigger_tx_indices(&receipts, ccm);
+    // Sorted and unique.
+    assert_eq!(out, vec![0, 1, 2]);
+    let mut sorted = out.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted, out);
+}
+
+#[test]
+fn test_identify_trigger_tx_indices_one_per_tx_even_with_multiple_events() {
+    // Even if a single receipt has many ExecutionConsumed events, the index
+    // appears at most once in the output.
+    use alloy_primitives::LogData;
+    let ccm = Address::with_last_byte(0xAB);
+    let sig = execution_consumed_signature_hash();
+    let receipt = alloy_consensus::Receipt {
+        status: alloy_consensus::Eip658Value::Eip658(true),
+        cumulative_gas_used: 0,
+        logs: vec![
+            alloy_primitives::Log {
+                address: ccm,
+                data: LogData::new(vec![sig, B256::with_last_byte(0x01)], Bytes::new()).unwrap(),
+            },
+            alloy_primitives::Log {
+                address: ccm,
+                data: LogData::new(vec![sig, B256::with_last_byte(0x02)], Bytes::new()).unwrap(),
+            },
+            alloy_primitives::Log {
+                address: ccm,
+                data: LogData::new(vec![sig, B256::with_last_byte(0x03)], Bytes::new()).unwrap(),
+            },
+        ],
+    };
+    let out = identify_trigger_tx_indices(&[receipt], ccm);
+    assert_eq!(out, vec![0]);
+}
+
+mod proptests_filtering {
+    use super::*;
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+
+    /// Strategy: a single entry that is either a trigger, a continuation,
+    /// or a foreign entry. The variant is encoded as a u8 tag.
+    fn arb_entry(our_id: U256) -> impl Strategy<Value = CrossChainExecutionEntry> {
+        (0u8..3, 0u8..=255u8).prop_map(move |(tag, addr_byte)| match tag {
+            0 => mk_trigger_entry(our_id, Address::with_last_byte(addr_byte)),
+            1 => mk_continuation_entry(our_id),
+            _ => mk_foreign_entry(our_id),
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// `partition_entries` conserves the count, produces disjoint buckets,
+        /// preserves the relative order of the original sequence (single
+        /// forward walk), and only classifies as a TRIGGER entries whose
+        /// `action_hash == hash(next_action)` AND whose `next_action` is a
+        /// Call to our rollup.
+        ///
+        /// Order preservation is verified via a single forward walk of the
+        /// input that consumes one element from `table` or `triggers` at a
+        /// time — robust to duplicate entries.
+        #[test]
+        fn partition_entries_conserves_and_disjoint(
+            entries in prop_vec(arb_entry(U256::from(1)), 0..16),
+        ) {
+            let our_id = U256::from(1);
+            let (table, triggers) = partition_entries(&entries, our_id);
+
+            // Conservation: every input ends up in exactly one bucket.
+            prop_assert_eq!(table.len() + triggers.len(), entries.len());
+
+            // Order preservation: walk both buckets forward in lockstep with
+            // the input, choosing the next bucket based on which one matches.
+            let mut t_iter = table.iter();
+            let mut g_iter = triggers.iter();
+            let mut t_next = t_iter.next();
+            let mut g_next = g_iter.next();
+            for entry in &entries {
+                if t_next.map(|x| x == entry).unwrap_or(false) {
+                    t_next = t_iter.next();
+                } else if g_next.map(|x| x == entry).unwrap_or(false) {
+                    g_next = g_iter.next();
+                } else {
+                    prop_assert!(
+                        false,
+                        "entry {:?} not found at the head of either bucket — \
+                         partition_entries reordered or dropped it",
+                        entry
+                    );
+                }
+            }
+            prop_assert!(t_next.is_none(), "table iterator exhausted incompletely");
+            prop_assert!(g_next.is_none(), "triggers iterator exhausted incompletely");
+
+            // Triggers are EXACTLY the entries whose action_hash == hash(next_action)
+            // AND whose next_action is a Call to our_id. Verify the classifier.
+            for t in &triggers {
+                let next_hash = keccak256(
+                    ICrossChainManagerL2::Action::abi_encode(&t.next_action.to_sol_action()),
+                );
+                prop_assert_eq!(next_hash, t.action_hash);
+                prop_assert_eq!(t.next_action.action_type, CrossChainActionType::Call);
+                prop_assert_eq!(t.next_action.rollup_id, our_id);
+            }
+        }
+
+        /// `identify_trigger_tx_indices` always returns a strictly-increasing
+        /// list of indices, each within bounds.
+        #[test]
+        fn identify_trigger_tx_indices_is_sorted_unique_in_bounds(
+            tags in prop_vec(0u8..3, 0..32),
+        ) {
+            // tag 0 = trigger, tag 1 = unrelated event, tag 2 = empty
+            let ccm = Address::with_last_byte(0xAB);
+            let fake_sig = B256::with_last_byte(0xEF);
+            let receipts: Vec<_> = tags
+                .iter()
+                .enumerate()
+                .map(|(i, tag)| match tag {
+                    0 => mk_trigger_receipt(ccm, B256::with_last_byte(i as u8)),
+                    1 => mk_unrelated_event_receipt(ccm, fake_sig),
+                    _ => mk_non_trigger_receipt(),
+                })
+                .collect();
+
+            let out = identify_trigger_tx_indices(&receipts, ccm);
+
+            // Strictly increasing (sorted + unique).
+            for w in out.windows(2) {
+                prop_assert!(w[0] < w[1]);
+            }
+            // In bounds.
+            for &idx in &out {
+                prop_assert!(idx < receipts.len());
+            }
+            // Every returned index has tag 0.
+            for &idx in &out {
+                prop_assert_eq!(tags[idx], 0);
+            }
+            // Every tag-0 index is in the output (no false negatives).
+            for (i, &tag) in tags.iter().enumerate() {
+                if tag == 0 {
+                    prop_assert!(out.contains(&i));
+                }
+            }
+        }
+    }
+}
