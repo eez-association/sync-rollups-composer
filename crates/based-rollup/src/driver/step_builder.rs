@@ -301,175 +301,15 @@ where
                     .trim_entries_from_front(MAX_PENDING_CROSS_CHAIN_ENTRIES);
             }
 
-            // Compute unified intermediate state roots for chained cross-chain
-            // entry deltas. All entry types (deposits, L2→L1 calls, continuations)
-            // are handled in a single root chain via trigger group counting.
-            let has_rpc_entries = !rpc_entries_for_block.is_empty();
-            let our_rollup_id = crate::cross_chain::RollupId::new(alloy_primitives::U256::from(
-                self.config.rollup_id,
-            ));
-            let num_protocol_triggers = rpc_entries_for_block
-                .iter()
-                .filter(|e| {
-                    // Only count true triggers, NOT continuation table entries.
-                    // Triggers have hash(next_action) == action_hash (same guard as
-                    // partition_entries). Continuations have action_hash=hash(RESULT)
-                    // but next_action=CALL_B, so hash(next_action) != action_hash.
-                    let is_call_to_us = e.next_action.action_type
-                        == crate::cross_chain::CrossChainActionType::Call
-                        && e.next_action.rollup_id == our_rollup_id;
-                    if !is_call_to_us {
-                        return false;
-                    }
-                    let next_hash = crate::table_builder::compute_action_hash(&e.next_action);
-                    next_hash == e.action_hash
-                })
-                .count();
-            let num_user_triggers = self
-                .pending_l1
-                .groups
-                .iter()
-                .filter(|g| g.trigger.is_some())
-                .count();
-            let has_entries = has_rpc_entries || num_user_triggers > 0;
-
-            let mut intermediate_roots = Vec::new();
-            // The clean state root is constructed exactly here. This is the
-            // canonical (and currently only) call site that turns a raw
-            // `B256` into a `CleanStateRoot`. `cross_chain::CleanStateRoot::new`
-            // is `pub(crate)`, so any future attempt to fabricate a clean
-            // root from a freshly-computed value somewhere else (the
-            // anti-pattern that invariant #3 forbids) will not compile.
-            let clean_state_root = if has_entries {
-                match self.compute_intermediate_roots(
-                    next_l2_block.saturating_sub(1),
-                    next_timestamp,
-                    l1_hash,
-                    current_l1_block,
-                    built.state_root,
-                    &built.encoded_transactions,
-                ) {
-                    Ok(roots) => {
-                        let clean = roots[0];
-                        info!(
-                            target: "based_rollup::driver",
-                            l2_block = next_l2_block,
-                            speculative = %built.state_root,
-                            clean = %clean,
-                            num_protocol_triggers,
-                            num_user_triggers,
-                            "computed unified intermediate state roots"
-                        );
-                        intermediate_roots = roots;
-                        crate::cross_chain::CleanStateRoot::new(clean)
-                    }
-                    Err(err) => {
-                        error!(
-                            target: "based_rollup::driver",
-                            l2_block = next_l2_block,
-                            %err,
-                            "failed to compute intermediate state roots — \
-                             discarding cross-chain entries for this block to prevent \
-                             corrupt state root in IMMEDIATE entry"
-                        );
-                        // Clear entries to prevent submitting with wrong state deltas.
-                        // Entries will be re-queued on the next builder cycle.
-                        self.pending_l1.clear();
-                        // No entries → speculative IS clean.
-                        crate::cross_chain::CleanStateRoot::new(built.state_root)
-                    }
-                }
-            } else {
-                crate::cross_chain::CleanStateRoot::new(built.state_root)
-            };
-
-            // Attach correct state deltas to all pending L1 entries using the
-            // intermediate roots from compute_intermediate_roots.
-            if !self.pending_l1.is_empty() && !intermediate_roots.is_empty() {
-                // `attach_generic_state_deltas` still takes a `&[usize]` of
-                // group start indices — rebuild a temporary view rather than
-                // changing the cross_chain API surface in 1.5.
-                let group_starts: Vec<usize> =
-                    self.pending_l1.groups.iter().map(|g| g.start).collect();
-                crate::cross_chain::attach_generic_state_deltas(
-                    &mut self.pending_l1.entries,
-                    &intermediate_roots,
-                    self.config.rollup_id,
-                    &group_starts,
-                );
-                info!(
-                    target: "based_rollup::driver",
-                    unified_entry_count = self.pending_l1.len_entries(),
-                    groups = self.pending_l1.num_groups(),
-                    roots = intermediate_roots.len(),
-                    entry_mix = ?self.pending_l1.entry_mix(),
-                    "attached generic state deltas to unified L1 entries"
-                );
-
-                // Override state deltas for independent groups (L1→L2 partial revert).
-                // In independent groups, L1 try/catch rolls back the reverted call's
-                // state, so all entries see the same pre-root. Override ALL entries
-                // in the group to use intermediate_roots[k] as currentState.
-                let num_groups = self.pending_l1.num_groups();
-                for k in 0..num_groups {
-                    if self.pending_l1.groups[k].mode.is_chained() {
-                        continue;
-                    }
-                    if k >= intermediate_roots.len() {
-                        break;
-                    }
-                    let pre_root = intermediate_roots[k];
-                    let start = self.pending_l1.groups[k].start;
-                    let end = if k + 1 < num_groups {
-                        self.pending_l1.groups[k + 1].start
-                    } else {
-                        self.pending_l1.len_entries()
-                    };
-                    for i in start..end {
-                        if let Some(delta) = self.pending_l1.entries[i].state_deltas.first_mut() {
-                            delta.current_state = pre_root;
-                        }
-                    }
-                    debug!(
-                        target: "based_rollup::driver",
-                        group = k,
-                        entries = end - start,
-                        %pre_root,
-                        "overrode currentState for independent group (partial revert)"
-                    );
-                }
-
-                // Log composite entry hashes (VerifyL1Batch format) for byte-level debugging.
-                // composite = keccak256(abi.encode(actionHash, keccak256(abi.encode(nextAction))))
-                for (i, e) in self.pending_l1.entries.iter().enumerate() {
-                    use alloy_sol_types::SolType as _;
-                    let next_action_encoded =
-                        crate::cross_chain::ICrossChainManagerL2::Action::abi_encode(
-                            &e.next_action.to_sol_action(),
-                        );
-                    let next_action_hash = alloy_primitives::keccak256(&next_action_encoded);
-                    // abi.encode(bytes32, bytes32) = 64 bytes concatenated
-                    let mut composite_input = Vec::with_capacity(64);
-                    composite_input.extend_from_slice(e.action_hash.as_b256().as_slice());
-                    composite_input.extend_from_slice(next_action_hash.as_slice());
-                    let composite = alloy_primitives::keccak256(&composite_input);
-                    debug!(
-                        target: "based_rollup::driver",
-                        idx = i,
-                        action_hash = %e.action_hash,
-                        next_action_type = ?e.next_action.action_type,
-                        next_action_rollup_id = %e.next_action.rollup_id,
-                        next_action_dest = %e.next_action.destination,
-                        next_action_scope = ?e.next_action.scope.as_slice().iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
-                        next_action_data_hex = %format!("0x{}", hex::encode(&e.next_action.data)),
-                        next_action_failed = e.next_action.failed,
-                        current_state = %e.state_deltas.first().map(|d| format!("{}", d.current_state)).unwrap_or_default(),
-                        new_state = %e.state_deltas.first().map(|d| format!("{}", d.new_state)).unwrap_or_default(),
-                        composite_verify_hash = %composite,
-                        "L1 entry [byte-level] for VerifyL1Batch comparison"
-                    );
-                }
-            }
+            // Compute intermediate state roots and attach entry deltas.
+            let (clean_state_root, intermediate_roots) = self.finalize_block_entries(
+                next_l2_block,
+                next_timestamp,
+                l1_hash,
+                current_l1_block,
+                &built,
+                &rpc_entries_for_block,
+            );
 
             // Queue ALL blocks for L1 submission (including empty ones).
             // The aggregate state root entry spans the entire batch so empty
@@ -515,6 +355,169 @@ where
         self.flush_to_l1().await?;
 
         Ok(())
+    }
+
+    /// Compute intermediate state roots, attach entry deltas to pending L1
+    /// entries, and return the clean state root for the pending submission.
+    ///
+    /// This is the single site where `CleanStateRoot::new` is called for builder
+    /// blocks — invariant #3 (never fabricate pre_state_root) is enforced by
+    /// the `pub(crate)` constructor.
+    fn finalize_block_entries(
+        &mut self,
+        l2_block: u64,
+        timestamp: u64,
+        l1_hash: B256,
+        l1_block: u64,
+        built: &super::types::BuiltBlock,
+        rpc_entries: &[CrossChainExecutionEntry],
+    ) -> (crate::cross_chain::CleanStateRoot, Vec<B256>) {
+        // Count true triggers (not continuation table entries).
+        let our_rollup_id = crate::cross_chain::RollupId::new(alloy_primitives::U256::from(
+            self.config.rollup_id,
+        ));
+        let num_protocol_triggers = rpc_entries
+            .iter()
+            .filter(|e| {
+                let is_call_to_us = e.next_action.action_type
+                    == crate::cross_chain::CrossChainActionType::Call
+                    && e.next_action.rollup_id == our_rollup_id;
+                if !is_call_to_us {
+                    return false;
+                }
+                let next_hash = crate::table_builder::compute_action_hash(&e.next_action);
+                next_hash == e.action_hash
+            })
+            .count();
+        let num_user_triggers = self
+            .pending_l1
+            .groups
+            .iter()
+            .filter(|g| g.trigger.is_some())
+            .count();
+        let has_entries = !rpc_entries.is_empty() || num_user_triggers > 0;
+
+        // Compute intermediate roots and derive clean state root.
+        let mut intermediate_roots = Vec::new();
+        let clean_state_root = if has_entries {
+            match self.compute_intermediate_roots(
+                l2_block.saturating_sub(1),
+                timestamp,
+                l1_hash,
+                l1_block,
+                built.state_root,
+                &built.encoded_transactions,
+            ) {
+                Ok(roots) => {
+                    let clean = roots[0];
+                    info!(
+                        target: "based_rollup::driver",
+                        l2_block,
+                        speculative = %built.state_root,
+                        clean = %clean,
+                        num_protocol_triggers,
+                        num_user_triggers,
+                        "computed unified intermediate state roots"
+                    );
+                    intermediate_roots = roots;
+                    crate::cross_chain::CleanStateRoot::new(clean)
+                }
+                Err(err) => {
+                    error!(
+                        target: "based_rollup::driver",
+                        l2_block,
+                        %err,
+                        "failed to compute intermediate state roots — \
+                         discarding cross-chain entries for this block"
+                    );
+                    self.pending_l1.clear();
+                    crate::cross_chain::CleanStateRoot::new(built.state_root)
+                }
+            }
+        } else {
+            crate::cross_chain::CleanStateRoot::new(built.state_root)
+        };
+
+        // Attach state deltas to pending L1 entries.
+        if !self.pending_l1.is_empty() && !intermediate_roots.is_empty() {
+            let group_starts: Vec<usize> =
+                self.pending_l1.groups.iter().map(|g| g.start).collect();
+            crate::cross_chain::attach_generic_state_deltas(
+                &mut self.pending_l1.entries,
+                &intermediate_roots,
+                self.config.rollup_id,
+                &group_starts,
+            );
+            info!(
+                target: "based_rollup::driver",
+                unified_entry_count = self.pending_l1.len_entries(),
+                groups = self.pending_l1.num_groups(),
+                roots = intermediate_roots.len(),
+                entry_mix = ?self.pending_l1.entry_mix(),
+                "attached generic state deltas to unified L1 entries"
+            );
+
+            // Override state deltas for independent groups (L1→L2 partial revert).
+            let num_groups = self.pending_l1.num_groups();
+            for k in 0..num_groups {
+                if self.pending_l1.groups[k].mode.is_chained() {
+                    continue;
+                }
+                if k >= intermediate_roots.len() {
+                    break;
+                }
+                let pre_root = intermediate_roots[k];
+                let start = self.pending_l1.groups[k].start;
+                let end = if k + 1 < num_groups {
+                    self.pending_l1.groups[k + 1].start
+                } else {
+                    self.pending_l1.len_entries()
+                };
+                for i in start..end {
+                    if let Some(delta) = self.pending_l1.entries[i].state_deltas.first_mut() {
+                        delta.current_state = pre_root;
+                    }
+                }
+                debug!(
+                    target: "based_rollup::driver",
+                    group = k,
+                    entries = end - start,
+                    %pre_root,
+                    "overrode currentState for independent group (partial revert)"
+                );
+            }
+
+            // Log composite entry hashes for byte-level debugging.
+            for (i, e) in self.pending_l1.entries.iter().enumerate() {
+                use alloy_sol_types::SolType as _;
+                let next_action_encoded =
+                    crate::cross_chain::ICrossChainManagerL2::Action::abi_encode(
+                        &e.next_action.to_sol_action(),
+                    );
+                let next_action_hash = alloy_primitives::keccak256(&next_action_encoded);
+                let mut composite_input = Vec::with_capacity(64);
+                composite_input.extend_from_slice(e.action_hash.as_b256().as_slice());
+                composite_input.extend_from_slice(next_action_hash.as_slice());
+                let composite = alloy_primitives::keccak256(&composite_input);
+                debug!(
+                    target: "based_rollup::driver",
+                    idx = i,
+                    action_hash = %e.action_hash,
+                    next_action_type = ?e.next_action.action_type,
+                    next_action_rollup_id = %e.next_action.rollup_id,
+                    next_action_dest = %e.next_action.destination,
+                    next_action_scope = ?e.next_action.scope.as_slice().iter().map(|s| format!("{s}")).collect::<Vec<_>>(),
+                    next_action_data_hex = %format!("0x{}", hex::encode(&e.next_action.data)),
+                    next_action_failed = e.next_action.failed,
+                    current_state = %e.state_deltas.first().map(|d| format!("{}", d.current_state)).unwrap_or_default(),
+                    new_state = %e.state_deltas.first().map(|d| format!("{}", d.new_state)).unwrap_or_default(),
+                    composite_verify_hash = %composite,
+                    "L1 entry [byte-level] for VerifyL1Batch comparison"
+                );
+            }
+        }
+
+        (clean_state_root, intermediate_roots)
     }
 
     /// Catch up with L1: derive the next batch, verify local blocks against
