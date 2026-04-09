@@ -14,4 +14,5 @@ pub mod l1_to_l2;
 pub mod l2_to_l1;
 pub mod model;
 pub mod sim_client;
+pub mod simulate;
 pub mod trace;
