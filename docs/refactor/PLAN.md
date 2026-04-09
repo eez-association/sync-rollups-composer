@@ -1063,14 +1063,14 @@ Mechanical movement.
 | 1 | 1.9c | L2ToL1ContinuationBuilder (with_scope_return mandatory) | incremental | ⏸ deferred | #12 (logic correct, no type wrapper yet) |
 | 1 | 1.10 | ⭐ ReturnData enum (Void / NonVoid) | dedicated | ✅ (scaffold only) | #20 (enum defined, field cascade deferred) |
 | 2 | 2.1 | Driver mechanical split (12 commits: mod.rs 5509→971, 11 sibling files) | dedicated | ✅ | — |
-| 2 | 2.2 | BuilderTickContext | incremental | ⏸ deferred to Phase 2b | — |
-| 2 | 2.3 | QueueDrain | incremental | ⏸ deferred to Phase 2b | — |
-| 2 | 2.4 | ProtocolTxPlan with typed stages | incremental | ⏸ deferred to Phase 2b (design work, not mechanical) | — |
+| 2 | 2.2 | BuilderTickContext | incremental | ✅ (derive_and_verify_from_l1 + compute_tick_context) | — |
+| 2 | 2.3 | QueueDrain | incremental | ✅ (drain_rpc_queues + QueueDrainRollback + rollback_queue_drain) | — |
+| 2 | 2.4 | ProtocolTxPlan with typed stages | incremental | ✅ (Bootstrapped → ContextSet → EntriesLoaded typestate) | — |
 | 2 | 2.5 | VerificationDecision + rewind_to_re_derive | incremental | ✅ | #9, #10 |
 | 2 | 2.6 | FlushPrecheck | incremental | ✅ (FlushPrecheckResult enum) | — |
 | 2 | 2.7 | FlushAssembly → FlushPlan<Collected> | incremental | ✅ folded into 1.7 | — |
 | 2 | 2.7b | ⭐ ForwardAndTriggerPlan + TriggerExecutionResult | incremental | ✅ (TriggerExecutionResult) | #15 |
-| 2 | 2.8 | step_builder/flush_to_l1 as orchestrators (complete FlushStage) | dedicated | ⏸ deferred to Phase 2b (needs 2.2-2.4 first) | — |
+| 2 | 2.8 | step_builder/flush_to_l1 as orchestrators (complete FlushStage) | dedicated | ✅ (step_builder 780→255 LOC via finalize_block_entries; flush_to_l1 deferred) | — |
 | 3 | 3.0 | ⭐ trait SimulationClient + HttpSimClient + InMemorySimClient | dedicated | ⏸ deferred | — |
 | 3 | 3.1 | Sealed trait Direction | incremental | ⏸ deferred | — |
 | 3 | 3.2 | shared composer_rpc/model.rs | dedicated | ⏸ deferred | — |
