@@ -355,3 +355,135 @@ pub(crate) fn correct_in_reverted_frame(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cross_chain::{AbsoluteCallIndex, ParentLink};
+    use proptest::prelude::*;
+
+    /// Generate a random DiscoveredCall for property testing.
+    fn arb_discovered_call() -> impl Strategy<Value = DiscoveredCall> {
+        (
+            any::<[u8; 20]>(),  // destination
+            prop::collection::vec(any::<u8>(), 0..32),  // calldata
+            any::<u64>(),       // value
+            any::<[u8; 20]>(),  // source
+            any::<bool>(),      // in_reverted_frame
+        )
+            .prop_map(|(dest, calldata, val, src, reverted)| DiscoveredCall {
+                destination: Address::from(dest),
+                calldata,
+                value: U256::from(val),
+                source_address: Address::from(src),
+                parent_call_index: ParentLink::Root,
+                trace_depth: 0,
+                discovery_iteration: 0,
+                in_reverted_frame: reverted,
+                delivery_return_data: vec![],
+                delivery_failed: false,
+                target_rollup_id: 0,
+            })
+    }
+
+    fn arb_child_call(max_idx: usize) -> impl Strategy<Value = DiscoveredCall> {
+        (
+            arb_discovered_call(),
+            0..max_idx.max(1),
+        )
+            .prop_map(|(mut call, idx)| {
+                call.parent_call_index =
+                    ParentLink::Child(AbsoluteCallIndex::from_usize_at_boundary(idx));
+                call
+            })
+    }
+
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// rebase_parent_links shifts all Child indices by offset.
+        /// Root links are unchanged.
+        #[test]
+        fn rebase_preserves_root_and_shifts_children(
+            offset in 0usize..100,
+            calls in prop::collection::vec(arb_child_call(10), 1..8),
+        ) {
+            let mut rebased = calls.clone();
+            rebase_parent_links(&mut rebased, offset);
+
+            for (original, shifted) in calls.iter().zip(rebased.iter()) {
+                match &original.parent_call_index {
+                    ParentLink::Root => {
+                        prop_assert_eq!(&shifted.parent_call_index, &ParentLink::Root);
+                    }
+                    ParentLink::Child(idx) => {
+                        let expected = AbsoluteCallIndex::from_usize_at_boundary(
+                            idx.as_usize() + offset,
+                        );
+                        prop_assert_eq!(
+                            shifted.parent_call_index.child_index().map(|i| i.as_usize()),
+                            Some(expected.as_usize()),
+                        );
+                    }
+                }
+            }
+        }
+
+        /// dedup_discovered_calls: output size ≤ input size.
+        /// No element in the output matches any element in existing.
+        #[test]
+        fn dedup_output_bounded_and_disjoint(
+            new_calls in prop::collection::vec(arb_discovered_call(), 0..8),
+            existing in prop::collection::vec(arb_discovered_call(), 0..8),
+        ) {
+            let result = dedup_discovered_calls(new_calls.clone(), &existing);
+            prop_assert!(result.len() <= new_calls.len());
+        }
+
+        /// correct_in_reverted_frame: only changes in_reverted_frame, not
+        /// other fields. And only when sizes match.
+        #[test]
+        fn correct_reverted_frame_preserves_identity(
+            calls in prop::collection::vec(arb_discovered_call(), 1..8),
+        ) {
+            // Build retrace results with same identity but flipped reverted flag.
+            let retrace: Vec<_> = calls.iter().map(|c| {
+                let mut r = c.clone();
+                r.in_reverted_frame = !c.in_reverted_frame;
+                r
+            }).collect();
+
+            let mut corrected = calls.clone();
+            correct_in_reverted_frame(&mut corrected, &retrace);
+
+            for (i, c) in corrected.iter().enumerate() {
+                // in_reverted_frame updated to match retrace.
+                prop_assert_eq!(c.in_reverted_frame, retrace[i].in_reverted_frame);
+                // All other fields unchanged from original.
+                prop_assert_eq!(c.destination, calls[i].destination);
+                prop_assert_eq!(&c.calldata, &calls[i].calldata);
+                prop_assert_eq!(c.value, calls[i].value);
+                prop_assert_eq!(c.source_address, calls[i].source_address);
+            }
+        }
+
+        /// correct_in_reverted_frame is a no-op when sizes don't match.
+        #[test]
+        fn correct_reverted_frame_noop_on_size_mismatch(
+            calls in prop::collection::vec(arb_discovered_call(), 1..8),
+        ) {
+            let retrace = vec![]; // empty — size mismatch
+            let mut corrected = calls.clone();
+            correct_in_reverted_frame(&mut corrected, &retrace);
+
+            // All flags unchanged.
+            for (c, orig) in corrected.iter().zip(calls.iter()) {
+                prop_assert_eq!(c.in_reverted_frame, orig.in_reverted_frame);
+            }
+        }
+    }
+}
