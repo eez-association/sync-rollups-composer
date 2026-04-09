@@ -176,6 +176,10 @@ pub(crate) struct L2ToL1 {
     pub l1_ccm: Address,
     /// CCM address on L2 (source for trace walking).
     pub l2_ccm: Address,
+    /// Builder address (for loadExecutionTable sender).
+    pub builder_address: Address,
+    /// Rollup ID for entry construction.
+    pub rollup_id: u64,
 }
 
 impl sealed::Sealed for L2ToL1 {}
@@ -207,12 +211,51 @@ impl Direction for L2ToL1 {
 
     async fn build_retrace_bundle(
         &self,
-        _calls: &[DiscoveredCall],
-        _user_tx: &UserTxContext,
+        calls: &[DiscoveredCall],
+        user_tx: &UserTxContext,
         _iteration: usize,
     ) -> Option<Value> {
-        // L2→L1: build [loadExecutionTable(entries), userTx] bundle on L2.
-        // Full implementation deferred to 3.4b.
-        todo!("L2ToL1::build_retrace_bundle — implement in 3.4b")
+        // Build L2 table entries from discovered calls.
+        let mut l2_table_entries = Vec::new();
+        for call in calls {
+            let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+                call.destination,
+                call.calldata.clone(),
+                call.value,
+                call.source_address,
+                self.rollup_id,
+                vec![], // tx_bytes placeholder (irrelevant for table loading)
+                call.delivery_return_data.clone(),
+                call.delivery_failed,
+                vec![], // l1_delivery_scope (irrelevant for table loading)
+                crate::cross_chain::TxOutcome::Success,
+            );
+            l2_table_entries.extend(call_entries.l2_table_entries);
+        }
+
+        // Encode loadExecutionTable calldata.
+        let load_table_calldata =
+            crate::cross_chain::encode_load_execution_table_calldata(&l2_table_entries);
+        let load_table_hex = format!("0x{}", hex::encode(load_table_calldata.as_ref()));
+
+        // Build the bundle: [loadExecutionTable, userTx] in one bundle
+        // so tx1's state is visible to tx2.
+        Some(serde_json::json!({
+            "transactions": [
+                {
+                    "from": format!("{}", self.builder_address),
+                    "to": format!("{}", self.l2_ccm),
+                    "data": load_table_hex,
+                    "gas": "0x1c9c380"
+                },
+                {
+                    "from": user_tx.from,
+                    "to": user_tx.to,
+                    "data": user_tx.data,
+                    "value": user_tx.value,
+                    "gas": "0x2faf080"
+                }
+            ]
+        }))
     }
 }
