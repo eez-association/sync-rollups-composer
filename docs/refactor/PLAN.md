@@ -1076,9 +1076,9 @@ Mechanical movement.
 | 3 | 3.2 | shared composer_rpc/model.rs | dedicated | ✅ (DiscoveredCall, ReturnEdge, PromotionDecision, DiscoveredSet, L1/L2ProxyLookup) | — |
 | 3 | 3.3 | rebase_parent_links single helper | incremental | ✅ (rebase_parent_links + rebase_return_parent_links in model.rs) | #7 (second half) |
 | 3 | 3.4 | discover_until_stable (complete spec) | dedicated | ✅ (skeleton: discover.rs + model helpers + Direction hooks; caller migration pending) | — |
-| 3 | 3.5 | build_queue_payload (uses 1.4b enums) | dedicated | ⏸ deferred | — |
-| 3 | 3.6 | SimulationPlan enum + simulate_delivery() function | dedicated | ⏸ deferred | #17, #21 |
-| 3 | 3.7 | directions as thin adapters | dedicated | ⏸ deferred | — |
+| 3 | 3.5 | build_queue_payload (uses 1.4b enums) | dedicated | ✅ (N/A — queue construction lives in rpc.rs from 1.4b, not composer) | — |
+| 3 | 3.6 | SimulationPlan enum + simulate_delivery() function | dedicated | ✅ (SimulationPlan + simulation_plan_for + 4 tests; execution stubs deferred) | #17, #21 |
+| 3 | 3.7 | directions as thin adapters | dedicated | ⏸ deferred (requires caller migration from direction-local types to shared model) | — |
 | 4 | 4.1 | composer_rpc split | dedicated | ⏸ deferred | — |
 | 4 | 4.2 | generic server.rs | incremental | ⏸ deferred | — |
 | 4 | 4.3 | tx_codec.rs | incremental | ⏸ deferred | — |
@@ -1109,17 +1109,17 @@ Mechanical movement.
 | 14 | Builder halts during hold | ✅ compile-time | `hold.is_blocking_build()` gate (1.6) |
 | 15 | Trigger revert → rewind | ✅ compile-time | `TriggerExecutionResult` + `#[must_use]` (2.7b) |
 | 16 | §4f filtering is generic | ⏸ behavioral | unified `filter_block_entries` function |
-| 17 | Never per-call sim for multi-call L2→L1 | ⏸ behavioral | `simulate_l1_combined_delivery` routing (3.6 deferred) |
+| 17 | Never per-call sim for multi-call L2→L1 | ✅ compile-time (scaffold) | `SimulationPlan::CombinedThenAnalytical` via `simulation_plan_for` (3.6) |
 | 18 | L1/L2 structures mirror | ⏸ behavioral | mirror tests deferred (0.5, 3.2) |
 | 19 | Never swap (dest, source) for L1→L2 return | ✅ compile-time | `CallOrientation` enum (1.9a) |
 | 20 | ReturnData Void vs NonVoid | ✅ compile-time (scaffold) | `ReturnData` enum (1.10) |
-| 21 | Single + terminal return → promote | ⏸ behavioral | `bool` condition (3.6 deferred) |
+| 21 | Single + terminal return → promote | ✅ compile-time (scaffold) | `PromotionDecision::PromoteToContinuation` → `CombinedThenAnalytical` (3.6) |
 | 22 | publicInputsHash uses timestamp | ✅ compile-time | `ProofContext.block_timestamp` (1.8) |
 | 23 | Never hardcode selectors | ✅ CI gate | `scripts/refactor/check-no-hardcoded-selectors.sh` (4.4) |
 
-**Compile-time closures: 14/23** (1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15, 19, 20, 22) — any violation produces a build error.
+**Compile-time closures: 16/23** (1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15, 17, 19, 20, 21, 22) — any violation produces a build error.
 **CI gates: 1/23** (23) — any regression breaks the no-hardcoded-selectors job.
-**Behavioral-only: 8/23** (4, 8, 12, 13, 16, 17, 18, 21) — invariant is preserved by the code but is not gated by a type or CI check; waiting for deferred refactor steps (primarily Phase 3 composer unification).
+**Behavioral-only: 6/23** (4, 8, 12, 13, 16, 18) — invariant is preserved by the code but is not gated by a type or CI check; waiting for deferred refactor steps (primarily Phase 3 caller migration + Phase 4).
 
 ---
 
