@@ -42,7 +42,7 @@ use super::common::{
     get_l1_block_context as get_l1_block_context_for_proxy,
     get_verification_key as get_verification_key_for_proxy,
 };
-use super::model::{L1ProxyLookup, L2ProxyLookup};
+use super::model::{DiscoveredCall, L1ProxyLookup, L2ProxyLookup};
 
 /// Run the RPC proxy server.
 ///
@@ -409,7 +409,7 @@ async fn queue_l2_to_l1_multi_call_entries(
     client: &reqwest::Client,
     upstream_url: &str,
     raw_tx_hex: &str,
-    detected_l2_calls: &[DetectedL2InternalCall],
+    detected_l2_calls: &[DiscoveredCall],
     return_calls: &[DetectedReturnCall],
     _rollup_id: u64,
     tx_outcome: crate::cross_chain::TxOutcome,
@@ -655,7 +655,7 @@ async fn queue_independent_calls_l2_to_l1(
     l1_rpc_url: &str,
     upstream_url: &str,
     raw_tx_hex: &str,
-    detected_calls: &[DetectedL2InternalCall],
+    detected_calls: &[DiscoveredCall],
     rollups_address: Address,
     rollup_id: u64,
     tx_outcome: crate::cross_chain::TxOutcome,
@@ -2178,7 +2178,7 @@ async fn simulate_chained_delivery_l2_to_l1(
     rollup_id: u64,
     _builder_address: Address,
     _builder_private_key: &str,
-    calls: &[DetectedL2InternalCall],
+    calls: &[DiscoveredCall],
     _trace_block_number: u64,
     _trace_block_timestamp: u64,
 ) -> Vec<(Vec<u8>, bool)> {
@@ -2403,7 +2403,7 @@ async fn simulate_chained_delivery_l2_to_l1(
 async fn fallback_per_call_l2_to_l1_simulation(
     client: &reqwest::Client,
     l1_rpc_url: &str,
-    calls: &[DetectedL2InternalCall],
+    calls: &[DiscoveredCall],
 ) -> Vec<(Vec<u8>, bool)> {
     tracing::info!(
         target: "based_rollup::proxy",
@@ -2488,7 +2488,7 @@ async fn simulate_l1_combined_delivery(
     builder_address: Address,
     builder_private_key: Option<&str>,
     rollup_id: u64,
-    calls: &[&DetectedL2InternalCall],
+    calls: &[&DiscoveredCall],
     rlp_encoded_tx: &[u8],
 ) -> Option<Vec<(Vec<u8>, bool, Vec<DetectedReturnCall>)>> {
     if calls.is_empty() {
@@ -3324,48 +3324,29 @@ fn build_gas_estimate_response(request_json: &Value, gas: u64) -> String {
     .to_string()
 }
 
-/// Information about an internal L2→L1 cross-chain call detected via trace.
-#[derive(Clone)]
-struct DetectedL2InternalCall {
-    /// Cross-chain destination address on L1.
-    destination: Address,
-    /// Calldata forwarded to the destination.
-    calldata: Vec<u8>,
-    /// ETH value sent with the call.
-    value: U256,
-    /// The address that initiated the cross-chain call (from field in trace).
-    source_address: Address,
-    /// Return data from the L1 delivery simulation for this call.
-    /// When non-empty, the L1 RESULT entry hash includes this data.
-    delivery_return_data: Vec<u8>,
-    /// Whether the L1 delivery simulation reverted.
-    delivery_failed: bool,
-    /// Depth of the proxy call in the L2 trace tree (root = 0).
-    /// Used to compute L1 delivery scope: scope = vec![0; trace_depth - 1] (direct caller excluded).
-    trace_depth: usize,
-    /// Whether this call is inside a reverted frame (ancestor has "error" in trace).
-    /// For partial revert patterns (revertContinueL2): calls inside try/catch that
-    /// reverts need REVERT/REVERT_CONTINUE on L1 to undo their L1 effects.
-    in_reverted_frame: bool,
-}
+// The direction-local `DetectedL2InternalCall` struct has been replaced by `DiscoveredCall`
+// from `super::model`. The shared type has the same core fields plus `parent_call_index`,
+// `discovery_iteration`, and `target_rollup_id` (set to defaults at construction sites).
 
 /// Walk an L2 trace using the generic `trace::walk_trace_tree` and convert results
-/// to `DetectedL2InternalCall` format used by the rest of this module.
+/// to `DiscoveredCall` format used by the rest of this module.
 async fn walk_l2_trace_generic(
     client: &reqwest::Client,
     upstream_url: &str,
     ccm_address: Address,
     trace_node: &Value,
     proxy_cache: &mut std::collections::HashMap<Address, Option<super::trace::ProxyInfo>>,
-) -> Vec<DetectedL2InternalCall> {
+) -> Vec<DiscoveredCall> {
     let lookup = L2ProxyLookup {
         client,
         rpc_url: upstream_url,
         ccm_address,
     };
 
-    // Delegate to the shared walk function, then convert to direction-local type.
-    let discovered = super::model::walk_trace_to_discovered(
+    // Delegate to the shared walk function. walk_trace_to_discovered already returns
+    // DiscoveredCall with the correct defaults (delivery_return_data=[], delivery_failed=false,
+    // parent_call_index=Root, discovery_iteration=0, target_rollup_id=0).
+    super::model::walk_trace_to_discovered(
         &lookup,
         &[ccm_address],
         trace_node,
@@ -3373,21 +3354,7 @@ async fn walk_l2_trace_generic(
         0, // default_target_rollup_id: L2→L1 targets L1 (rollup 0)
         0, // discovery_iteration: initial trace
     )
-    .await;
-
-    discovered
-        .into_iter()
-        .map(|c| DetectedL2InternalCall {
-            destination: c.destination,
-            calldata: c.calldata,
-            value: c.value,
-            source_address: c.source_address,
-            delivery_return_data: vec![],
-            delivery_failed: false,
-            trace_depth: c.trace_depth,
-            in_reverted_frame: c.in_reverted_frame,
-        })
-        .collect()
+    .await
 }
 
 /// Walk an L2 trace using the generic `trace::walk_trace_tree` and return results
@@ -3676,7 +3643,7 @@ async fn trace_and_detect_l2_internal_calls(
         let mut iteration = 0;
         const MAX_ITERATIONS: usize = 10;
         // Track last retrace results for in_reverted_frame update after convergence.
-        let mut last_retrace_results: Vec<DetectedL2InternalCall> = Vec::new();
+        let mut last_retrace_results: Vec<DiscoveredCall> = Vec::new();
 
         loop {
             iteration += 1;
@@ -4603,7 +4570,7 @@ async fn trace_and_detect_l2_internal_calls(
 
         for depth in 0..MAX_RECURSIVE_DEPTH {
             // Phase A: Simulate current L2→L1 calls on L1.
-            let call_refs: Vec<&DetectedL2InternalCall> = current_l2_calls.iter().collect();
+            let call_refs: Vec<&DiscoveredCall> = current_l2_calls.iter().collect();
             let sim_results = simulate_l1_combined_delivery(
                 client,
                 l1_rpc_url,
@@ -4822,7 +4789,7 @@ async fn trace_and_detect_l2_internal_calls(
 
             // Phase B: simulate nested L2→L1 calls on L1 to find more return calls.
             let new_return_calls = {
-                let call_refs: Vec<&DetectedL2InternalCall> = nested_l2_calls.iter().collect();
+                let call_refs: Vec<&DiscoveredCall> = nested_l2_calls.iter().collect();
                 let sim_results = simulate_l1_combined_delivery(
                     client,
                     l1_rpc_url,
@@ -5178,7 +5145,7 @@ async fn simulate_l2_return_call_delivery(
     ccm_address: Address,
     return_calls: &[DetectedReturnCall],
     rollup_id: u64,
-) -> Vec<DetectedL2InternalCall> {
+) -> Vec<DiscoveredCall> {
     if return_calls.is_empty() {
         return Vec::new();
     }
@@ -5189,7 +5156,7 @@ async fn simulate_l2_return_call_delivery(
         "simulating L1→L2 return calls on L2 to detect depth > 1 L2→L1 calls"
     );
 
-    let mut all_detected: Vec<DetectedL2InternalCall> = Vec::new();
+    let mut all_detected: Vec<DiscoveredCall> = Vec::new();
     let mut proxy_cache: std::collections::HashMap<Address, Option<super::trace::ProxyInfo>> =
         std::collections::HashMap::new();
 
@@ -5291,7 +5258,7 @@ async fn simulate_l2_return_call_delivery(
             crate::cross_chain::TxOutcome::Success,      // tx_reverts
         );
 
-        let mut detected_for_call: Vec<DetectedL2InternalCall> = Vec::new();
+        let mut detected_for_call: Vec<DiscoveredCall> = Vec::new();
 
         // Build traceCallMany: [loadExecutionTable, executeIncomingCrossChainCall]
         let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
