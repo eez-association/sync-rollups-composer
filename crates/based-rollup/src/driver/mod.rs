@@ -5505,5 +5505,5 @@ fn compute_forkchoice_state(head_hash: B256, block_hashes: &VecDeque<B256>) -> F
 }
 
 #[cfg(test)]
-#[path = "driver_tests.rs"]
+#[path = "../driver_tests.rs"]
 mod tests;
