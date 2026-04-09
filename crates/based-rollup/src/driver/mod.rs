@@ -13,15 +13,13 @@ use crate::proposer::{GasPriceHint, PendingBlock, Proposer};
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, Bytes, U256};
 use alloy_provider::{Provider, RootProvider};
-use alloy_rpc_types_engine::{
-    ExecutionData, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes,
-};
+use alloy_rpc_types_engine::ExecutionData;
 use alloy_sol_types::SolCall;
 use eyre::{OptionExt, Result, WrapErr};
 use reth_engine_primitives::ConsensusEngineHandle;
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
-use reth_payload_primitives::{EngineApiMessageVersion, PayloadTypes};
+use reth_payload_primitives::PayloadTypes;
 use reth_primitives_traits::{Recovered, SignedTransaction, SignerRecoverable};
 use reth_provider::{
     BlockHashReader, BlockNumReader, DatabaseProviderFactory, HeaderProvider,
@@ -147,6 +145,7 @@ pub struct Driver<P, Pool> {
 }
 
 /// Result of building and inserting a block via the engine API.
+mod build;
 mod flush_plan;
 mod hold;
 mod journal;
@@ -162,12 +161,17 @@ pub use pending_queue::{
 };
 pub use types::{BuiltBlock, DriverMode};
 use types::{
-    CHECKPOINT_INTERVAL, DESIRED_GAS_LIMIT, FCU_SYNCING_INITIAL_BACKOFF_MS, FCU_SYNCING_MAX_RETRIES,
-    FORK_CHOICE_DEPTH, L1ConfirmedAnchor, MAX_BACKOFF_SECS, MAX_BATCH_SIZE,
-    MAX_CONSECUTIVE_FAILURES, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS,
-    MIN_L1_CALL_INTERVAL, SUBMISSION_COOLDOWN_SECS, TriggerExecutionResult, TxJournalEntry,
-    VerificationDecision, calc_gas_limit, compute_forkchoice_state, encode_block_transactions,
+    CHECKPOINT_INTERVAL, DESIRED_GAS_LIMIT, FORK_CHOICE_DEPTH, L1ConfirmedAnchor, MAX_BACKOFF_SECS,
+    MAX_BATCH_SIZE, MAX_CONSECUTIVE_FAILURES, MAX_PENDING_CROSS_CHAIN_ENTRIES,
+    MAX_PENDING_SUBMISSIONS, MIN_L1_CALL_INTERVAL, SUBMISSION_COOLDOWN_SECS, TriggerExecutionResult,
+    TxJournalEntry, VerificationDecision, calc_gas_limit, encode_block_transactions,
 };
+
+// Test-only re-exports: `driver_tests.rs` uses `use super::*;` and references
+// these items directly. They are pulled into scope at the module level only
+// under `#[cfg(test)]` so the release build does not flag them as unused.
+#[cfg(test)]
+use types::{FCU_SYNCING_INITIAL_BACKOFF_MS, FCU_SYNCING_MAX_RETRIES, compute_forkchoice_state};
 
 impl<P, Pool> Driver<P, Pool>
 where
@@ -4113,120 +4117,6 @@ where
     /// Always uses `build_derived_block` with exact transactions. In builder mode,
     /// protocol transactions (setContext, loadTable, etc.) and mempool transactions
     /// are assembled by the caller and passed as `derived_transactions`.
-    async fn build_and_insert_block(
-        &mut self,
-        l2_block_number: u64,
-        timestamp: u64,
-        l1_block_hash: B256,
-        l1_block_number: u64,
-        derived_transactions: &Bytes,
-    ) -> Result<BuiltBlock> {
-        // Sanity check: we should be building the next sequential block
-        let expected = self.l2_head_number.saturating_add(1);
-        if l2_block_number != expected {
-            return Err(eyre::eyre!(
-                "expected sequential block {expected}, got {l2_block_number}",
-            ));
-        }
-
-        let (built, execution_data) = self.build_derived_block(
-            self.l2_head_number,
-            timestamp,
-            l1_block_hash,
-            l1_block_number,
-            derived_transactions,
-        )?;
-
-        // Submit to the engine via newPayload — reth re-executes the block.
-        let status = self.engine.new_payload(execution_data).await?;
-
-        if !status.is_valid() {
-            eyre::bail!("newPayload rejected: {:?}", status);
-        }
-
-        // Update fork choice to accept the new head
-        self.update_fork_choice(built.hash).await?;
-
-        Ok(built)
-    }
-
-    /// Send a fork choice update with exponential-backoff retry on SYNCING.
-    ///
-    /// SYNCING is transient — the engine needs time to reconcile its state tree
-    /// after blocks are unwound or rebuilt. Without retry, SYNCING causes the
-    /// driver to bail and enter exponential backoff in the main loop.
-    async fn fork_choice_updated_with_retry(
-        &self,
-        state: ForkchoiceState,
-        payload_attrs: Option<PayloadAttributes>,
-    ) -> Result<ForkchoiceUpdated> {
-        let mut backoff_ms = FCU_SYNCING_INITIAL_BACKOFF_MS;
-        for attempt in 0..FCU_SYNCING_MAX_RETRIES {
-            let fcu = self
-                .engine
-                .fork_choice_updated(
-                    state,
-                    payload_attrs.clone(),
-                    EngineApiMessageVersion::default(),
-                )
-                .await
-                .wrap_err("fork choice update failed")?;
-
-            if fcu.is_valid() || fcu.is_invalid() {
-                return Ok(fcu);
-            }
-
-            // SYNCING — retry with exponential backoff
-            if attempt + 1 < FCU_SYNCING_MAX_RETRIES {
-                warn!(
-                    target: "based_rollup::driver",
-                    attempt = attempt + 1,
-                    max_retries = FCU_SYNCING_MAX_RETRIES,
-                    backoff_ms,
-                    "FCU returned SYNCING, retrying"
-                );
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                backoff_ms *= 2;
-            }
-        }
-
-        eyre::bail!(
-            "engine stuck in SYNCING after {} retries",
-            FCU_SYNCING_MAX_RETRIES
-        );
-    }
-
-    /// Update fork choice state after inserting a new block.
-    ///
-    /// IMPORTANT: State mutations happen AFTER the engine confirms the fork choice
-    /// update, not before. This prevents driver/engine desync if the engine rejects.
-    async fn update_fork_choice(&mut self, block_hash: B256) -> Result<()> {
-        // Temporarily compute the forkchoice state with the new block hash
-        // without mutating self yet.
-        let mut tentative_hashes = self.block_hashes.clone();
-        tentative_hashes.push_back(block_hash);
-        if tentative_hashes.len() > FORK_CHOICE_DEPTH {
-            tentative_hashes.pop_front();
-        }
-        let fcs = compute_forkchoice_state(block_hash, &tentative_hashes);
-
-        let fcu = self.fork_choice_updated_with_retry(fcs, None).await?;
-
-        if fcu.is_invalid() {
-            eyre::bail!(
-                "fork choice finalization rejected: {:?}",
-                fcu.payload_status
-            );
-        }
-
-        // Only mutate driver state after engine confirms success
-        self.block_hashes = tentative_hashes;
-        self.head_hash = block_hash;
-        self.l2_head_number = self.l2_head_number.saturating_add(1);
-
-        Ok(())
-    }
-
     /// Rewind the L2 chain to a target block number by sending a fork choice
     /// update pointing to an ancestor. Reth will internally unwind blocks
     /// above the target.
