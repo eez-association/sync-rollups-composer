@@ -73,6 +73,23 @@ pub(crate) trait Direction: sealed::Sealed + Send + Sync + 'static {
         0
     }
 
+    /// Pre-retrace enrichment: populate delivery return data on calls
+    /// that don't have it yet.
+    ///
+    /// Called before `build_retrace_bundle` each iteration. The delivery
+    /// return data is needed for correct entry construction — without it,
+    /// the retrace won't discover calls hidden behind ABI decode failures.
+    ///
+    /// L1→L2: no-op (delivery data comes from L2 simulation post-convergence)
+    /// L2→L1: simulates each call's delivery on L1 to get return data
+    fn enrich_calls_before_retrace(
+        &self,
+        _calls: &mut [DiscoveredCall],
+        _iteration: usize,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Build a retrace bundle for the iterative discovery loop.
     ///
     /// Given the current set of discovered calls, construct the
@@ -327,6 +344,10 @@ pub(crate) struct L2ToL1 {
     pub builder_address: Address,
     /// Rollup ID for entry construction.
     pub rollup_id: u64,
+    /// HTTP client for L1 delivery simulation during enrichment.
+    pub client: reqwest::Client,
+    /// L1 RPC URL for delivery simulation.
+    pub l1_rpc_url: String,
 }
 
 impl sealed::Sealed for L2ToL1 {}
@@ -354,6 +375,86 @@ impl Direction for L2ToL1 {
 
     fn source_manager_addresses(&self) -> Vec<Address> {
         vec![self.l2_ccm] // CrossChainManagerL2 is the L2 manager
+    }
+
+    async fn enrich_calls_before_retrace(
+        &self,
+        calls: &mut [DiscoveredCall],
+        iteration: usize,
+    ) {
+        // Simulate L1 delivery for calls missing return data.
+        // Without real return data, the loadExecutionTable entries produce
+        // empty returns that cause ABI decode failures in subsequent calls.
+        for call in calls.iter_mut() {
+            if !call.delivery_return_data.is_empty() || call.delivery_failed {
+                continue; // already enriched from a previous iteration
+            }
+
+            // Direct L1 simulation: call the destination with the calldata.
+            let sim_req = serde_json::json!([{
+                "transactions": [{
+                    "from": format!("{}", call.source_address),
+                    "to": format!("{}", call.destination),
+                    "data": format!("0x{}", hex::encode(&call.calldata)),
+                    "value": format!("0x{:x}", call.value),
+                    "gas": "0x2faf080"
+                }]
+            }]);
+
+            let trace_resp = self
+                .client
+                .post(&self.l1_rpc_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "debug_traceCallMany",
+                    "params": [sim_req, null, {"tracer": "callTracer"}],
+                    "id": 99979
+                }))
+                .send()
+                .await;
+
+            if let Ok(resp) = trace_resp {
+                if let Ok(body) = resp.json::<Value>().await {
+                    if let Some(trace) = body
+                        .get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                        .and_then(|arr| arr.first())
+                    {
+                        let has_error = trace.get("error").is_some();
+                        if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
+                            let hex_clean = output.strip_prefix("0x").unwrap_or(output);
+                            if let Ok(bytes) = hex::decode(hex_clean) {
+                                // Check for protocol errors (ExecutionNotFound etc.)
+                                // that indicate the context is incomplete, not a real failure.
+                                let is_protocol_error = has_error
+                                    && bytes.len() == 4
+                                    && (bytes == [0xf9, 0xd3, 0x30, 0xad]   // ExecutionNotInCurrentBlock
+                                        || bytes == [0xed, 0x6b, 0xc7, 0x50]); // ExecutionNotFound
+
+                                if !is_protocol_error {
+                                    call.delivery_return_data = bytes;
+                                    call.delivery_failed = has_error;
+                                }
+                                // Protocol errors: leave empty — full delivery sim
+                                // would be needed (deferred to inline loop fallback).
+                            }
+                        } else if has_error {
+                            call.delivery_failed = true;
+                        }
+                    }
+                }
+            }
+
+            tracing::info!(
+                target: "based_rollup::discover",
+                iteration,
+                destination = %call.destination,
+                return_data_len = call.delivery_return_data.len(),
+                delivery_failed = call.delivery_failed,
+                "enriched call with L1 delivery return data"
+            );
+        }
     }
 
     async fn build_retrace_bundle(

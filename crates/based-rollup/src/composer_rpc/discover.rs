@@ -90,6 +90,11 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
                 "iterative discovery: retracing with entries loaded"
             );
 
+            // Direction-specific: enrich calls with delivery return data.
+            direction
+                .enrich_calls_before_retrace(&mut all_calls, iteration)
+                .await;
+
             // Direction-specific: build the retrace bundle.
             let bundle = match direction
                 .build_retrace_bundle(&all_calls, user_tx, iteration)
