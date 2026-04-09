@@ -23,7 +23,7 @@ use super::types::{
 use super::TriggerMetadata;
 use crate::cross_chain::CrossChainExecutionEntry;
 use crate::proposer::PendingBlock;
-use alloy_primitives::Bytes;
+use alloy_primitives::{B256, Bytes};
 use alloy_provider::Provider;
 use eyre::Result;
 use reth_primitives_traits::{Recovered, SignerRecoverable};
@@ -32,6 +32,20 @@ use reth_provider::{
     StageCheckpointReader, StageCheckpointWriter, StateProviderFactory, TransactionsProvider,
 };
 use tracing::{debug, error, info, warn};
+
+/// Maximum number of blocks to build in one tick during catch-up.
+const MAX_CATCHUP_BLOCKS: u64 = 10_000;
+
+/// Pre-computed context for a single builder tick, determined before
+/// queue drains and the block building loop.
+pub(super) struct BuilderTickContext {
+    /// Effective target L2 block number for this tick (catch-up capped).
+    pub effective_target: u64,
+    /// Current L1 block number providing context for this tick.
+    pub current_l1_block: u64,
+    /// Hash of `current_l1_block`.
+    pub l1_hash: B256,
+}
 
 impl<P, Pool> Driver<P, Pool>
 where
@@ -56,130 +70,26 @@ where
     /// Builder mode: build blocks from the mempool and submit to L1.
     ///
     /// The builder:
-    /// 1. Checks L1 for any blocks submitted by others
-    /// 2. Builds new blocks up to the current time
-    /// 3. Submits pending blocks to L1 in batches
+    /// 1. Catches up with L1 (derive, verify, commit)
+    /// 2. Computes tick context (target, L1 hash, hold guard)
+    /// 3. Drains cross-chain queues
+    /// 4. Builds new blocks up to the target
+    /// 5. Submits pending blocks to L1 in batches
     pub(super) async fn step_builder(&mut self, latest_l1_block: u64) -> Result<()> {
+        // Phase 1: Catch up with L1 — derive, verify, commit.
+        self.derive_and_verify_from_l1(latest_l1_block).await?;
+        if self.pending_rewind_target.is_some() {
+            return Ok(());
+        }
+
+        // Phase 2: Compute tick context (target, L1 hash, hold check).
+        let tick = match self.compute_tick_context(latest_l1_block).await? {
+            Some(ctx) => ctx,
+            None => return Ok(()),
+        };
+        let mut current_l1_block = tick.current_l1_block;
+        let mut l1_hash = tick.l1_hash;
         let provider = self.get_l1_provider().clone();
-
-        // Check if there are new L1 blocks we haven't processed
-        if self.derivation.last_processed_l1_block() < latest_l1_block {
-            let batch = self
-                .derivation
-                .derive_next_batch(latest_l1_block, &provider)
-                .await?;
-
-            for block in &batch.blocks {
-                // If a rewind was triggered by a previous block in this batch,
-                // stop processing — remaining blocks will be re-derived after rewind.
-                if self.pending_rewind_target.is_some() {
-                    break;
-                }
-
-                if block.l2_block_number <= self.l2_head_number {
-                    // We already built this block locally. Verify it matches L1.
-                    self.verify_local_block_matches_l1(block)?;
-                    continue;
-                }
-                debug!(
-                    target: "based_rollup::driver",
-                    l2_block = block.l2_block_number,
-                    is_empty = block.is_empty,
-                    "another builder submitted this block, applying"
-                );
-                // §4f deferred filtering: apply receipt-based filtering if needed.
-                let effective_transactions = self.apply_deferred_filtering(block)?;
-                let _ = self
-                    .build_and_insert_block(
-                        block.l2_block_number,
-                        block.l2_timestamp,
-                        block.l1_info.l1_block_hash,
-                        block.l1_info.l1_block_number,
-                        &effective_transactions,
-                    )
-                    .await?;
-                continue;
-            }
-
-            // If a rewind was triggered during verification, do NOT commit the
-            // batch — the cursor must stay so blocks are re-derived after the
-            // rewind completes. Return early to avoid wasted block building and
-            // L1 gas expenditure with incorrect state roots.
-            if self.pending_rewind_target.is_some() {
-                return Ok(());
-            }
-
-            // All blocks processed successfully — commit the cursor state.
-            self.derivation.commit_batch(&batch);
-            self.maybe_save_checkpoint()?;
-        }
-
-        // Wait for at least one L1 block after deployment before building.
-        // The L1 context rule is: containing_l1_block - 1. The builder uses latest_l1_block
-        // as context, so we need latest_l1_block > deployment_l1_block to ensure the
-        // submitted tx (landing in latest_l1_block + 1) produces matching context.
-        if latest_l1_block <= self.config.deployment_l1_block {
-            debug!(
-                target: "based_rollup::driver",
-                latest_l1_block,
-                deployment_l1_block = self.config.deployment_l1_block,
-                "waiting for L1 to advance past deployment block before building"
-            );
-            return Ok(());
-        }
-
-        // Derive the target L2 block deterministically from the L1 head.
-        // l2_block_number(N) = N - deployment_l1_block.  With the +1 offset in
-        // l2_timestamp(), L2 block K has timestamp equal to L1 block (dep + K + 1).
-        // The builder targets the next L1 block (latest + 1) for postBatch, so
-        // building up to l2_block_number(latest) produces a block whose timestamp
-        // matches that next L1 block exactly.  No wall-clock dependency.
-        let target_l2_block = self.config.l2_block_number(latest_l1_block);
-
-        // Sanity check: cap the catch-up gap to prevent runaway block production
-        // (e.g., builder restarting far behind L1 head).
-        const MAX_CATCHUP_BLOCKS: u64 = 10_000;
-        if target_l2_block > self.l2_head_number.saturating_add(MAX_CATCHUP_BLOCKS) {
-            error!(
-                target: "based_rollup::driver",
-                head = self.l2_head_number,
-                target = target_l2_block,
-                gap = target_l2_block.saturating_sub(self.l2_head_number),
-                "catch-up gap exceeds {} blocks — building max {} this step",
-                MAX_CATCHUP_BLOCKS,
-                MAX_CATCHUP_BLOCKS
-            );
-        }
-        let effective_target =
-            target_l2_block.min(self.l2_head_number.saturating_add(MAX_CATCHUP_BLOCKS));
-
-        // Early return if nothing to build
-        if self.l2_head_number >= effective_target {
-            return Ok(());
-        }
-
-        // Fetch L1 block hash for current L1 head
-        let mut current_l1_block = latest_l1_block;
-        let mut l1_hash = provider
-            .get_block_by_number(current_l1_block.into())
-            .await?
-            .ok_or_else(|| eyre::eyre!("L1 block {current_l1_block} not found"))?
-            .header
-            .hash;
-
-        // Don't build new blocks while waiting for entry verification.
-        // Building during hold accumulates blocks with advancing L1 context
-        // that will mismatch after rewind, causing a double rewind cycle.
-        // Check BEFORE draining queues so entries accumulate in the shared
-        // queues until the hold clears, avoiding the bug where drained entries
-        // are lost on return and held L2 txs execute without loadExecutionTable.
-        //
-        // Closes invariant #14 — `is_blocking_build` is the typed gate
-        // that replaces the pre-1.6 `.is_some()` check on
-        // `pending_entry_verification_block`.
-        if self.hold.is_blocking_build() {
-            return Ok(());
-        }
 
         // Fetch cross-chain execution entries for builder blocks.
         // These are L1-fetched entries (incoming calls from other rollups, already
@@ -397,7 +307,7 @@ where
         const L1_REFRESH_INTERVAL: u64 = 100;
         let mut blocks_since_l1_refresh: u64 = 0;
 
-        while self.l2_head_number < effective_target {
+        while self.l2_head_number < tick.effective_target {
             // Periodically refresh L1 context during catch-up to reduce blast radius
             // of L1 context mismatches (each batch of ~100 blocks gets fresh context).
             blocks_since_l1_refresh = blocks_since_l1_refresh.saturating_add(1);
@@ -449,7 +359,7 @@ where
             // deposit_cutoff, and the first *submitted* block claims the deposits.
             // By assigning to the last block, we avoid submitting an otherwise-empty
             // first block just because it carries deposits.
-            let is_last_block = next_l2_block >= effective_target;
+            let is_last_block = next_l2_block >= tick.effective_target;
             let is_last_before_refresh =
                 blocks_since_l1_refresh.saturating_add(1) > L1_REFRESH_INTERVAL;
             let assign_entries = is_last_block || is_last_before_refresh;
@@ -835,6 +745,144 @@ where
         self.flush_to_l1().await?;
 
         Ok(())
+    }
+
+    /// Catch up with L1: derive the next batch, verify local blocks against
+    /// derived blocks, apply any blocks we haven't seen yet, and commit the
+    /// derivation cursor.
+    ///
+    /// Sets `self.pending_rewind_target` if verification detects a mismatch.
+    /// Callers should check for a pending rewind and return early.
+    async fn derive_and_verify_from_l1(&mut self, latest_l1_block: u64) -> Result<()> {
+        let provider = self.get_l1_provider().clone();
+
+        if self.derivation.last_processed_l1_block() < latest_l1_block {
+            let batch = self
+                .derivation
+                .derive_next_batch(latest_l1_block, &provider)
+                .await?;
+
+            for block in &batch.blocks {
+                // If a rewind was triggered by a previous block in this batch,
+                // stop processing — remaining blocks will be re-derived after rewind.
+                if self.pending_rewind_target.is_some() {
+                    break;
+                }
+
+                if block.l2_block_number <= self.l2_head_number {
+                    // We already built this block locally. Verify it matches L1.
+                    self.verify_local_block_matches_l1(block)?;
+                    continue;
+                }
+                debug!(
+                    target: "based_rollup::driver",
+                    l2_block = block.l2_block_number,
+                    is_empty = block.is_empty,
+                    "another builder submitted this block, applying"
+                );
+                // §4f deferred filtering: apply receipt-based filtering if needed.
+                let effective_transactions = self.apply_deferred_filtering(block)?;
+                let _ = self
+                    .build_and_insert_block(
+                        block.l2_block_number,
+                        block.l2_timestamp,
+                        block.l1_info.l1_block_hash,
+                        block.l1_info.l1_block_number,
+                        &effective_transactions,
+                    )
+                    .await?;
+            }
+
+            // If a rewind was triggered during verification, do NOT commit the
+            // batch — the cursor must stay so blocks are re-derived after the
+            // rewind completes.
+            if self.pending_rewind_target.is_some() {
+                return Ok(());
+            }
+
+            // All blocks processed successfully — commit the cursor state.
+            self.derivation.commit_batch(&batch);
+            self.maybe_save_checkpoint()?;
+        }
+
+        Ok(())
+    }
+
+    /// Compute the builder tick context: target L2 block, L1 block info.
+    ///
+    /// Returns `None` if building should be skipped this tick:
+    /// - L1 has not advanced past the deployment block
+    /// - Already at or past the target L2 block
+    /// - Entry verification hold is active (invariant #14)
+    async fn compute_tick_context(
+        &self,
+        latest_l1_block: u64,
+    ) -> Result<Option<BuilderTickContext>> {
+        // Wait for at least one L1 block after deployment before building.
+        // The L1 context rule is: containing_l1_block - 1. The builder uses
+        // latest_l1_block as context, so we need latest_l1_block > deployment
+        // to ensure the submitted tx produces matching context.
+        if latest_l1_block <= self.config.deployment_l1_block {
+            debug!(
+                target: "based_rollup::driver",
+                latest_l1_block,
+                deployment_l1_block = self.config.deployment_l1_block,
+                "waiting for L1 to advance past deployment block before building"
+            );
+            return Ok(None);
+        }
+
+        // Derive the target L2 block deterministically from the L1 head.
+        // l2_block_number(N) = N - deployment_l1_block. The builder targets
+        // the next L1 block (latest + 1) for postBatch, so building up to
+        // l2_block_number(latest) produces a block whose timestamp matches.
+        let target_l2_block = self.config.l2_block_number(latest_l1_block);
+
+        // Cap the catch-up gap to prevent runaway block production.
+        if target_l2_block > self.l2_head_number.saturating_add(MAX_CATCHUP_BLOCKS) {
+            error!(
+                target: "based_rollup::driver",
+                head = self.l2_head_number,
+                target = target_l2_block,
+                gap = target_l2_block.saturating_sub(self.l2_head_number),
+                "catch-up gap exceeds {} blocks — building max {} this step",
+                MAX_CATCHUP_BLOCKS,
+                MAX_CATCHUP_BLOCKS
+            );
+        }
+        let effective_target =
+            target_l2_block.min(self.l2_head_number.saturating_add(MAX_CATCHUP_BLOCKS));
+
+        // Nothing to build this tick.
+        if self.l2_head_number >= effective_target {
+            return Ok(None);
+        }
+
+        // Fetch L1 block hash for the current L1 head.
+        let provider = self.get_l1_provider().clone();
+        let l1_hash = provider
+            .get_block_by_number(latest_l1_block.into())
+            .await?
+            .ok_or_else(|| eyre::eyre!("L1 block {latest_l1_block} not found"))?
+            .header
+            .hash;
+
+        // Don't build new blocks while waiting for entry verification.
+        // Building during hold accumulates blocks with advancing L1 context
+        // that will mismatch after rewind, causing a double rewind cycle.
+        // Check BEFORE draining queues so entries accumulate in the shared
+        // queues until the hold clears.
+        //
+        // Closes invariant #14 — `is_blocking_build` is the typed gate.
+        if self.hold.is_blocking_build() {
+            return Ok(None);
+        }
+
+        Ok(Some(BuilderTickContext {
+            effective_target,
+            current_l1_block: latest_l1_block,
+            l1_hash,
+        }))
     }
 
     /// Read the builder's current L2 nonce from chain state.
