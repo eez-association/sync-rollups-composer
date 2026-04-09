@@ -9,6 +9,7 @@
 
 pub mod common;
 pub mod direction;
+pub mod discover;
 pub mod l1_to_l2;
 pub mod l2_to_l1;
 pub mod model;
