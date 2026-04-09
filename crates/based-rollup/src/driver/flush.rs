@@ -26,6 +26,21 @@ use super::types::{
 use super::Driver;
 use crate::proposer::{GasPriceHint, PendingBlock};
 use alloy_primitives::{B256, Bytes, U256};
+
+/// Outcome of the flush pre-check phase (refactor PLAN step 2.6).
+///
+/// `flush_precheck` runs the first ~90 lines of `flush_to_l1`'s early-return
+/// sequence and produces one of three terminal states:
+///
+/// - `Proceed` — all preconditions met, caller should continue with block
+///   collection and submission. `on_chain_root` is the latest L1 state root.
+/// - `Skip` — one of the preconditions failed but no rewind is needed
+///   (e.g., nothing to submit, hold active, cooldown, proposer absent).
+/// - `Rewind` — the on-chain root check triggered a rewind (already applied).
+enum FlushPrecheckResult {
+    Proceed { on_chain_root: B256 },
+    Skip,
+}
 use alloy_provider::Provider;
 use alloy_sol_types::SolCall;
 use eyre::Result;
@@ -55,12 +70,16 @@ where
         + Send
         + Sync,
 {
-    /// Submit pending blocks and cross-chain entries to L1 via the proposer.
+    /// Run the flush precondition checks: proposer availability, queue
+    /// emptiness, hold state, submission cooldown, wallet balance, and
+    /// on-chain root deduplication. Returns `Proceed { on_chain_root }`
+    /// when all checks pass, `Skip` when the flush should be silently
+    /// skipped this cycle. Any rewind triggered by the on-chain root
+    /// check is applied inline before returning `Skip`.
     ///
-    /// Combines block submission and cross-chain entry posting into a single
-    /// `submit_to_l1` call. Drains external cross-chain entries from the shared
-    /// queue, collects pending blocks, and sends everything in one L1 transaction.
-    pub(super) async fn flush_to_l1(&mut self) -> Result<()> {
+    /// Refactor PLAN step 2.6 — makes the early-return sequence in
+    /// `flush_to_l1` explicit and testable in isolation.
+    async fn flush_precheck(&mut self) -> FlushPrecheckResult {
         let Some(proposer) = &self.proposer else {
             if !self.pending_submissions.is_empty() {
                 warn!(
@@ -71,26 +90,14 @@ where
                 self.pending_submissions.clear();
             }
             self.pending_l1.clear();
-            return Ok(());
+            return FlushPrecheckResult::Skip;
         };
 
-        // NOTE: No secondary drain of queued_cross_chain_calls here.
-        // Entries arriving after step_builder's drain wait in the shared queue
-        // for the next step_builder tick (1 second). Draining here would pick up
-        // entries that arrived AFTER the block was built — they'd get L1 entries
-        // but no corresponding L2 block, causing orphaned entries with zero
-        // state deltas.
-
         if self.pending_submissions.is_empty() && self.pending_l1.is_empty() {
-            return Ok(());
+            return FlushPrecheckResult::Skip;
         }
 
-        // Entry verification hold (§4f nonce safety): if an entry-bearing batch
-        // was flushed but derivation hasn't confirmed it yet, hold off on new
-        // submissions. The builder keeps building blocks into the pending queue,
-        // but doesn't post them until derivation verifies the entry block.
-        // Once verified (by verify_local_block_matches_l1 or clear_pending_state),
-        // the flag is cleared and accumulated blocks are posted normally.
+        // Entry verification hold (§4f nonce safety)
         if let Some(entry_block) = self.hold.armed_for() {
             info!(
                 target: "based_rollup::driver",
@@ -98,13 +105,13 @@ where
                 pending_blocks = self.pending_submissions.len(),
                 "holding submissions — awaiting derivation verification of entry-bearing block"
             );
-            return Ok(());
+            return FlushPrecheckResult::Skip;
         }
 
-        // Check submission cooldown
+        // Submission cooldown
         if let Some(last_fail) = self.last_submission_failure {
             if last_fail.elapsed() < std::time::Duration::from_secs(SUBMISSION_COOLDOWN_SECS) {
-                return Ok(());
+                return FlushPrecheckResult::Skip;
             }
         }
 
@@ -115,18 +122,6 @@ where
         }
 
         // Skip blocks already submitted on-chain by comparing state roots.
-        // last_submitted_state_root() returns the on-chain state root for our
-        // rollup. We drain pending blocks whose state_root matches or precedes
-        // the on-chain root (i.e., they are already submitted).
-        //
-        // With protocol tx filtering (§4f), derivation produces the correct root
-        // for any consumption level. The on-chain root after postBatch is the
-        // clean root Y' (with loadTable effects). If entries are consumed, it
-        // evolves to X'_k. We check state_root (full consumption) and
-        // clean_state_root (zero consumption). For partial consumption, the
-        // on-chain root won't match either — the block stays in the queue,
-        // flush_to_l1 detects the mismatch, and triggers a rewind. After
-        // re-derivation with filtered txs, the correct root is produced.
         let on_chain_root = match proposer.last_submitted_state_root().await {
             Ok(root) => {
                 if root != B256::ZERO {
@@ -135,7 +130,6 @@ where
                             || b.clean_state_root.as_b256() == root
                             || b.intermediate_roots.contains(&root)
                     }) {
-                        // Drain blocks 0..=pos (already on-chain)
                         for _ in 0..=pos {
                             self.pending_submissions.pop_front();
                         }
@@ -149,13 +143,32 @@ where
                     %err,
                     "failed to read last submitted state root from L1, will retry"
                 );
-                return Ok(());
+                return FlushPrecheckResult::Skip;
             }
         };
 
         if self.pending_submissions.is_empty() && self.pending_l1.is_empty() {
-            return Ok(());
+            return FlushPrecheckResult::Skip;
         }
+
+        FlushPrecheckResult::Proceed { on_chain_root }
+    }
+
+    /// Submit pending blocks and cross-chain entries to L1 via the proposer.
+    ///
+    /// Combines block submission and cross-chain entry posting into a single
+    /// `submit_to_l1` call. Drains external cross-chain entries from the shared
+    /// queue, collects pending blocks, and sends everything in one L1 transaction.
+    pub(super) async fn flush_to_l1(&mut self) -> Result<()> {
+        // Phase 2.6: precheck sequence extracted to a dedicated method.
+        let on_chain_root = match self.flush_precheck().await {
+            FlushPrecheckResult::Proceed { on_chain_root } => on_chain_root,
+            FlushPrecheckResult::Skip => return Ok(()),
+        };
+
+        // Re-borrow proposer after precheck confirmed it exists. The precheck
+        // already verified `self.proposer.is_some()` — this unwrap is safe.
+        let proposer = self.proposer.as_ref().expect("precheck confirmed proposer");
 
         // Collect blocks to submit (up to MAX_BATCH_SIZE).
         // §4f nonce safety: when cross-chain entries are pending, limit the batch
