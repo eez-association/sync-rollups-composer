@@ -31,7 +31,90 @@ use reth_provider::{
 };
 use reth_revm::database::StateProviderDatabase;
 use revm::database::State;
+use std::marker::PhantomData;
 use tracing::{info, warn};
+
+// ---------------------------------------------------------------------------
+// ProtocolTxPlan — typed stage pipeline for protocol transaction assembly.
+//
+// Enforces at compile time that protocol txs are added in order:
+//   Bootstrapped  →  ContextSet  →  EntriesLoaded
+//
+// You cannot call `load_entries` before `set_context`, or add bootstrap txs
+// after context has been set.
+// ---------------------------------------------------------------------------
+
+/// Typed stages for [`ProtocolTxPlan`].
+pub(super) mod stage {
+    /// Bootstrap complete (block 1 deploys, block 2 canonical bridge).
+    pub struct Bootstrapped;
+    /// L2 context (`setContext`) has been added.
+    pub struct ContextSet;
+    /// Execution table + triggers have been added — ready to finalize.
+    pub struct EntriesLoaded;
+}
+
+/// Accumulates builder-signed protocol transactions through typed stages.
+///
+/// Stage transitions consume `self` and produce a new stage, so the
+/// compiler rejects out-of-order calls.
+pub(super) struct ProtocolTxPlan<S> {
+    txs: Vec<reth_ethereum_primitives::TransactionSigned>,
+    _stage: PhantomData<S>,
+}
+
+impl ProtocolTxPlan<stage::Bootstrapped> {
+    /// Create a plan pre-loaded with bootstrap transactions (deploys,
+    /// canonical bridge, bootstrap transfers).
+    pub(super) fn new(
+        bootstrap_txs: Vec<reth_ethereum_primitives::TransactionSigned>,
+    ) -> Self {
+        Self {
+            txs: bootstrap_txs,
+            _stage: PhantomData,
+        }
+    }
+
+    /// Add the `setContext` tx (if present) and advance to [`stage::ContextSet`].
+    pub(super) fn set_context(
+        mut self,
+        context_tx: Option<reth_ethereum_primitives::TransactionSigned>,
+    ) -> ProtocolTxPlan<stage::ContextSet> {
+        if let Some(tx) = context_tx {
+            self.txs.push(tx);
+        }
+        ProtocolTxPlan {
+            txs: self.txs,
+            _stage: PhantomData,
+        }
+    }
+}
+
+impl ProtocolTxPlan<stage::ContextSet> {
+    /// Add `loadExecutionTable` + `executeIncomingCrossChainCall` trigger
+    /// txs and advance to [`stage::EntriesLoaded`].
+    pub(super) fn load_entries(
+        mut self,
+        table_tx: Option<reth_ethereum_primitives::TransactionSigned>,
+        trigger_txs: Vec<reth_ethereum_primitives::TransactionSigned>,
+    ) -> ProtocolTxPlan<stage::EntriesLoaded> {
+        if let Some(tx) = table_tx {
+            self.txs.push(tx);
+        }
+        self.txs.extend(trigger_txs);
+        ProtocolTxPlan {
+            txs: self.txs,
+            _stage: PhantomData,
+        }
+    }
+}
+
+impl ProtocolTxPlan<stage::EntriesLoaded> {
+    /// Consume the plan and return the accumulated protocol transactions.
+    pub(super) fn into_txs(self) -> Vec<reth_ethereum_primitives::TransactionSigned> {
+        self.txs
+    }
+}
 
 impl<P, Pool> Driver<P, Pool>
 where
@@ -55,8 +138,11 @@ where
 {
     /// Construct builder-signed protocol transactions for a builder block.
     ///
-    /// Returns RLP-encoded transactions (setContext, deploy, loadTable, executeIncoming).
-    /// The caller should append user txs (mempool) and pass to `build_and_insert_block`.
+    /// Returns RLP-encoded transactions (setContext, deploy, loadTable, executeIncoming,
+    /// plus user txs from the mempool).
+    ///
+    /// Uses [`ProtocolTxPlan`] to enforce stage ordering at compile time:
+    ///   Bootstrap → setContext → loadTable/triggers → mempool drain
     ///
     /// `max_trigger_count` limits the number of `executeIncomingCrossChainCall` trigger
     /// transactions generated. `loadExecutionTable` is always generated if table entries
@@ -81,7 +167,6 @@ where
         let chain_id = self.evm_config.chain_spec().chain().id();
 
         // Use next block's base fee (not parent's) for protocol tx gas_price.
-        // This ensures protocol txs are correctly priced even when parent was >50% utilized.
         let parent_header = self
             .l2_provider
             .sealed_header(self.l2_head_number)
@@ -96,30 +181,28 @@ where
             .unwrap_or(1)
             .max(1) as u128;
 
-        let mut block_txs: Vec<reth_ethereum_primitives::TransactionSigned> = Vec::new();
+        // --- Stage 1: Bootstrap (block 1 deploys, block 2 canonical bridge) ---
+        let mut bootstrap_txs: Vec<reth_ethereum_primitives::TransactionSigned> = Vec::new();
 
-        // Block 1: deploy L2Context and CCM contracts
         if l2_block_number == 1 {
-            block_txs.push(cross_chain::build_deploy_l2context_tx(
+            bootstrap_txs.push(cross_chain::build_deploy_l2context_tx(
                 self.config.builder_address,
                 &signer,
                 chain_id,
                 gas_price,
             )?);
-            // Only deploy CCM and Bridge if cross-chain is configured
             if !self.config.rollups_address.is_zero() {
-                block_txs.push(cross_chain::build_deploy_ccm_tx(
+                bootstrap_txs.push(cross_chain::build_deploy_ccm_tx(
                     self.config.rollup_id,
                     self.config.builder_address,
                     &signer,
                     chain_id,
                     gas_price,
                 )?);
-                // Deploy Bridge on L2 (nonce=2) and initialize (nonce=3)
-                block_txs.push(cross_chain::build_deploy_bridge_tx(
+                bootstrap_txs.push(cross_chain::build_deploy_bridge_tx(
                     &signer, chain_id, gas_price,
                 )?);
-                block_txs.push(cross_chain::build_initialize_bridge_tx(
+                bootstrap_txs.push(cross_chain::build_initialize_bridge_tx(
                     self.config.cross_chain_manager_address,
                     self.config.rollup_id,
                     self.config.builder_address,
@@ -132,9 +215,8 @@ where
             } else {
                 self.builder_l2_nonce = 1;
             }
-            // Bootstrap transfers
             for account in &self.config.bootstrap_accounts {
-                block_txs.push(cross_chain::build_bootstrap_transfer_tx(
+                bootstrap_txs.push(cross_chain::build_bootstrap_transfer_tx(
                     account.address,
                     account.amount_wei,
                     &signer,
@@ -146,10 +228,6 @@ where
             }
         }
 
-        // setCanonicalBridgeAddress: if bridge_l1_address is configured and this is
-        // block 2, set the canonical bridge address on the L2 bridge contract.
-        // This is a one-time protocol tx required for multi-call continuation entries.
-        // Block 2 because the bridge is deployed in block 1 (nonce=2, initialized nonce=3).
         if l2_block_number == 2
             && !self.config.bridge_l1_address.is_zero()
             && !self.config.bridge_l2_address.is_zero()
@@ -161,7 +239,7 @@ where
                 nonce = self.builder_l2_nonce,
                 "setting canonical bridge address on L2 bridge (block 2 protocol tx)"
             );
-            block_txs.push(cross_chain::build_set_canonical_bridge_tx(
+            bootstrap_txs.push(cross_chain::build_set_canonical_bridge_tx(
                 self.config.bridge_l2_address,
                 self.config.bridge_l1_address,
                 &signer,
@@ -172,9 +250,11 @@ where
             self.builder_l2_nonce += 1;
         }
 
-        // setContext (every block)
-        if !self.config.l2_context_address.is_zero() {
-            block_txs.push(cross_chain::build_set_context_tx(
+        let plan = ProtocolTxPlan::new(bootstrap_txs);
+
+        // --- Stage 2: setContext (every block) ---
+        let context_tx = if !self.config.l2_context_address.is_zero() {
+            let tx = cross_chain::build_set_context_tx(
                 l1_block_number,
                 l1_block_hash,
                 self.config.l2_context_address,
@@ -182,28 +262,29 @@ where
                 self.builder_l2_nonce,
                 chain_id,
                 gas_price,
-            )?);
+            )?;
             self.builder_l2_nonce += 1;
-        }
+            Some(tx)
+        } else {
+            None
+        };
+        let plan = plan.set_context(context_tx);
 
-        // loadExecutionTable + executeIncomingCrossChainCall (if cross-chain entries)
-        if !execution_entries.is_empty() && !self.config.cross_chain_manager_address.is_zero() {
+        // --- Stage 3: loadExecutionTable + triggers ---
+        let (table_tx, trigger_txs) = if !execution_entries.is_empty()
+            && !self.config.cross_chain_manager_address.is_zero()
+        {
             let our_rollup_id = cross_chain::RollupId::new(alloy_primitives::U256::from(
                 self.config.rollup_id,
             ));
             let (table_entries, mut trigger_entries) =
                 cross_chain::partition_entries(execution_entries, our_rollup_id);
 
-            // Scope override for REVERT patterns: when table entries contain a
-            // REVERT, the trigger's executeIncomingCrossChainCall must use a
-            // scope one level deeper than the REVERT's scope. This ensures
-            // newScope creates the nested scope for try/catch isolation.
-            // E.g., REVERT has scope=[0] → trigger uses scope=[0,0].
+            // Scope override for REVERT patterns.
             let has_revert = table_entries
                 .iter()
                 .any(|e| e.next_action.action_type == cross_chain::CrossChainActionType::Revert);
             if has_revert {
-                // Find the REVERT entry's scope length to compute trigger scope depth.
                 let revert_scope_len = table_entries
                     .iter()
                     .filter(|e| {
@@ -226,20 +307,25 @@ where
                 }
             }
 
-            if !table_entries.is_empty() {
-                block_txs.push(cross_chain::build_load_table_tx(
+            let t_tx = if !table_entries.is_empty() {
+                let tx = cross_chain::build_load_table_tx(
                     &table_entries,
                     self.config.cross_chain_manager_address,
                     &signer,
                     self.builder_l2_nonce,
                     chain_id,
                     gas_price,
-                )?);
+                )?;
                 self.builder_l2_nonce += 1;
-            }
+                Some(tx)
+            } else {
+                None
+            };
+
             let trigger_limit = trigger_entries.len().min(max_trigger_count);
+            let mut t_txs = Vec::with_capacity(trigger_limit);
             for trigger in &trigger_entries[..trigger_limit] {
-                block_txs.push(cross_chain::build_execute_incoming_tx(
+                t_txs.push(cross_chain::build_execute_incoming_tx(
                     &trigger.next_action,
                     self.config.cross_chain_manager_address,
                     &signer,
@@ -249,9 +335,16 @@ where
                 )?);
                 self.builder_l2_nonce += 1;
             }
-        }
+            (t_tx, t_txs)
+        } else {
+            (None, vec![])
+        };
+        let plan = plan.load_entries(table_tx, trigger_txs);
 
-        // Drain user transactions from the mempool, respecting the gas budget.
+        // Finalize protocol txs via the typed plan.
+        let mut block_txs = plan.into_txs();
+
+        // --- Stage 4: Drain user transactions from the mempool ---
         let block_gas_limit = calc_gas_limit(parent_header.gas_limit(), DESIRED_GAS_LIMIT);
         let builder_gas_used = cross_chain::estimate_builder_tx_gas(&block_txs);
         let mut cumulative_gas_used = builder_gas_used;
