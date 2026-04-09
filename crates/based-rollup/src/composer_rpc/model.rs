@@ -7,6 +7,8 @@
 //! Introduced in refactor step 3.2 (PLAN.md §Phase 3).
 
 use alloy_primitives::{Address, U256};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 use super::common::{
     detect_cross_chain_proxy_on_l2, encode_authorized_proxies_calldata, eth_call_view,
@@ -254,5 +256,107 @@ pub(crate) fn from_trace_detected(
         delivery_return_data: Vec::new(),
         delivery_failed: false,
         target_rollup_id,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared trace walking — produces DiscoveredCall from any chain's trace
+// ---------------------------------------------------------------------------
+
+/// Walk a trace tree on the given chain and convert results to [`DiscoveredCall`].
+///
+/// This is the shared core of `walk_l1_trace_generic` and `walk_l2_trace_generic`:
+/// both call `trace::walk_trace_tree` with a proxy lookup, then convert.
+///
+/// `manager_addresses` is the set of CCM/Rollups addresses that serve as
+/// cross-chain managers on the chain being walked.
+/// `default_target_rollup_id` is used for calls where the proxy identity
+/// doesn't provide a rollup ID (e.g., L1→L2 root calls get 0).
+/// `discovery_iteration` tags each call with its discovery round.
+#[allow(dead_code, reason = "scaffold for 3.4 migration")]
+pub(crate) async fn walk_trace_to_discovered(
+    lookup: &dyn trace::ProxyLookup,
+    manager_addresses: &[Address],
+    trace_node: &Value,
+    proxy_cache: &mut HashMap<Address, Option<trace::ProxyInfo>>,
+    default_target_rollup_id: u64,
+    discovery_iteration: usize,
+) -> Vec<DiscoveredCall> {
+    let mut ephemeral_proxies = HashMap::new();
+    let mut detected_calls = Vec::new();
+
+    trace::walk_trace_tree(
+        trace_node,
+        manager_addresses,
+        lookup,
+        proxy_cache,
+        &mut ephemeral_proxies,
+        &mut detected_calls,
+        &mut HashSet::new(),
+    )
+    .await;
+
+    detected_calls
+        .into_iter()
+        .map(|c| from_trace_detected(&c, default_target_rollup_id, discovery_iteration))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Shared dedup: filter_new_by_identity
+// ---------------------------------------------------------------------------
+
+/// Filter new calls, keeping only those not already present in `existing`.
+///
+/// Uses count-based comparison via [`crate::cross_chain::filter_new_by_count`]
+/// to correctly handle legitimate duplicate calls (e.g., `CallTwice`).
+#[allow(dead_code, reason = "scaffold for 3.4 migration")]
+pub(crate) fn dedup_discovered_calls(
+    new_calls: Vec<DiscoveredCall>,
+    existing: &[DiscoveredCall],
+) -> Vec<DiscoveredCall> {
+    crate::cross_chain::filter_new_by_count(new_calls, existing, |a, b| {
+        a.destination == b.destination
+            && a.calldata == b.calldata
+            && a.value == b.value
+            && a.source_address == b.source_address
+    })
+}
+
+/// Maximum iterations for the iterative discovery loop.
+///
+/// Shared between both directions. The L1→L2 direction historically used 5,
+/// L2→L1 used 10. Using the larger value for both — convergence happens fast
+/// in practice (usually 1-2 iterations).
+#[allow(dead_code, reason = "scaffold for 3.4 migration")]
+pub(crate) const MAX_DISCOVERY_ITERATIONS: usize = 10;
+
+/// Apply in_reverted_frame corrections from a converged retrace.
+///
+/// The initial trace runs without entries loaded, so ALL calls appear inside
+/// a reverted frame. The converged retrace (entries loaded) shows the correct
+/// revert status. This function matches retrace results to discovered calls
+/// by identity and overwrites `in_reverted_frame`.
+#[allow(dead_code, reason = "scaffold for 3.4 migration")]
+pub(crate) fn correct_in_reverted_frame(
+    calls: &mut [DiscoveredCall],
+    retrace_results: &[DiscoveredCall],
+) {
+    if retrace_results.is_empty() || retrace_results.len() != calls.len() {
+        return;
+    }
+    // Property-based matching: pair by (destination, calldata, value, source).
+    let mut used = vec![false; retrace_results.len()];
+    for call in calls.iter_mut() {
+        if let Some(idx) = retrace_results.iter().enumerate().position(|(i, r)| {
+            !used[i]
+                && r.destination == call.destination
+                && r.calldata == call.calldata
+                && r.value == call.value
+                && r.source_address == call.source_address
+        }) {
+            call.in_reverted_frame = retrace_results[idx].in_reverted_frame;
+            used[idx] = true;
+        }
     }
 }
