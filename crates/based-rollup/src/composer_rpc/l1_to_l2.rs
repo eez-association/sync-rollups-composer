@@ -1747,35 +1747,31 @@ async fn walk_l1_trace_generic(
         rpc_url: l1_rpc_url,
         rollups_address,
     };
-    let mut ephemeral_proxies = HashMap::new();
-    let mut detected_calls = Vec::new();
 
-    // Rollups.sol is the manager contract on L1.
-    super::trace::walk_trace_tree(
-        trace_node,
-        &[rollups_address],
+    // Delegate to the shared walk function, then convert to direction-local type.
+    let discovered = super::model::walk_trace_to_discovered(
         &lookup,
+        &[rollups_address],
+        trace_node,
         proxy_cache,
-        &mut ephemeral_proxies,
-        &mut detected_calls,
-        &mut std::collections::HashSet::new(),
+        0, // default_target_rollup_id: L1→L2 resolves later from proxy identity
+        0, // discovery_iteration: initial trace
     )
     .await;
 
-    // Convert trace::DetectedCall to DetectedInternalCall.
-    detected_calls
+    discovered
         .into_iter()
         .map(|c| DetectedInternalCall {
             destination: c.destination,
-            target_rollup_id: 0, // L1→L2: target resolved later from proxy identity
+            target_rollup_id: c.target_rollup_id,
             calldata: c.calldata,
             value: c.value,
             source_address: c.source_address,
             call_success: true,
             return_data: vec![],
-            parent_call_index: crate::cross_chain::ParentLink::Root, // root-level L1→L2 call
+            parent_call_index: c.parent_call_index,
             trace_depth: c.trace_depth,
-            discovery_iteration: 0, // initial detection from first trace
+            discovery_iteration: c.discovery_iteration,
             in_reverted_frame: c.in_reverted_frame,
         })
         .collect()

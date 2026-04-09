@@ -3363,22 +3363,19 @@ async fn walk_l2_trace_generic(
         rpc_url: upstream_url,
         ccm_address,
     };
-    let mut ephemeral_proxies = std::collections::HashMap::new();
-    let mut detected_calls = Vec::new();
 
-    super::trace::walk_trace_tree(
-        trace_node,
-        &[ccm_address],
+    // Delegate to the shared walk function, then convert to direction-local type.
+    let discovered = super::model::walk_trace_to_discovered(
         &lookup,
+        &[ccm_address],
+        trace_node,
         proxy_cache,
-        &mut ephemeral_proxies,
-        &mut detected_calls,
-        &mut std::collections::HashSet::new(),
+        0, // default_target_rollup_id: L2→L1 targets L1 (rollup 0)
+        0, // discovery_iteration: initial trace
     )
     .await;
 
-    // Convert trace::DetectedCall to DetectedL2InternalCall.
-    detected_calls
+    discovered
         .into_iter()
         .map(|c| DetectedL2InternalCall {
             destination: c.destination,

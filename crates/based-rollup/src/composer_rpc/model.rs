@@ -236,7 +236,6 @@ pub(crate) fn rebase_return_parent_links(returns: &mut [ReturnEdge], offset: usi
 /// `target_rollup_id` must be supplied by the caller since the generic
 /// trace walker doesn't track it — the direction module resolves it
 /// from the proxy info.
-#[allow(dead_code, reason = "scaffold for 3.4 migration")]
 pub(crate) fn from_trace_detected(
     call: &trace::DetectedCall,
     target_rollup_id: u64,
@@ -271,7 +270,6 @@ pub(crate) fn from_trace_detected(
 /// `default_target_rollup_id` is used for calls where the proxy identity
 /// doesn't provide a rollup ID (e.g., L1→L2 root calls get 0).
 /// `discovery_iteration` tags each call with its discovery round.
-#[allow(dead_code, reason = "scaffold for 3.4 migration")]
 pub(crate) async fn walk_trace_to_discovered(
     lookup: &dyn trace::ProxyLookup,
     manager_addresses: &[Address],
