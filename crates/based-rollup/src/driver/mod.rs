@@ -6,7 +6,7 @@
 use crate::builder_sync::{BuilderSync, PreconfirmedBlock};
 use crate::config::RollupConfig;
 use crate::cross_chain::CrossChainExecutionEntry;
-use crate::derivation::{DerivationPipeline, L1_CONFIRMED_L1_STAGE_ID, L1_CONFIRMED_L2_STAGE_ID};
+use crate::derivation::DerivationPipeline;
 use crate::evm_config::RollupEvmConfig;
 use crate::health::HealthStatus;
 use crate::proposer::{GasPriceHint, PendingBlock, Proposer};
@@ -24,11 +24,10 @@ use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_payload_primitives::{EngineApiMessageVersion, PayloadTypes};
 use reth_primitives_traits::{Recovered, SignedTransaction, SignerRecoverable};
 use reth_provider::{
-    BlockHashReader, BlockNumReader, DBProvider, DatabaseProviderFactory, HeaderProvider,
+    BlockHashReader, BlockNumReader, DatabaseProviderFactory, HeaderProvider,
     StageCheckpointReader, StageCheckpointWriter, StateProviderFactory, TransactionsProvider,
 };
 use reth_revm::database::StateProviderDatabase;
-use reth_stages_types::StageCheckpoint;
 use revm::database::State;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -150,6 +149,7 @@ pub struct Driver<P, Pool> {
 /// Result of building and inserting a block via the engine API.
 mod flush_plan;
 mod hold;
+mod journal;
 mod pending_queue;
 mod types;
 pub use flush_plan::{
@@ -164,9 +164,8 @@ use types::{
     CHECKPOINT_INTERVAL, DESIRED_GAS_LIMIT, FCU_SYNCING_INITIAL_BACKOFF_MS, FCU_SYNCING_MAX_RETRIES,
     FORK_CHOICE_DEPTH, L1ConfirmedAnchor, MAX_BACKOFF_SECS, MAX_BATCH_SIZE,
     MAX_CONSECUTIVE_FAILURES, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS,
-    MIN_L1_CALL_INTERVAL, SUBMISSION_COOLDOWN_SECS, TX_JOURNAL_STAGE_ID, TriggerExecutionResult,
-    TxJournalEntry, VerificationDecision, calc_gas_limit, compute_forkchoice_state,
-    encode_block_transactions,
+    MIN_L1_CALL_INTERVAL, SUBMISSION_COOLDOWN_SECS, TriggerExecutionResult, TxJournalEntry,
+    VerificationDecision, calc_gas_limit, compute_forkchoice_state, encode_block_transactions,
 };
 
 impl<P, Pool> Driver<P, Pool>
@@ -2977,133 +2976,6 @@ where
     ///
     /// Stores the full encoded transaction list in the persistent journal.
     /// On recovery, protocol transactions (builder address) are filtered out.
-    fn journal_block_transactions(&mut self, l2_block_number: u64, encoded_transactions: &Bytes) {
-        self.tx_journal.push(TxJournalEntry {
-            l2_block_number,
-            block_txs: encoded_transactions.to_vec(),
-        });
-        self.save_tx_journal();
-    }
-
-    /// Persist the transaction journal to the L2 database.
-    fn save_tx_journal(&self) {
-        let data = TxJournalEntry::encode_all(&self.tx_journal);
-        let rw = match self.l2_provider.database_provider_rw() {
-            Ok(rw) => rw,
-            Err(err) => {
-                warn!(
-                    target: "based_rollup::driver",
-                    %err,
-                    "failed to open DB for tx journal save"
-                );
-                return;
-            }
-        };
-        if let Err(err) = rw.save_stage_checkpoint_progress(TX_JOURNAL_STAGE_ID, data) {
-            warn!(
-                target: "based_rollup::driver",
-                %err,
-                "failed to save tx journal"
-            );
-            return;
-        }
-        if let Err(err) = rw.commit() {
-            warn!(
-                target: "based_rollup::driver",
-                %err,
-                "failed to commit tx journal"
-            );
-        }
-    }
-
-    /// Load the transaction journal from the L2 database (crash recovery).
-    ///
-    /// Entries for blocks above the canonical head represent transactions from
-    /// blocks that were being reverted when a crash occurred. These are decoded
-    /// and placed in `pending_reinjection` for deferred re-injection.
-    fn load_tx_journal(&mut self) {
-        let data = match self
-            .l2_provider
-            .get_stage_checkpoint_progress(TX_JOURNAL_STAGE_ID)
-        {
-            Ok(Some(data)) => data,
-            Ok(None) => return,
-            Err(err) => {
-                warn!(
-                    target: "based_rollup::driver",
-                    %err,
-                    "failed to load tx journal"
-                );
-                return;
-            }
-        };
-
-        let entries = TxJournalEntry::decode_all(&data);
-        if entries.is_empty() {
-            return;
-        }
-
-        // Entries for blocks > canonical head need re-injection (crash recovery).
-        let mut recovered = 0usize;
-        for entry in &entries {
-            if entry.l2_block_number > self.l2_head_number {
-                let txs: Vec<reth_ethereum_primitives::TransactionSigned> =
-                    match alloy_rlp::Decodable::decode(&mut entry.block_txs.as_slice()) {
-                        Ok(txs) => txs,
-                        Err(_) => continue,
-                    };
-                for tx in txs {
-                    match tx.recover_signer() {
-                        Ok(sender) => {
-                            // Skip builder's protocol transactions.
-                            if sender == self.config.builder_address {
-                                continue;
-                            }
-                            self.pending_reinjection.push((sender, tx));
-                            recovered += 1;
-                        }
-                        Err(_) => continue,
-                    }
-                }
-            }
-        }
-
-        // Keep only entries for blocks <= canonical head.
-        self.tx_journal = entries
-            .into_iter()
-            .filter(|e| e.l2_block_number <= self.l2_head_number)
-            .collect();
-
-        if recovered > 0 {
-            info!(
-                target: "based_rollup::driver",
-                recovered,
-                journal_size = self.tx_journal.len(),
-                "recovered transactions from journal for re-injection (crash recovery)"
-            );
-            // Persist the cleaned journal (without the crash-recovery entries).
-            self.save_tx_journal();
-        }
-    }
-
-    /// Prune journal entries for L1-confirmed blocks.
-    fn prune_tx_journal(&mut self, confirmed_l2_block: u64) {
-        let before = self.tx_journal.len();
-        self.tx_journal
-            .retain(|e| e.l2_block_number > confirmed_l2_block);
-        let pruned = before - self.tx_journal.len();
-        if pruned > 0 {
-            self.save_tx_journal();
-            debug!(
-                target: "based_rollup::driver",
-                pruned,
-                remaining = self.tx_journal.len(),
-                confirmed_l2_block,
-                "pruned confirmed entries from tx journal"
-            );
-        }
-    }
-
     /// Set the pending rewind target to the EARLIEST (minimum) mismatch point.
     ///
     /// When multiple blocks in the same derivation batch have L1 context mismatches
@@ -4501,75 +4373,6 @@ where
     }
 
     /// Save the L1-confirmed anchor to the L2 database.
-    fn save_l1_confirmed_anchor(&self) {
-        let Some(anchor) = self.l1_confirmed_anchor else {
-            return;
-        };
-        let rw = match self.l2_provider.database_provider_rw() {
-            Ok(rw) => rw,
-            Err(err) => {
-                warn!(
-                    target: "based_rollup::driver",
-                    %err,
-                    "failed to open DB for L1-confirmed anchor save"
-                );
-                return;
-            }
-        };
-        if let Err(err) = rw.save_stage_checkpoint(
-            L1_CONFIRMED_L2_STAGE_ID,
-            StageCheckpoint::new(anchor.l2_block_number),
-        ) {
-            warn!(target: "based_rollup::driver", %err, "failed to save L1-confirmed L2 anchor");
-            return;
-        }
-        if let Err(err) = rw.save_stage_checkpoint(
-            L1_CONFIRMED_L1_STAGE_ID,
-            StageCheckpoint::new(anchor.l1_block_number),
-        ) {
-            warn!(target: "based_rollup::driver", %err, "failed to save L1-confirmed L1 anchor");
-            return;
-        }
-        if let Err(err) = rw.commit() {
-            warn!(target: "based_rollup::driver", %err, "failed to commit L1-confirmed anchor");
-            return;
-        }
-        info!(
-            target: "based_rollup::driver",
-            l2_block = anchor.l2_block_number,
-            l1_block = anchor.l1_block_number,
-            "recorded L1-confirmed anchor"
-        );
-    }
-
-    /// Load the L1-confirmed anchor from the L2 database.
-    fn load_l1_confirmed_anchor(&mut self) {
-        let l2_cp = match self
-            .l2_provider
-            .get_stage_checkpoint(L1_CONFIRMED_L2_STAGE_ID)
-        {
-            Ok(Some(cp)) => cp.block_number,
-            _ => return,
-        };
-        let l1_cp = match self
-            .l2_provider
-            .get_stage_checkpoint(L1_CONFIRMED_L1_STAGE_ID)
-        {
-            Ok(Some(cp)) => cp.block_number,
-            _ => return,
-        };
-        self.l1_confirmed_anchor = Some(L1ConfirmedAnchor {
-            l2_block_number: l2_cp,
-            l1_block_number: l1_cp,
-        });
-        info!(
-            target: "based_rollup::driver",
-            l2_block = l2_cp,
-            l1_block = l1_cp,
-            "loaded L1-confirmed anchor from DB"
-        );
-    }
-
     pub fn derivation(&self) -> &DerivationPipeline {
         &self.derivation
     }
