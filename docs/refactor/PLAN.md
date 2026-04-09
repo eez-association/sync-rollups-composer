@@ -1075,7 +1075,7 @@ Mechanical movement.
 | 3 | 3.1 | Sealed trait Direction | incremental | ✅ (Direction + L1ToL2/L2ToL1; detection hooks deferred to 3.4-3.6) | — |
 | 3 | 3.2 | shared composer_rpc/model.rs | dedicated | ✅ (DiscoveredCall, ReturnEdge, PromotionDecision, DiscoveredSet, L1/L2ProxyLookup) | — |
 | 3 | 3.3 | rebase_parent_links single helper | incremental | ✅ (rebase_parent_links + rebase_return_parent_links in model.rs) | #7 (second half) |
-| 3 | 3.4 | discover_until_stable (complete spec) | dedicated | ⏸ deferred | — |
+| 3 | 3.4 | discover_until_stable (complete spec) | dedicated | ✅ (skeleton: discover.rs + model helpers + Direction hooks; caller migration pending) | — |
 | 3 | 3.5 | build_queue_payload (uses 1.4b enums) | dedicated | ⏸ deferred | — |
 | 3 | 3.6 | SimulationPlan enum + simulate_delivery() function | dedicated | ⏸ deferred | #17, #21 |
 | 3 | 3.7 | directions as thin adapters | dedicated | ⏸ deferred | — |
