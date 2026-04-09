@@ -17,10 +17,114 @@
 
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::{SolCall, sol};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Typed callTracer output — replaces ad-hoc serde_json::Value parsing
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A single node in a `callTracer` trace tree.
+///
+/// Typed deserialization replaces the `.get("field").and_then(|v| v.as_str())`
+/// pattern — missing fields are caught at parse time, not scattered across
+/// the walk logic.
+///
+/// Fields are `Option` where the trace may omit them (e.g., `error` is only
+/// present on reverted calls, `calls` is absent on leaf nodes).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code, reason = "fields used incrementally as callers migrate from Value")]
+pub(crate) struct CallTraceNode {
+    /// Target address of the call.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Sender address.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Hex-encoded calldata (0x-prefixed).
+    #[serde(default)]
+    pub input: Option<String>,
+    /// Hex-encoded ETH value (0x-prefixed).
+    #[serde(default)]
+    pub value: Option<String>,
+    /// Hex-encoded return data (0x-prefixed).
+    #[serde(default)]
+    pub output: Option<String>,
+    /// Error message if the call reverted.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Revert reason (decoded by the tracer).
+    #[serde(default)]
+    pub revert_reason: Option<String>,
+    /// Child calls.
+    #[serde(default)]
+    pub calls: Option<Vec<CallTraceNode>>,
+}
+
+#[allow(dead_code, reason = "methods used incrementally as callers migrate")]
+impl CallTraceNode {
+    /// Parse `to` as an Address.
+    pub fn to_address(&self) -> Option<Address> {
+        self.to.as_deref()?.parse::<Address>().ok()
+    }
+
+    /// Parse `from` (sender) as an Address.
+    pub fn sender_address(&self) -> Option<Address> {
+        self.from.as_deref()?.parse::<Address>().ok()
+    }
+
+    /// Decode `input` from hex to bytes.
+    pub fn input_bytes(&self) -> Vec<u8> {
+        let hex_str = self.input.as_deref().unwrap_or("0x");
+        let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+        hex::decode(clean).unwrap_or_default()
+    }
+
+    /// Parse `value` as U256.
+    pub fn value_u256(&self) -> U256 {
+        self.value
+            .as_deref()
+            .and_then(|s| U256::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok())
+            .unwrap_or(U256::ZERO)
+    }
+
+    /// Decode `output` from hex to bytes.
+    pub fn output_bytes(&self) -> Vec<u8> {
+        let hex_str = match self.output.as_deref() {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+        hex::decode(clean).unwrap_or_default()
+    }
+
+    /// Whether this node has an error (reverted).
+    pub fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
+
+    /// Whether this is a top-level reverted call (error or revert_reason present).
+    pub fn is_top_level_error(&self) -> bool {
+        self.error.is_some() || self.revert_reason.is_some()
+    }
+
+    /// Get child calls (empty slice if none).
+    pub fn children(&self) -> &[CallTraceNode] {
+        self.calls.as_deref().unwrap_or(&[])
+    }
+
+    /// Try to deserialize from a serde_json::Value.
+    ///
+    /// Fallback for code that still passes `&Value` — allows incremental
+    /// migration without changing all function signatures at once.
+    pub fn try_parse(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  ABI bindings via sol! macro — selectors derived at compile time
@@ -126,33 +230,18 @@ struct TraceNode {
 /// Extract `(to, from, input_bytes, value)` from a JSON trace node.
 ///
 /// Returns `None` if any required field is missing or unparseable.
+/// Accepts both typed [`CallTraceNode`] (via conversion) and raw
+/// `serde_json::Value` (for incremental migration).
 fn parse_trace_node(node: &Value) -> Option<TraceNode> {
-    let to = node
-        .get("to")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<Address>().ok())?;
-
-    let from = node
-        .get("from")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<Address>().ok())
-        .unwrap_or(Address::ZERO);
-
-    let input_hex = node.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
-    let input_clean = input_hex.strip_prefix("0x").unwrap_or(input_hex);
-    let input = hex::decode(input_clean).unwrap_or_default();
-
-    let value = node
-        .get("value")
-        .and_then(|v| v.as_str())
-        .and_then(|s| U256::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok())
-        .unwrap_or(U256::ZERO);
+    let typed = CallTraceNode::try_parse(node)?;
+    let to = typed.to_address()?;
+    let from = typed.sender_address().unwrap_or(Address::ZERO);
 
     Some(TraceNode {
         to,
         from,
-        input,
-        value,
+        input: typed.input_bytes(),
+        value: typed.value_u256(),
     })
 }
 
