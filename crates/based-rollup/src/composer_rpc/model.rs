@@ -147,7 +147,6 @@ pub(crate) struct DiscoveredCall {
 /// Represents an L1→L2 or L2→L1 return call that closes a previous
 /// forward call via scope navigation (`callReturn{scope=[...]}`).
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "scaffold for 3.4-3.7 migration")]
 pub(crate) struct ReturnEdge {
     /// Destination address (on source chain, returning to caller).
     pub destination: Address,
