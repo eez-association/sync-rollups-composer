@@ -47,6 +47,31 @@ pub(super) struct BuilderTickContext {
     pub l1_hash: B256,
 }
 
+/// Result of draining the cross-chain call queues before the block
+/// building loop.
+pub(super) struct QueueDrainResult {
+    /// Combined L2 execution entries (L1-fetched at front, RPC at back).
+    pub builder_execution_entries: Vec<CrossChainExecutionEntry>,
+    /// Number of RPC entries in `builder_execution_entries` (counted from back).
+    pub rpc_entry_count: usize,
+    /// L1 transactions to forward after successful postBatch.
+    pub queued_l1_txs: Vec<Bytes>,
+    /// State needed to undo the drain if block building fails.
+    pub rollback: QueueDrainRollback,
+}
+
+/// Snapshot for undoing a queue drain on build failure (issue #237).
+///
+/// If block building or protocol tx construction fails, the drained
+/// entries must be re-pushed to the shared queues before
+/// `clear_internal_state()` runs during the Sync transition.
+pub(super) struct QueueDrainRollback {
+    pre_drain_l1_len: usize,
+    pre_drain_l1_groups: usize,
+    calls_for_repush: Vec<crate::rpc::QueuedCrossChainCall>,
+    l2_to_l1_for_repush: Vec<crate::rpc::QueuedL2ToL1Call>,
+}
+
 impl<P, Pool> Driver<P, Pool>
 where
     P: DatabaseProviderFactory
@@ -91,215 +116,12 @@ where
         let mut l1_hash = tick.l1_hash;
         let provider = self.get_l1_provider().clone();
 
-        // Fetch cross-chain execution entries for builder blocks.
-        // These are L1-fetched entries (incoming calls from other rollups, already
-        // consumed on L1). They are NOT submitted to L1 — they came FROM L1.
-        let mut builder_execution_entries = self
-            .derivation
-            .fetch_execution_entries_for_builder(current_l1_block, &provider)
-            .await?;
-
-        // Track how many RPC entries are appended to builder_execution_entries.
-        // L1-fetched entries are at the front, RPC entries at the back.
-        // This counter is reset on L1 refresh (line below) or when entries are consumed.
-        let mut rpc_entry_count_in_builder: usize = 0;
-
-        // Drain unified cross-chain call queue, sort by gas price descending
-        // (matching L1 miner ordering), then merge for same-block execution.
-        // These entries are executed immediately in the next built block, then also
-        // posted to L1 (via pending_l1_entries) so fullnodes can derive
-        // identical blocks from L1 events.
-        //
-        // Sorting MUST happen before entries flow to `attach_chained_state_deltas`,
-        // because chained deltas assume sequential consumption order. The L1 miner
-        // orders user txs by gas price descending, so entries must match.
-        //
-        // NOTE: stale entry guard was removed — loadExecutionTable now deletes
-        // existing entries per actionHash before pushing new ones, so stale entries
-        // from prior blocks are automatically cleared on the next load.
-        // Save pre-drain lengths so we can truncate self.pending_l1_* on build
-        // failure and re-push drained entries back to the shared queues. Without
-        // this, entries are permanently lost when clear_internal_state() runs
-        // during the Sync transition. See issue #237.
-        let pre_drain_l1_len = self.pending_l1.len_entries();
-        let pre_drain_l1_groups = self.pending_l1.num_groups();
-
-        let mut queued_l1_txs_for_block: Vec<Bytes> = Vec::new();
-        // Saved originals for re-push on build failure. These are the
-        // processed calls (after sort + continuation dedup) that would be
-        // lost if block building fails before flush_to_l1 runs.
-        let mut calls_for_repush: Vec<crate::rpc::QueuedCrossChainCall> = Vec::new();
-        {
-            let mut queue = self
-                .queued_cross_chain_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if !queue.is_empty() {
-                let mut calls: Vec<_> = queue.drain(..).collect();
-                // Sort by gas price descending — matches L1 miner tx ordering
-                calls.sort_by(|a, b| {
-                    b.effective_gas_price().cmp(&a.effective_gas_price())
-                });
-
-                info!(
-                    target: "based_rollup::driver",
-                    count = calls.len(),
-                    gas_prices = ?calls.iter().map(|c| c.effective_gas_price()).collect::<Vec<_>>(),
-                    "merging RPC cross-chain entries (sorted by gas price)"
-                );
-
-                // One continuation per cycle: if a call has non-empty l1_entries
-                // (multi-call continuation), only process the FIRST such call.
-                // Re-queue the rest to prevent multiple continuations'
-                // entries from being mixed in pending_l1_entries.
-                let mut had_continuation = false;
-                let mut rpc_entries: Vec<CrossChainExecutionEntry> = Vec::new();
-                for call in calls {
-                    let is_continuation = call.is_continuation();
-                    if is_continuation && had_continuation {
-                        // Re-queue this continuation for the next cycle
-                        queue.push(call);
-                        continue;
-                    }
-                    if is_continuation {
-                        had_continuation = true;
-                    }
-
-                    let group_mode = call.l1_independent_entries();
-                    let raw_l1_tx_for_forward = call.raw_l1_tx().clone();
-                    // Collect the L1 entries for this group locally first,
-                    // then append them atomically via `append_group` so the
-                    // (entries, groups) invariant stays intact.
-                    let group_l1_entries: Vec<CrossChainExecutionEntry> = match &call {
-                        crate::rpc::QueuedCrossChainCall::Simple {
-                            call_entry,
-                            result_entry,
-                            ..
-                        } => {
-                            // Terminal failure: delivery ALWAYS fails (e.g., RevertCounter).
-                            // RESULT(failed=true) with non-empty revert data after enrichment
-                            // = true terminal failure. Skip L2 entries — protocol specifies no
-                            // loadExecutionTable for terminal reverts.
-                            // Simulation artifacts are protocol errors (ExecutionNotFound, etc.)
-                            // that only occur when entries aren't loaded yet.
-                            let is_terminal_failure = result_entry.next_action.failed
-                                && !crate::cross_chain::is_simulation_artifact(
-                                    &result_entry.next_action.data,
-                                );
-                            if !is_terminal_failure {
-                                // Simple deposit: CALL trigger + RESULT table entry
-                                rpc_entries.push(call_entry.clone());
-                                rpc_entries.push(result_entry.clone());
-                            } else {
-                                tracing::debug!(
-                                    target: "based_rollup::driver",
-                                    call_id = %call_entry.action_hash,
-                                    data_len = result_entry.next_action.data.len(),
-                                    "terminal failure: skipping L2 entries (delivery always reverts)"
-                                );
-                            }
-
-                            // Simple deposit: convert CALL+RESULT pair to L1 format
-                            crate::cross_chain::convert_pairs_to_l1_entries(&[
-                                call_entry.clone(),
-                                result_entry.clone(),
-                            ])
-                        }
-                        crate::rpc::QueuedCrossChainCall::WithContinuations {
-                            l2_table_entries,
-                            l1_entries,
-                            ..
-                        } => {
-                            // Multi-call continuation: continuation entries provide their
-                            // own RESULT entries via the chain. Push the entire
-                            // `l2_table_entries` sequence — invariant #6 ("never include
-                            // a result_entry alongside continuations") is enforced by
-                            // the type: this variant has no `result_entry` field at all.
-                            rpc_entries.extend(l2_table_entries.iter().cloned());
-
-                            // Continuation: use pre-built L1 entries directly
-                            l1_entries.clone()
-                        }
-                    };
-
-                    if !raw_l1_tx_for_forward.is_empty() {
-                        queued_l1_txs_for_block.push(raw_l1_tx_for_forward);
-                    }
-
-                    // Atomic append: entries + group metadata grow together.
-                    // protocol trigger group → no L1 executeL2TX needed (trigger=None).
-                    self.pending_l1.append_group(group_l1_entries, group_mode, None);
-
-                    // Save for re-push on build failure (call is consumed by value)
-                    calls_for_repush.push(call);
-                }
-                rpc_entry_count_in_builder = rpc_entries.len();
-                builder_execution_entries.extend(rpc_entries);
-            }
-        }
-        // L1 forward txs are NOT committed to pending_l1_forward_txs yet.
-        // They are committed after the block build loop succeeds to avoid
-        // orphaned txs stuck in the queue on build failure. See issue #237.
-
-        // Drain L2→L1 call queue — no mutual exclusion, deposits and L2→L1 calls
-        // can coexist in the same block. The unified intermediate root chain
-        // handles mixed blocks correctly.
-        let mut held_l2_txs: Vec<Bytes> = Vec::new();
-        // Saved originals for re-push on build failure. See issue #237.
-        let mut l2_to_l1_for_repush: Vec<crate::rpc::QueuedL2ToL1Call> = Vec::new();
-        {
-            let mut queue = self
-                .queued_l2_to_l1_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if !queue.is_empty() {
-                let l2_to_l1_calls: Vec<_> = queue.drain(..).collect();
-                info!(
-                    target: "based_rollup::driver",
-                    count = l2_to_l1_calls.len(),
-                    protocol_entries = rpc_entry_count_in_builder,
-                    "draining L2→L1 call queue (unified intermediate roots)"
-                );
-                // Save a clone of the drained calls BEFORE processing
-                // so they can be re-pushed to the shared queue if block
-                // building fails. This prevents permanent entry loss.
-                l2_to_l1_for_repush = l2_to_l1_calls.clone();
-                for w in l2_to_l1_calls {
-                    // Collect held L2 txs for pool injection (hold-then-forward)
-                    if !w.raw_l2_tx.is_empty() {
-                        held_l2_txs.push(w.raw_l2_tx);
-                    }
-                    // L2 table entries → loaded via loadExecutionTable in this block
-                    let w_entry_count = w.l2_table_entries.len();
-                    builder_execution_entries.extend(w.l2_table_entries.iter().cloned());
-                    // Count L2→L1 entries as RPC entries so the position-based
-                    // split (base vs RPC) correctly includes them in rpc_entries_for_block.
-                    rpc_entry_count_in_builder += w_entry_count;
-
-                    // Populate L1 entry queue — L2→L1 groups are always
-                    // `Chained` and always carry user-trigger metadata
-                    // (distinguishing them from protocol-triggered deposits
-                    // in `entry_mix`).
-                    self.pending_l1.append_group(
-                        w.l1_deferred_entries.iter().cloned(),
-                        crate::cross_chain::EntryGroupMode::Chained,
-                        Some(TriggerMetadata {
-                            user: w.user,
-                            amount: w.amount,
-                            rlp_encoded_tx: w.rlp_encoded_tx.clone(),
-                            trigger_count: w.trigger_count,
-                        }),
-                    );
-                }
-            }
-        }
-
-        // Inject held L2 txs into the pool BEFORE block building.
-        // This ensures entries are loaded (via protocol txs) in the same block
-        // as the user's tx — eliminating the ExecutionNotFound timing race.
-        if !held_l2_txs.is_empty() {
-            self.inject_held_l2_txs(&held_l2_txs).await;
-        }
+        // Phase 3: Drain cross-chain queues, fetch L1 entries, inject held L2 txs.
+        let drain = self.drain_rpc_queues(current_l1_block).await?;
+        let mut builder_execution_entries = drain.builder_execution_entries;
+        let mut rpc_entry_count_in_builder = drain.rpc_entry_count;
+        let queued_l1_txs_for_block = drain.queued_l1_txs;
+        let drain_rollback = drain.rollback;
 
         // During catch-up, refresh L1 context every N blocks to avoid all catch-up
         // blocks sharing the same L1 context (which causes mass rewind if the batch
@@ -402,33 +224,7 @@ where
                         %err, l2_block = next_l2_block,
                         "failed to construct builder protocol txs — switching to sync mode"
                     );
-                    // Re-push drained entries back to shared queues so they are
-                    // not lost when clear_internal_state() runs. See issue #237.
-                    self.pending_l1.truncate_to(pre_drain_l1_len, pre_drain_l1_groups);
-                    if !calls_for_repush.is_empty() {
-                        let mut q = self
-                            .queued_cross_chain_calls
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        warn!(
-                            target: "based_rollup::driver",
-                            count = calls_for_repush.len(),
-                            "re-pushing cross-chain calls to shared queue after build failure"
-                        );
-                        q.extend(calls_for_repush.iter().cloned());
-                    }
-                    if !l2_to_l1_for_repush.is_empty() {
-                        let mut q = self
-                            .queued_l2_to_l1_calls
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        warn!(
-                            target: "based_rollup::driver",
-                            count = l2_to_l1_for_repush.len(),
-                            "re-pushing L2→L1 calls to shared queue after build failure"
-                        );
-                        q.extend(l2_to_l1_for_repush.iter().cloned());
-                    }
+                    self.rollback_queue_drain(drain_rollback);
                     self.mode = DriverMode::Sync;
                     self.synced
                         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -457,33 +253,7 @@ where
                         head_hash = %self.head_hash,
                         "block building failed — switching to sync mode for recovery"
                     );
-                    // Re-push drained entries back to shared queues so they are
-                    // not lost when clear_internal_state() runs. See issue #237.
-                    self.pending_l1.truncate_to(pre_drain_l1_len, pre_drain_l1_groups);
-                    if !calls_for_repush.is_empty() {
-                        let mut q = self
-                            .queued_cross_chain_calls
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        warn!(
-                            target: "based_rollup::driver",
-                            count = calls_for_repush.len(),
-                            "re-pushing cross-chain calls to shared queue after build failure"
-                        );
-                        q.extend(calls_for_repush.iter().cloned());
-                    }
-                    if !l2_to_l1_for_repush.is_empty() {
-                        let mut q = self
-                            .queued_l2_to_l1_calls
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        warn!(
-                            target: "based_rollup::driver",
-                            count = l2_to_l1_for_repush.len(),
-                            "re-pushing L2→L1 calls to shared queue after build failure"
-                        );
-                        q.extend(l2_to_l1_for_repush.iter().cloned());
-                    }
+                    self.rollback_queue_drain(drain_rollback);
                     self.mode = DriverMode::Sync;
                     self.synced
                         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -883,6 +653,204 @@ where
             current_l1_block: latest_l1_block,
             l1_hash,
         }))
+    }
+
+    /// Drain cross-chain call queues (L1→L2 and L2→L1), fetch L1 execution
+    /// entries, sort by gas price, merge into a single entry vector, and
+    /// inject held L2 txs into the pool.
+    ///
+    /// Returns a [`QueueDrainResult`] whose `rollback` field must be
+    /// consumed via [`rollback_queue_drain`] if block building fails.
+    async fn drain_rpc_queues(
+        &mut self,
+        current_l1_block: u64,
+    ) -> Result<QueueDrainResult> {
+        let provider = self.get_l1_provider().clone();
+
+        // Fetch cross-chain execution entries from L1 for builder blocks.
+        let mut builder_execution_entries = self
+            .derivation
+            .fetch_execution_entries_for_builder(current_l1_block, &provider)
+            .await?;
+
+        let mut rpc_entry_count: usize = 0;
+
+        // Snapshot for rollback on build failure (issue #237).
+        let pre_drain_l1_len = self.pending_l1.len_entries();
+        let pre_drain_l1_groups = self.pending_l1.num_groups();
+
+        let mut queued_l1_txs: Vec<Bytes> = Vec::new();
+        let mut calls_for_repush: Vec<crate::rpc::QueuedCrossChainCall> = Vec::new();
+
+        // --- L1→L2 queue (deposits, cross-chain calls) ---
+        {
+            let mut queue = self
+                .queued_cross_chain_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !queue.is_empty() {
+                let mut calls: Vec<_> = queue.drain(..).collect();
+                // Sort by gas price descending — matches L1 miner tx ordering.
+                calls.sort_by(|a, b| {
+                    b.effective_gas_price().cmp(&a.effective_gas_price())
+                });
+
+                info!(
+                    target: "based_rollup::driver",
+                    count = calls.len(),
+                    gas_prices = ?calls.iter().map(|c| c.effective_gas_price()).collect::<Vec<_>>(),
+                    "merging RPC cross-chain entries (sorted by gas price)"
+                );
+
+                // One continuation per cycle: only process the FIRST
+                // continuation call to prevent mixing entries.
+                let mut had_continuation = false;
+                let mut rpc_entries: Vec<CrossChainExecutionEntry> = Vec::new();
+                for call in calls {
+                    let is_continuation = call.is_continuation();
+                    if is_continuation && had_continuation {
+                        queue.push(call);
+                        continue;
+                    }
+                    if is_continuation {
+                        had_continuation = true;
+                    }
+
+                    let group_mode = call.l1_independent_entries();
+                    let raw_l1_tx_for_forward = call.raw_l1_tx().clone();
+                    let group_l1_entries: Vec<CrossChainExecutionEntry> = match &call {
+                        crate::rpc::QueuedCrossChainCall::Simple {
+                            call_entry,
+                            result_entry,
+                            ..
+                        } => {
+                            let is_terminal_failure = result_entry.next_action.failed
+                                && !crate::cross_chain::is_simulation_artifact(
+                                    &result_entry.next_action.data,
+                                );
+                            if !is_terminal_failure {
+                                rpc_entries.push(call_entry.clone());
+                                rpc_entries.push(result_entry.clone());
+                            } else {
+                                tracing::debug!(
+                                    target: "based_rollup::driver",
+                                    call_id = %call_entry.action_hash,
+                                    data_len = result_entry.next_action.data.len(),
+                                    "terminal failure: skipping L2 entries (delivery always reverts)"
+                                );
+                            }
+                            crate::cross_chain::convert_pairs_to_l1_entries(&[
+                                call_entry.clone(),
+                                result_entry.clone(),
+                            ])
+                        }
+                        crate::rpc::QueuedCrossChainCall::WithContinuations {
+                            l2_table_entries,
+                            l1_entries,
+                            ..
+                        } => {
+                            rpc_entries.extend(l2_table_entries.iter().cloned());
+                            l1_entries.clone()
+                        }
+                    };
+
+                    if !raw_l1_tx_for_forward.is_empty() {
+                        queued_l1_txs.push(raw_l1_tx_for_forward);
+                    }
+                    self.pending_l1.append_group(group_l1_entries, group_mode, None);
+                    calls_for_repush.push(call);
+                }
+                rpc_entry_count = rpc_entries.len();
+                builder_execution_entries.extend(rpc_entries);
+            }
+        }
+
+        // --- L2→L1 queue (withdrawals, cross-chain calls) ---
+        let mut l2_to_l1_for_repush: Vec<crate::rpc::QueuedL2ToL1Call> = Vec::new();
+        let mut held_l2_txs: Vec<Bytes> = Vec::new();
+        {
+            let mut queue = self
+                .queued_l2_to_l1_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !queue.is_empty() {
+                let l2_to_l1_calls: Vec<_> = queue.drain(..).collect();
+                info!(
+                    target: "based_rollup::driver",
+                    count = l2_to_l1_calls.len(),
+                    protocol_entries = rpc_entry_count,
+                    "draining L2→L1 call queue (unified intermediate roots)"
+                );
+                l2_to_l1_for_repush = l2_to_l1_calls.clone();
+                for w in l2_to_l1_calls {
+                    if !w.raw_l2_tx.is_empty() {
+                        held_l2_txs.push(w.raw_l2_tx);
+                    }
+                    let w_entry_count = w.l2_table_entries.len();
+                    builder_execution_entries.extend(w.l2_table_entries.iter().cloned());
+                    rpc_entry_count += w_entry_count;
+
+                    self.pending_l1.append_group(
+                        w.l1_deferred_entries.iter().cloned(),
+                        crate::cross_chain::EntryGroupMode::Chained,
+                        Some(TriggerMetadata {
+                            user: w.user,
+                            amount: w.amount,
+                            rlp_encoded_tx: w.rlp_encoded_tx.clone(),
+                            trigger_count: w.trigger_count,
+                        }),
+                    );
+                }
+            }
+        }
+
+        // Inject held L2 txs into the pool BEFORE block building.
+        if !held_l2_txs.is_empty() {
+            self.inject_held_l2_txs(&held_l2_txs).await;
+        }
+
+        Ok(QueueDrainResult {
+            builder_execution_entries,
+            rpc_entry_count,
+            queued_l1_txs,
+            rollback: QueueDrainRollback {
+                pre_drain_l1_len,
+                pre_drain_l1_groups,
+                calls_for_repush,
+                l2_to_l1_for_repush,
+            },
+        })
+    }
+
+    /// Undo a queue drain after a build failure: truncate pending_l1 to its
+    /// pre-drain state and re-push drained calls to the shared queues.
+    fn rollback_queue_drain(&mut self, rollback: QueueDrainRollback) {
+        self.pending_l1
+            .truncate_to(rollback.pre_drain_l1_len, rollback.pre_drain_l1_groups);
+        if !rollback.calls_for_repush.is_empty() {
+            let mut q = self
+                .queued_cross_chain_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            warn!(
+                target: "based_rollup::driver",
+                count = rollback.calls_for_repush.len(),
+                "re-pushing cross-chain calls to shared queue after build failure"
+            );
+            q.extend(rollback.calls_for_repush);
+        }
+        if !rollback.l2_to_l1_for_repush.is_empty() {
+            let mut q = self
+                .queued_l2_to_l1_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            warn!(
+                target: "based_rollup::driver",
+                count = rollback.l2_to_l1_for_repush.len(),
+                "re-pushing L2→L1 calls to shared queue after build failure"
+            );
+            q.extend(rollback.l2_to_l1_for_repush);
+        }
     }
 
     /// Read the builder's current L2 nonce from chain state.
