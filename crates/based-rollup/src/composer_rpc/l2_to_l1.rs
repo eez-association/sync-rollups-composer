@@ -42,6 +42,7 @@ use super::common::{
     get_l1_block_context as get_l1_block_context_for_proxy,
     get_verification_key as get_verification_key_for_proxy,
 };
+use super::model::{L1ProxyLookup, L2ProxyLookup};
 
 /// Run the RPC proxy server.
 ///
@@ -3208,62 +3209,6 @@ struct DetectedReturnCall {
 /// Maximum number of iterative discovery rounds in `simulate_l1_delivery`.
 const MAX_SIMULATION_ITERATIONS: usize = 10;
 
-/// L1 proxy lookup: queries `authorizedProxies(address)` on Rollups.sol (L1).
-///
-/// Implements `trace::ProxyLookup` for use with the generic `walk_trace_tree`.
-struct L1ProxyLookup<'a> {
-    client: &'a reqwest::Client,
-    l1_rpc_url: &'a str,
-    rollups_address: Address,
-}
-
-impl super::trace::ProxyLookup for L1ProxyLookup<'_> {
-    fn lookup_proxy(
-        &self,
-        address: Address,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<super::trace::ProxyInfo>> + Send + '_>,
-    > {
-        Box::pin(async move {
-            // authorizedProxies(address) — query Rollups.sol for proxy identity.
-            // Uses typed ABI encoding via sol! macro — NEVER hardcode selectors.
-            // Uses eth_call_view (read-only view call, not tracing — appropriate per spec).
-            let calldata = super::common::encode_authorized_proxies_calldata(address);
-
-            let hex_data = super::common::eth_call_view(
-                self.client,
-                self.l1_rpc_url,
-                self.rollups_address,
-                &calldata,
-            )
-            .await?;
-
-            // First 32 bytes = originalAddress
-            let addr = super::common::parse_address_from_abi_return(&hex_data)?;
-
-            // Second 32 bytes = originalRollupId (uint256, read last 8 bytes as u64)
-            let hex_clean = hex_data.strip_prefix("0x").unwrap_or(&hex_data);
-            if hex_clean.len() < 128 {
-                return None;
-            }
-            let rid_bytes = hex::decode(&hex_clean[64..128]).ok()?;
-            if rid_bytes.len() < 32 {
-                return None;
-            }
-            let mut rid: u64 = 0;
-            let start = rid_bytes.len().saturating_sub(8);
-            for b in &rid_bytes[start..] {
-                rid = (rid << 8) | (*b as u64);
-            }
-
-            Some(super::trace::ProxyInfo {
-                original_address: addr,
-                original_rollup_id: rid,
-            })
-        })
-    }
-}
-
 /// Extract L1→L2 return calls from the trigger trace using the generic
 /// `trace::walk_trace_tree` with ephemeral proxy support.
 ///
@@ -3286,7 +3231,7 @@ async fn extract_l1_to_l2_return_calls(
 ) -> Vec<DetectedReturnCall> {
     let lookup = L1ProxyLookup {
         client,
-        l1_rpc_url,
+        rpc_url: l1_rpc_url,
         rollups_address,
     };
     let mut proxy_cache: std::collections::HashMap<Address, Option<super::trace::ProxyInfo>> =
@@ -3404,38 +3349,6 @@ struct DetectedL2InternalCall {
     in_reverted_frame: bool,
 }
 
-/// L2 proxy lookup: queries `authorizedProxies(address)` on the L2 CCM.
-///
-/// Implements `trace::ProxyLookup` for use with the generic `walk_trace_tree`.
-struct L2ProxyLookup<'a> {
-    client: &'a reqwest::Client,
-    upstream_url: &'a str,
-    ccm_address: Address,
-}
-
-impl super::trace::ProxyLookup for L2ProxyLookup<'_> {
-    fn lookup_proxy(
-        &self,
-        address: Address,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<super::trace::ProxyInfo>> + Send + '_>,
-    > {
-        Box::pin(async move {
-            let result = detect_cross_chain_proxy_on_l2(
-                self.client,
-                self.upstream_url,
-                address,
-                self.ccm_address,
-            )
-            .await;
-            result.map(|(addr, rid)| super::trace::ProxyInfo {
-                original_address: addr,
-                original_rollup_id: rid,
-            })
-        })
-    }
-}
-
 /// Walk an L2 trace using the generic `trace::walk_trace_tree` and convert results
 /// to `DetectedL2InternalCall` format used by the rest of this module.
 async fn walk_l2_trace_generic(
@@ -3447,7 +3360,7 @@ async fn walk_l2_trace_generic(
 ) -> Vec<DetectedL2InternalCall> {
     let lookup = L2ProxyLookup {
         client,
-        upstream_url,
+        rpc_url: upstream_url,
         ccm_address,
     };
     let mut ephemeral_proxies = std::collections::HashMap::new();
@@ -3499,7 +3412,7 @@ async fn walk_l2_trace_for_discovered_proxy_calls(
 ) -> Vec<super::common::DiscoveredProxyCall> {
     let lookup = L2ProxyLookup {
         client,
-        upstream_url,
+        rpc_url: upstream_url,
         ccm_address,
     };
     let mut ephemeral_proxies = std::collections::HashMap::new();

@@ -23,7 +23,6 @@ use crate::cross_chain::{ParentLink, ScopePath};
 
 /// Queries `authorizedProxies(address)` on Rollups.sol (L1) to resolve proxy
 /// identity for the generic `trace::walk_trace_tree`.
-#[allow(dead_code, reason = "scaffold — callers will migrate from direction-local copies")]
 pub(crate) struct L1ProxyLookup<'a> {
     pub client: &'a reqwest::Client,
     pub rpc_url: &'a str,
@@ -76,7 +75,6 @@ impl trace::ProxyLookup for L1ProxyLookup<'_> {
 
 /// Queries `authorizedProxies(address)` on the L2 CCM to resolve proxy
 /// identity for the generic `trace::walk_trace_tree`.
-#[allow(dead_code, reason = "scaffold — callers will migrate from direction-local copies")]
 pub(crate) struct L2ProxyLookup<'a> {
     pub client: &'a reqwest::Client,
     pub rpc_url: &'a str,
