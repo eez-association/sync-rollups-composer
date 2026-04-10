@@ -742,6 +742,8 @@ where
                                     "terminal failure: skipping L2 entries (delivery always reverts)"
                                 );
                             }
+
+                            // Simple deposit: convert CALL+RESULT pair to L1 format
                             crate::cross_chain::convert_pairs_to_l1_entries(&[
                                 call_entry.clone(),
                                 result_entry.clone(),
@@ -752,7 +754,32 @@ where
                             l1_entries,
                             ..
                         } => {
-                            rpc_entries.extend(l2_table_entries.iter().cloned());
+                            // Terminal failure check for continuation path:
+                            // The L2 table entries are [CALL trigger, ...RESULT entries].
+                            // Check the LAST entry (terminal RESULT): if failed=true
+                            // with non-artifact data, the delivery always fails.
+                            // L1 entries are still posted for state commitment.
+                            let is_continuation_terminal = l2_table_entries
+                                .last()
+                                .map(|e| {
+                                    e.next_action.failed
+                                        && !e.next_action.data.is_empty()
+                                        && !crate::cross_chain::is_simulation_artifact(
+                                            &e.next_action.data,
+                                        )
+                                })
+                                .unwrap_or(false);
+                            if is_continuation_terminal {
+                                tracing::info!(
+                                    target: "based_rollup::driver",
+                                    l2_entries = l2_table_entries.len(),
+                                    "terminal failure (continuation): skipping L2 table entries"
+                                );
+                                // Skip L2 entries — no loadExecutionTable on L2.
+                            } else {
+                                rpc_entries.extend(l2_table_entries.iter().cloned());
+                            }
+                            // L1 entries always posted (state commitment).
                             l1_entries.clone()
                         }
                     };
