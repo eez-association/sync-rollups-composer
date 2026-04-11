@@ -70,6 +70,7 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
             calls: vec![],
             returns: vec![],
             promotion: PromotionDecision::KeepSimple,
+            user_tx_reverted: false,
         });
     }
 
@@ -79,6 +80,7 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
 
     // Step 2: Iterative discovery if top-level reverted.
     let mut last_retrace_results: Vec<DiscoveredCall> = Vec::new();
+    let mut user_tx_reverted = top_level_error;
 
     if top_level_error {
         for iteration in 1..=MAX_DISCOVERY_ITERATIONS {
@@ -147,6 +149,12 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
                 }
             };
 
+            // Track whether user tx still reverts after entries loaded.
+            user_tx_reverted = user_trace
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some();
+
             // Walk the retrace for new calls.
             let new_detected = walk_trace_to_discovered(
                 proxy_lookup,
@@ -191,7 +199,8 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
 
     Ok(DiscoveredSet {
         calls: all_calls,
-        returns: vec![], // populated by delivery simulation (3.6)
-        promotion: PromotionDecision::KeepSimple, // refined by promotion_rule (3.6)
+        returns: vec![],
+        promotion: PromotionDecision::KeepSimple,
+        user_tx_reverted,
     })
 }

@@ -1634,7 +1634,7 @@ async fn try_chained_l2_enrichment(
 /// Returns `(return_data, failed, detected_return_calls)`.
 /// Returns `None` if the simulation cannot be performed.
 #[allow(clippy::too_many_arguments)]
-async fn simulate_l1_delivery(
+pub(crate) async fn simulate_l1_delivery(
     client: &reqwest::Client,
     l1_rpc_url: &str,
     l2_rpc_url: &str,

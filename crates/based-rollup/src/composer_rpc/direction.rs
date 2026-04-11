@@ -336,18 +336,22 @@ impl Direction for L1ToL2 {
 /// holds the user's L2 tx until the block is confirmed.
 #[allow(dead_code, reason = "scaffold — instantiated when callers migrate")]
 pub(crate) struct L2ToL1 {
-    /// CCM address on L1 (delivery target).
+    /// CCM address on L1 (delivery target / Rollups.sol).
     pub l1_ccm: Address,
     /// CCM address on L2 (source for trace walking).
     pub l2_ccm: Address,
-    /// Builder address (for loadExecutionTable sender).
+    /// Builder address (for loadExecutionTable sender + proof signing).
     pub builder_address: Address,
+    /// Builder private key hex (for postBatch proof signing in simulate_l1_delivery).
+    pub builder_private_key: Option<String>,
     /// Rollup ID for entry construction.
     pub rollup_id: u64,
-    /// HTTP client for L1 delivery simulation during enrichment.
+    /// HTTP client for L1/L2 RPC calls.
     pub client: reqwest::Client,
     /// L1 RPC URL for delivery simulation.
     pub l1_rpc_url: String,
+    /// L2 RPC URL (upstream) for L2 enrichment.
+    pub l2_rpc_url: String,
 }
 
 impl sealed::Sealed for L2ToL1 {}
@@ -382,68 +386,39 @@ impl Direction for L2ToL1 {
         calls: &mut [DiscoveredCall],
         iteration: usize,
     ) {
-        // Simulate L1 delivery for calls missing return data.
-        // Without real return data, the loadExecutionTable entries produce
-        // empty returns that cause ABI decode failures in subsequent calls.
+        // Use the real simulate_l1_delivery for each call missing return data.
+        // This produces identical results to the inline loop: full postBatch
+        // simulation with fallback for protocol errors (ExecutionNotFound).
         for call in calls.iter_mut() {
             if !call.delivery_return_data.is_empty() || call.delivery_failed {
                 continue; // already enriched from a previous iteration
             }
 
-            // Direct L1 simulation: call the destination with the calldata.
-            let sim_req = serde_json::json!([{
-                "transactions": [{
-                    "from": format!("{}", call.source_address),
-                    "to": format!("{}", call.destination),
-                    "data": format!("0x{}", hex::encode(&call.calldata)),
-                    "value": format!("0x{:x}", call.value),
-                    "gas": "0x2faf080"
-                }]
-            }]);
+            let scope = vec![alloy_primitives::U256::ZERO; call.trace_depth.max(1)];
 
-            let trace_resp = self
-                .client
-                .post(&self.l1_rpc_url)
-                .json(&serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "debug_traceCallMany",
-                    "params": [sim_req, null, {"tracer": "callTracer"}],
-                    "id": 99979
-                }))
-                .send()
-                .await;
-
-            if let Ok(resp) = trace_resp {
-                if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(trace) = body
-                        .get("result")
-                        .and_then(|r| r.get(0))
-                        .and_then(|b| b.as_array())
-                        .and_then(|arr| arr.first())
-                    {
-                        let has_error = trace.get("error").is_some();
-                        if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
-                            let hex_clean = output.strip_prefix("0x").unwrap_or(output);
-                            if let Ok(bytes) = hex::decode(hex_clean) {
-                                // Check for protocol errors (ExecutionNotFound etc.)
-                                // that indicate the context is incomplete, not a real failure.
-                                let is_protocol_error = has_error
-                                    && bytes.len() == 4
-                                    && (bytes == [0xf9, 0xd3, 0x30, 0xad]   // ExecutionNotInCurrentBlock
-                                        || bytes == [0xed, 0x6b, 0xc7, 0x50]); // ExecutionNotFound
-
-                                if !is_protocol_error {
-                                    call.delivery_return_data = bytes;
-                                    call.delivery_failed = has_error;
-                                }
-                                // Protocol errors: leave empty — full delivery sim
-                                // would be needed (deferred to inline loop fallback).
-                            }
-                        } else if has_error {
-                            call.delivery_failed = true;
-                        }
-                    }
-                }
+            if let Some((ret_data, failed, _return_calls)) =
+                super::l2_to_l1::simulate_l1_delivery(
+                    &self.client,
+                    &self.l1_rpc_url,
+                    &self.l2_rpc_url,
+                    self.l2_ccm,
+                    self.l1_ccm,  // rollups_address
+                    self.builder_address,
+                    self.builder_private_key.as_deref(),
+                    self.rollup_id,
+                    call.source_address,
+                    call.destination,
+                    &call.calldata,
+                    call.value,
+                    &[],  // rlp_encoded_tx (empty for enrichment — not used for entry hashing)
+                    &scope,
+                    &call.delivery_return_data,
+                    call.delivery_failed,
+                )
+                .await
+            {
+                call.delivery_return_data = ret_data;
+                call.delivery_failed = failed;
             }
 
             tracing::info!(
@@ -452,7 +427,7 @@ impl Direction for L2ToL1 {
                 destination = %call.destination,
                 return_data_len = call.delivery_return_data.len(),
                 delivery_failed = call.delivery_failed,
-                "enriched call with L1 delivery return data"
+                "enriched call via simulate_l1_delivery"
             );
         }
     }

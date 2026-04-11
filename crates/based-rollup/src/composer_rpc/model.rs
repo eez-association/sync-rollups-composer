@@ -188,6 +188,8 @@ pub(crate) struct DiscoveredSet {
     pub returns: Vec<ReturnEdge>,
     /// Whether to promote to continuation mode.
     pub promotion: PromotionDecision,
+    /// Whether the user tx still reverts after entries loaded.
+    pub user_tx_reverted: bool,
 }
 
 // ---------------------------------------------------------------------------
