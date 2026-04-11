@@ -50,20 +50,25 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
     user_tx: &UserTxContext,
     proxy_lookup: &dyn trace::ProxyLookup,
     proxy_cache: &mut HashMap<Address, Option<trace::ProxyInfo>>,
+    initial_calls: Option<Vec<DiscoveredCall>>,
 ) -> eyre::Result<DiscoveredSet> {
     let managers = direction.source_manager_addresses();
     let default_rid = direction.default_target_rollup_id();
 
-    // Step 1: Walk initial trace for cross-chain calls.
-    let mut all_calls = walk_trace_to_discovered(
-        proxy_lookup,
-        &managers,
-        initial_trace,
-        proxy_cache,
-        default_rid,
-        0, // iteration 0 = initial trace
-    )
-    .await;
+    // Step 1: Walk initial trace for cross-chain calls, or use pre-supplied calls.
+    let mut all_calls = if let Some(calls) = initial_calls {
+        calls
+    } else {
+        walk_trace_to_discovered(
+            proxy_lookup,
+            &managers,
+            initial_trace,
+            proxy_cache,
+            default_rid,
+            0, // iteration 0 = initial trace
+        )
+        .await
+    };
 
     if all_calls.is_empty() {
         return Ok(DiscoveredSet {
@@ -81,6 +86,7 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
     // Step 2: Iterative discovery if top-level reverted.
     let mut last_retrace_results: Vec<DiscoveredCall> = Vec::new();
     let mut user_tx_reverted = top_level_error;
+    let mut accumulated_returns: Vec<super::model::ReturnEdge> = Vec::new();
 
     if top_level_error {
         for iteration in 1..=MAX_DISCOVERY_ITERATIONS {
@@ -93,9 +99,12 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
             );
 
             // Direction-specific: enrich calls with delivery return data.
-            let _enrichment_returns = direction
+            let enrichment_returns = direction
                 .enrich_calls_before_retrace(&mut all_calls, user_tx, iteration)
                 .await;
+            if !enrichment_returns.is_empty() {
+                accumulated_returns.extend(enrichment_returns);
+            }
 
             // Log enrichment results for debugging
             for (ci, c) in all_calls.iter().enumerate() {
@@ -219,7 +228,7 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
 
     Ok(DiscoveredSet {
         calls: all_calls,
-        returns: vec![],
+        returns: accumulated_returns,
         promotion: PromotionDecision::KeepSimple,
         user_tx_reverted,
     })

@@ -3591,538 +3591,121 @@ async fn trace_and_detect_l2_internal_calls(
         );
     }
 
-    // Return calls discovered during L2 iterative discovery's simulate_l1_delivery
-    // fallback. Previously discarded — now saved so Phase A/B can skip redundant
-    // rediscovery on its first iteration.
-    let mut early_return_calls: Vec<ReturnEdge> = Vec::new();
-
     // Check if the top-level call reverted (multi-call continuation pattern: L2→L1 calls
     // that need entries pre-loaded before the user tx can succeed).
     let top_level_error =
         trace_result.get("error").is_some() || trace_result.get("revertReason").is_some();
 
-    // Track whether the user tx still reverts after all entries are loaded.
-    // Updated each iteration of the discovery loop below.
+    // Run the unified iterative discovery loop via discover_until_stable.
+    // This replaces the former inline loop that manually called simulate_l1_delivery,
+    // built loadExecutionTable bundles, and deduped new calls. The L2ToL1 direction
+    // hooks handle enrichment (two-step: direct L1 sim + full simulate_l1_delivery)
+    // and retrace bundle construction (loadExecutionTable + userTx on L2).
+    let mut early_return_calls: Vec<ReturnEdge> = Vec::new();
     let mut last_user_trace_had_error = false;
 
-    if top_level_error && !detected_calls.is_empty() {
-        // Iterative discovery: simulate with loadExecutionTable to see ALL calls.
-        // The initial debug_traceCall runs without execution table entries loaded, so
-        // some L2→L1 calls may be hidden behind reverts that only resolve when earlier
-        // entries are pre-loaded. We iterate: build entries for known calls, simulate
-        // [loadExecutionTable, userTx] via debug_traceCallMany, walk the user tx trace
-        // for new calls, and repeat until convergence.
-        let mut all_calls = detected_calls.clone();
-        let mut iteration = 0;
-        const MAX_ITERATIONS: usize = 10;
-        // Track last retrace results for in_reverted_frame update after convergence.
-        let mut last_retrace_results: Vec<DiscoveredCall> = Vec::new();
+    {
+        use super::direction::{L2ToL1, UserTxContext};
+        use super::sim_client::HttpSimClient;
 
-        loop {
-            iteration += 1;
-            if iteration > MAX_ITERATIONS {
-                tracing::warn!(
-                    target: "based_rollup::proxy",
-                    MAX_ITERATIONS,
-                    "iterative L2 discovery hit max iterations — proceeding with known calls"
-                );
-                break;
-            }
+        let direction = L2ToL1 {
+            l1_ccm: rollups_address,
+            l2_ccm: cross_chain_manager_address,
+            builder_address,
+            builder_private_key: builder_private_key.map(|s| s.to_string()),
+            rollup_id,
+            client: client.clone(),
+            l1_rpc_url: l1_rpc_url.to_string(),
+            l2_rpc_url: upstream_url.to_string(),
+        };
+        let sim = HttpSimClient::new(
+            client.clone(),
+            l1_rpc_url.to_string(),
+            upstream_url.to_string(),
+        );
+        let user_tx = UserTxContext {
+            from: format!("{sender}"),
+            to: format!("{to_addr}"),
+            data: format!("0x{}", hex::encode(input)),
+            raw_tx_bytes: tx_bytes.clone(),
+            value: format!("0x{:x}", value),
+        };
+        let lookup = L2ProxyLookup {
+            client,
+            rpc_url: upstream_url,
+            ccm_address: cross_chain_manager_address,
+        };
 
-            tracing::info!(
-                target: "based_rollup::proxy",
-                iteration,
-                known_calls = all_calls.len(),
-                "iterative L2 discovery: traceCallMany with loadExecutionTable pre-loading"
-            );
+        let discovery_result = super::discover::discover_until_stable(
+            &direction,
+            &sim,
+            trace_result,
+            &user_tx,
+            &lookup,
+            &mut proxy_cache,
+            Some(detected_calls.clone()),
+        )
+        .await;
 
-            // Step 1: Simulate L1 delivery for calls missing return data.
-            // CRITICAL: use REAL delivery return data, not empty placeholders.
-            // The L2 proxy decodes CCM's return as `bytes memory` and returns the
-            // inner bytes to the caller. Empty return data → 0 bytes → Solidity ABI
-            // decoder reverts when the caller expects e.g. uint256, preventing the
-            // iterative discovery from seeing subsequent calls.
-            for call in &mut all_calls {
-                if !call.delivery_return_data.is_empty() || call.delivery_failed {
-                    continue; // already has data from a previous iteration
-                }
-                let sim_req = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "debug_traceCallMany",
-                    "params": [
-                        [{
-                            "transactions": [{
-                                "from": format!("{}", call.source_address),
-                                "to": format!("{}", call.destination),
-                                "data": format!("0x{}", hex::encode(&call.calldata)),
-                                "value": format!("0x{:x}", call.value),
-                                "gas": "0x2faf080"
-                            }]
-                        }],
-                        null,
-                        { "tracer": "callTracer" }
-                    ],
-                    "id": 99979
-                });
-                if let Ok(resp) = client.post(l1_rpc_url).json(&sim_req).send().await {
-                    if let Ok(body) = resp.json::<Value>().await {
-                        // result[0][0] = trace of the single tx
-                        if let Some(trace) = body
-                            .get("result")
-                            .and_then(|r| r.get(0))
-                            .and_then(|b| b.as_array())
-                            .and_then(|arr| arr.first())
-                        {
-                            let has_error = trace.get("error").is_some();
-                            if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
-                                let hex = output.strip_prefix("0x").unwrap_or(output);
-                                if let Ok(bytes) = hex::decode(hex) {
-                                    // Check if the error is a PROTOCOL error (entry not loaded yet)
-                                    // vs a real delivery failure. Protocol errors should NOT be used
-                                    // as delivery_return_data — they mean the simulation context is
-                                    // incomplete, not that the delivery itself fails.
-                                    let is_protocol_error = has_error
-                                        && bytes.len() == 4
-                                        && (
-                                            // ExecutionNotInCurrentBlock() = 0xf9d330ad
-                                            bytes == [0xf9, 0xd3, 0x30, 0xad] ||
-                                        // ExecutionNotFound() = 0xed6bc750
-                                        bytes == [0xed, 0x6b, 0xc7, 0x50]
-                                        );
-                                    if is_protocol_error {
-                                        tracing::info!(
-                                            target: "based_rollup::proxy",
-                                            iteration,
-                                            destination = %call.destination,
-                                            error_hex = %format!("0x{}", hex::encode(&bytes)),
-                                            "iterative discovery: L1 delivery returned protocol error — using full simulate_l1_delivery"
-                                        );
-                                        // The direct L1 call failed because entries aren't loaded.
-                                        // Use the full simulate_l1_delivery (with postBatch) to get
-                                        // REAL return data. This is heavier but correct for nested
-                                        // L2→L1→L2 patterns where the L1 delivery triggers further
-                                        // cross-chain calls via executeCrossChainCall.
-                                        if let Some((ret_data, failed, return_calls)) =
-                                            simulate_l1_delivery(
-                                                client,
-                                                l1_rpc_url,
-                                                upstream_url,
-                                                cross_chain_manager_address,
-                                                rollups_address,
-                                                builder_address,
-                                                builder_private_key,
-                                                rollup_id,
-                                                call.source_address,
-                                                call.destination,
-                                                &call.calldata,
-                                                call.value,
-                                                &tx_bytes,
-                                                &vec![U256::ZERO; call.trace_depth.max(1)],
-                                                &call.delivery_return_data,
-                                                call.delivery_failed,
-                                            )
-                                            .await
-                                        {
-                                            call.delivery_return_data = ret_data.clone();
-                                            call.delivery_failed = failed;
-                                            // Capture return calls discovered during L1 simulation.
-                                            // Previously discarded — now saved for early availability
-                                            // in the discovery pipeline. The Phase A/B loop
-                                            // (simulate_l1_combined_delivery) rediscovers these, but
-                                            // having them here enables future unified discovery.
-                                            if !return_calls.is_empty() {
-                                                early_return_calls
-                                                    .extend(return_calls.iter().cloned());
-                                            }
-                                            tracing::info!(
-                                                target: "based_rollup::proxy",
-                                                iteration,
-                                                destination = %call.destination,
-                                                return_data_len = ret_data.len(),
-                                                return_data_hex = %format!("0x{}", hex::encode(&ret_data[..ret_data.len().min(32)])),
-                                                delivery_failed = failed,
-                                                early_return_calls = return_calls.len(),
-                                                "iterative discovery: L1 delivery return data via full simulate_l1_delivery"
-                                            );
-                                        }
-                                    } else {
-                                        call.delivery_return_data = bytes.clone();
-                                        call.delivery_failed = has_error;
-                                        tracing::info!(
-                                            target: "based_rollup::proxy",
-                                            iteration,
-                                            destination = %call.destination,
-                                            return_data_len = bytes.len(),
-                                            return_data_hex = %format!("0x{}", hex::encode(&bytes[..bytes.len().min(32)])),
-                                            delivery_failed = has_error,
-                                            "iterative discovery: L1 delivery return data via debug_traceCallMany"
-                                        );
-                                    }
-                                }
-                            } else if has_error {
-                                call.delivery_failed = true;
-                                tracing::info!(
-                                    target: "based_rollup::proxy",
-                                    iteration,
-                                    destination = %call.destination,
-                                    "iterative discovery: L1 delivery reverted (no output)"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+        match discovery_result {
+            Ok(discovered_set) => {
+                detected_calls = discovered_set.calls;
+                early_return_calls = discovered_set.returns;
+                last_user_trace_had_error = discovered_set.user_tx_reverted;
 
-            // Step 1b: Build L2 table entries with real return data.
-            let mut l2_table_entries = Vec::new();
-            for call in &all_calls {
-                let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
-                    call.destination,
-                    call.calldata.clone(),
-                    call.value,
-                    call.source_address,
-                    rollup_id,
-                    tx_bytes.clone(),
-                    call.delivery_return_data.clone(),
-                    call.delivery_failed,
-                    vec![], // l1_delivery_scope (irrelevant for L2 table loading)
-                    crate::cross_chain::TxOutcome::Success,  // tx_reverts
-                );
-                l2_table_entries.extend(call_entries.l2_table_entries);
-            }
-
-            // Log the entries built for this iteration.
-            for (idx, entry) in l2_table_entries.iter().enumerate() {
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    iteration,
-                    idx,
-                    action_hash = %entry.action_hash,
-                    next_action_type = ?entry.next_action.action_type,
-                    next_action_scope_len = entry.next_action.scope.len(),
-                    "iterative discovery: L2 table entry for loadExecutionTable"
-                );
-            }
-
-            // Step 2: Encode loadExecutionTable calldata.
-            let load_table_calldata =
-                crate::cross_chain::encode_load_execution_table_calldata(&l2_table_entries);
-            let load_table_data = format!("0x{}", hex::encode(load_table_calldata.as_ref()));
-            let ccm_hex = format!("{cross_chain_manager_address}");
-            let builder_hex = format!("{builder_address}");
-
-            tracing::info!(
-                target: "based_rollup::proxy",
-                iteration,
-                calldata_len = load_table_data.len(),
-                calldata_prefix = &load_table_data[..load_table_data.len().min(40)],
-                entry_count = l2_table_entries.len(),
-                "iterative discovery: loadExecutionTable calldata built"
-            );
-
-            // Step 3: Build traceCallMany request.
-            // reth's debug_traceCallMany format:
-            //   params: [bundles, stateContext?, tracingOptions?]
-            //   bundle: { transactions: [tx1, tx2, ...] }
-            // Both txs in ONE bundle so tx1's state (loadExecutionTable) is visible to tx2.
-            let trace_req = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "debug_traceCallMany",
-                "params": [
-                    [
-                        {
-                            "transactions": [
-                                {
-                                    "from": builder_hex,
-                                    "to": ccm_hex,
-                                    "data": load_table_data,
-                                    "gas": "0x1c9c380"
-                                },
-                                {
-                                    "from": format!("{sender}"),
-                                    "to": format!("{to_addr}"),
-                                    "data": format!("0x{}", hex::encode(input)),
-                                    "value": format!("0x{:x}", value),
-                                    "gas": "0x2faf080"
-                                }
-                            ]
-                        }
-                    ],
-                    null,
-                    { "tracer": "callTracer" }
-                ],
-                "id": 99987
-            });
-
-            // Log the full request for traceability/reproducibility.
-            tracing::info!(
-                target: "based_rollup::proxy",
-                iteration,
-                user_tx = %user_tx_hash,
-                request = %serde_json::to_string(&trace_req).unwrap_or_default(),
-                "iterative discovery: debug_traceCallMany REQUEST"
-            );
-
-            // Step 4: Execute traceCallMany.
-            let resp = match client.post(upstream_url).json(&trace_req).send().await {
-                Ok(r) => match r.json::<Value>().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "based_rollup::proxy",
-                            %e,
-                            "L2 traceCallMany response parse failed"
-                        );
-                        break;
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
+                if !early_return_calls.is_empty() {
+                    tracing::info!(
                         target: "based_rollup::proxy",
-                        %e,
-                        "L2 traceCallMany request failed"
+                        early_return_call_count = early_return_calls.len(),
+                        "iterative L2 discovery captured return calls from enrichment"
                     );
-                    break;
-                }
-            };
-
-            // Log the full response for traceability/reproducibility.
-            tracing::info!(
-                target: "based_rollup::proxy",
-                iteration,
-                user_tx = %user_tx_hash,
-                response = %serde_json::to_string(&resp).unwrap_or_default(),
-                "iterative discovery: debug_traceCallMany RESPONSE"
-            );
-
-            // Step 5: Parse traces — result is an array of per-tx traces.
-            // debug_traceCallMany returns result[bundle_idx][tx_idx].
-            // We have 1 bundle with 2 txs: result[0][0]=loadTable, result[0][1]=userTx.
-            let bundle_traces = match resp
-                .get("result")
-                .and_then(|r| r.get(0))
-                .and_then(|b| b.as_array())
-            {
-                Some(arr) if arr.len() >= 2 => arr,
-                _ => {
-                    if let Some(error) = resp.get("error") {
-                        tracing::warn!(
-                            target: "based_rollup::proxy",
-                            ?error,
-                            "L2 traceCallMany returned error"
-                        );
-                    }
-                    break;
-                }
-            };
-
-            // Check loadTable result.
-            let tx0 = &bundle_traces[0];
-            if tx0.get("error").is_some() {
-                tracing::warn!(
-                    target: "based_rollup::proxy",
-                    "loadExecutionTable reverted in L2 traceCallMany"
-                );
-                // Still try to walk user tx trace for new calls.
-            }
-
-            // Log user tx trace status for debugging.
-            let user_trace = &bundle_traces[1];
-            let user_error = user_trace
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("none");
-            last_user_trace_had_error = user_error != "none";
-            let user_output = user_trace
-                .get("output")
-                .and_then(|v| v.as_str())
-                .unwrap_or("none");
-            tracing::info!(
-                target: "based_rollup::proxy",
-                user_error,
-                user_output_prefix = &user_output[..user_output.len().min(20)],
-                "L2 traceCallMany: user tx trace status"
-            );
-
-            // Step 6: Log user tx trace tree summary for full traceability.
-            {
-                fn count_calls(node: &Value, depth: usize, summary: &mut Vec<String>) {
-                    if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
-                        for c in calls {
-                            let to = c.get("to").and_then(|v| v.as_str()).unwrap_or("?");
-                            let error = c.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                            let sel = c.get("input").and_then(|v| v.as_str()).unwrap_or("0x");
-                            let sel_short = &sel[..sel.len().min(10)];
-                            let child_count = c
-                                .get("calls")
-                                .and_then(|v| v.as_array())
-                                .map_or(0, |a| a.len());
-                            let err = if error.is_empty() { "ok" } else { error };
-                            summary.push(format!(
-                                "d={}:{}:{}:ch={}:{}",
-                                depth + 1,
-                                &to[to.len().saturating_sub(8)..],
-                                sel_short,
-                                child_count,
-                                err
-                            ));
-                            count_calls(c, depth + 1, summary);
-                        }
-                    }
-                }
-                let mut summary = Vec::new();
-                count_calls(user_trace, 0, &mut summary);
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    iteration,
-                    user_error,
-                    trace_nodes = summary.len(),
-                    trace_tree = %summary.join(" | "),
-                    "iterative discovery: user tx trace tree"
-                );
-            }
-
-            // Walk user tx trace for new calls using generic walker.
-            let new_detected = walk_l2_trace_generic(
-                client,
-                upstream_url,
-                cross_chain_manager_address,
-                user_trace,
-                &mut proxy_cache,
-            )
-            .await;
-
-            // Save for in_reverted_frame update after convergence.
-            last_retrace_results = new_detected.clone();
-
-            tracing::info!(
-                target: "based_rollup::proxy",
-                iteration,
-                detected_in_retrace = new_detected.len(),
-                known_calls = all_calls.len(),
-                "iterative discovery: walker results from re-trace"
-            );
-            for (idx, d) in new_detected.iter().enumerate() {
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    iteration,
-                    idx,
-                    destination = %d.destination,
-                    source = %d.source_address,
-                    trace_depth = d.trace_depth,
-                    "iterative discovery: detected call in re-trace"
-                );
-            }
-
-            // Step 7: Find truly new calls using count-based comparison.
-            // A call is "new" only if new_detected has MORE of that
-            // (dest, calldata, value, source_address) tuple than all_calls —
-            // supports legitimate duplicate calls (e.g., CallTwice calling
-            // increment() twice). The CALL action hash includes value and
-            // sourceAddress, so two calls with different ETH values or from
-            // different sources are distinct.
-            let new_calls = filter_new_by_count(new_detected, &all_calls, |a, b| {
-                a.destination == b.destination
-                    && a.calldata == b.calldata
-                    && a.value == b.value
-                    && a.source_address == b.source_address
-            });
-
-            if new_calls.is_empty() {
-                tracing::info!(
-                    target: "based_rollup::proxy",
-                    iteration,
-                    total = all_calls.len(),
-                    "iterative L2 discovery converged — no new calls found"
-                );
-                break;
-            }
-
-            tracing::info!(
-                target: "based_rollup::proxy",
-                iteration,
-                new = new_calls.len(),
-                "discovered new L2→L1 calls via L2 traceCallMany"
-            );
-
-            all_calls.extend(new_calls);
-        }
-
-        // Update in_reverted_frame from the LAST retrace results.
-        // The initial trace runs without entries loaded, so ALL calls appear reverted
-        // (proxy calls fail with ExecutionNotFound). After loading entries, the retrace
-        // shows the correct revert status: only calls inside try/catch blocks that
-        // actually revert have in_reverted_frame=true.
-        if !last_retrace_results.is_empty() {
-            for call in all_calls.iter_mut() {
-                // Find matching call in last retrace by (dest, calldata, value, source, trace_depth)
-                if let Some(retrace_call) = last_retrace_results.iter().find(|r| {
-                    r.destination == call.destination
-                        && r.calldata == call.calldata
-                        && r.value == call.value
-                        && r.source_address == call.source_address
-                        && r.trace_depth == call.trace_depth
-                }) {
-                    if call.in_reverted_frame != retrace_call.in_reverted_frame {
+                    for (ri, rc) in early_return_calls.iter().enumerate() {
                         tracing::info!(
                             target: "based_rollup::proxy",
-                            dest = %call.destination,
-                            trace_depth = call.trace_depth,
-                            old = call.in_reverted_frame,
-                            new = retrace_call.in_reverted_frame,
-                            "updated in_reverted_frame from last retrace"
+                            ri,
+                            dest = %rc.destination,
+                            source = %rc.source_address,
+                            data_len = rc.data.len(),
+                            scope_len = rc.scope.len(),
+                            "early return call from L2 iterative discovery"
                         );
-                        call.in_reverted_frame = retrace_call.in_reverted_frame;
                     }
                 }
-            }
-        }
 
-        // Update detected_calls with the full set from iterative discovery.
-        detected_calls = all_calls;
-
-        if !early_return_calls.is_empty() {
-            tracing::info!(
-                target: "based_rollup::proxy",
-                early_return_call_count = early_return_calls.len(),
-                "iterative L2 discovery captured return calls from simulate_l1_delivery"
-            );
-            for (ri, rc) in early_return_calls.iter().enumerate() {
                 tracing::info!(
                     target: "based_rollup::proxy",
-                    ri,
-                    dest = %rc.destination,
-                    source = %rc.source_address,
-                    data_len = rc.data.len(),
-                    scope_len = rc.scope.len(),
-                    "early return call from L2 iterative discovery"
+                    count = detected_calls.len(),
+                    early_return_calls = early_return_calls.len(),
+                    user_tx_reverted = last_user_trace_had_error,
+                    "iterative L2 discovery complete (via discover_until_stable)"
                 );
+
+                for (i, call) in detected_calls.iter().enumerate() {
+                    tracing::info!(
+                        target: "based_rollup::proxy",
+                        idx = i,
+                        destination = %call.destination,
+                        source_address = %call.source_address,
+                        calldata_len = call.calldata.len(),
+                        calldata_prefix = %format!("0x{}", hex::encode(&call.calldata[..call.calldata.len().min(8)])),
+                        value = %call.value,
+                        trace_depth = call.trace_depth,
+                        in_reverted_frame = call.in_reverted_frame,
+                        delivery_failed = call.delivery_failed,
+                        delivery_return_data_len = call.delivery_return_data.len(),
+                        delivery_return_data_hex = %format!("0x{}", hex::encode(&call.delivery_return_data)),
+                        "iterative discovery final call (with revert frame status)"
+                    );
+                }
             }
-        }
-
-        tracing::info!(
-            target: "based_rollup::proxy",
-            count = detected_calls.len(),
-            early_return_calls = early_return_calls.len(),
-            "iterative L2 discovery complete"
-        );
-
-        for (i, call) in detected_calls.iter().enumerate() {
-            tracing::info!(
-                target: "based_rollup::proxy",
-                idx = i,
-                destination = %call.destination,
-                source_address = %call.source_address,
-                calldata_len = call.calldata.len(),
-                calldata_prefix = %format!("0x{}", hex::encode(&call.calldata[..call.calldata.len().min(8)])),
-                value = %call.value,
-                trace_depth = call.trace_depth,
-                in_reverted_frame = call.in_reverted_frame,
-                delivery_failed = call.delivery_failed,
-                delivery_return_data_len = call.delivery_return_data.len(),
-                delivery_return_data_hex = %format!("0x{}", hex::encode(&call.delivery_return_data)),
-                "iterative discovery final call (with revert frame status)"
-            );
+            Err(e) => {
+                tracing::warn!(
+                    target: "based_rollup::proxy",
+                    %e,
+                    "discover_until_stable failed — proceeding with initial detected calls"
+                );
+                // detected_calls remains as initially detected (no iterative expansion).
+            }
         }
     }
 
