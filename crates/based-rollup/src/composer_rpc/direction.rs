@@ -397,32 +397,84 @@ impl Direction for L2ToL1 {
                 continue; // already enriched from a previous iteration
             }
 
-            let scope = vec![alloy_primitives::U256::ZERO; call.trace_depth.max(1)];
-
-            if let Some((ret_data, failed, return_calls)) =
-                super::l2_to_l1::simulate_l1_delivery(
-                    &self.client,
-                    &self.l1_rpc_url,
-                    &self.l2_rpc_url,
-                    self.l2_ccm,
-                    self.l1_ccm,  // rollups_address
-                    self.builder_address,
-                    self.builder_private_key.as_deref(),
-                    self.rollup_id,
-                    call.source_address,
-                    call.destination,
-                    &call.calldata,
-                    call.value,
-                    &user_tx.raw_tx_bytes,
-                    &scope,
-                    &call.delivery_return_data,
-                    call.delivery_failed,
-                )
-                .await
+            // Two-step enrichment (matches inline loop behavior):
+            // Step 1: Direct L1 call — fast, captures non-protocol results.
+            // Step 2: Full simulate_l1_delivery — only on protocol error.
+            let sim_req = serde_json::json!([{
+                "transactions": [{
+                    "from": format!("{}", call.source_address),
+                    "to": format!("{}", call.destination),
+                    "data": format!("0x{}", hex::encode(&call.calldata)),
+                    "value": format!("0x{:x}", call.value),
+                    "gas": "0x2faf080"
+                }]
+            }]);
+            let mut needs_full_sim = false;
+            if let Ok(resp) = self.client.post(&self.l1_rpc_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "debug_traceCallMany",
+                    "params": [sim_req, serde_json::Value::Null, {"tracer": "callTracer"}],
+                    "id": 99979
+                }))
+                .send().await
             {
-                call.delivery_return_data = ret_data;
-                call.delivery_failed = failed;
-                all_return_calls.extend(return_calls);
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(trace) = body.get("result")
+                        .and_then(|r| r.get(0))
+                        .and_then(|b| b.as_array())
+                        .and_then(|arr| arr.first())
+                    {
+                        let has_error = trace.get("error").is_some();
+                        if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
+                            let hex_clean = output.strip_prefix("0x").unwrap_or(output);
+                            if let Ok(bytes) = hex::decode(hex_clean) {
+                                let is_protocol_error = has_error
+                                    && bytes.len() == 4
+                                    && (bytes == [0xf9, 0xd3, 0x30, 0xad]
+                                        || bytes == [0xed, 0x6b, 0xc7, 0x50]);
+                                if is_protocol_error {
+                                    needs_full_sim = true;
+                                } else {
+                                    call.delivery_return_data = bytes;
+                                    call.delivery_failed = has_error;
+                                }
+                            }
+                        } else if has_error {
+                            call.delivery_failed = true;
+                        }
+                    }
+                }
+            }
+
+            // Step 2: Full simulate_l1_delivery on protocol error.
+            if needs_full_sim {
+                let scope = vec![alloy_primitives::U256::ZERO; call.trace_depth.max(1)];
+                if let Some((ret_data, failed, return_calls)) =
+                    super::l2_to_l1::simulate_l1_delivery(
+                        &self.client,
+                        &self.l1_rpc_url,
+                        &self.l2_rpc_url,
+                        self.l2_ccm,
+                        self.l1_ccm,
+                        self.builder_address,
+                        self.builder_private_key.as_deref(),
+                        self.rollup_id,
+                        call.source_address,
+                        call.destination,
+                        &call.calldata,
+                        call.value,
+                        &user_tx.raw_tx_bytes,
+                        &scope,
+                        &call.delivery_return_data,
+                        call.delivery_failed,
+                    )
+                    .await
+                {
+                    call.delivery_return_data = ret_data;
+                    call.delivery_failed = failed;
+                    all_return_calls.extend(return_calls);
+                }
             }
 
             tracing::info!(
@@ -431,7 +483,8 @@ impl Direction for L2ToL1 {
                 destination = %call.destination,
                 return_data_len = call.delivery_return_data.len(),
                 delivery_failed = call.delivery_failed,
-                "enriched call via simulate_l1_delivery"
+                needs_full_sim,
+                "enriched call (two-step)"
             );
         }
         all_return_calls
