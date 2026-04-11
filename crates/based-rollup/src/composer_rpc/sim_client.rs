@@ -111,11 +111,14 @@ impl SimulationClient for HttpSimClient {
         block_override: Option<&str>,
     ) -> Result<Value> {
         let url = self.url(chain);
-        let block = block_override.unwrap_or("latest");
+        let block_param: Value = match block_override {
+            Some(b) => serde_json::json!(b),
+            None => Value::Null,
+        };
         let req = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "debug_traceCallMany",
-            "params": [txs, block, {"tracer": "callTracer"}],
+            "params": [txs, block_param, {"tracer": "callTracer"}],
             "id": 1
         });
 

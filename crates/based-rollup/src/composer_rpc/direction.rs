@@ -85,9 +85,10 @@ pub(crate) trait Direction: sealed::Sealed + Send + Sync + 'static {
     fn enrich_calls_before_retrace(
         &self,
         _calls: &mut [DiscoveredCall],
+        _user_tx: &UserTxContext,
         _iteration: usize,
-    ) -> impl std::future::Future<Output = ()> + Send {
-        async {}
+    ) -> impl std::future::Future<Output = Vec<super::model::ReturnEdge>> + Send {
+        async { vec![] }
     }
 
     /// Build a retrace bundle for the iterative discovery loop.
@@ -118,6 +119,8 @@ pub(crate) struct UserTxContext {
     pub to: String,
     /// Calldata (hex, 0x-prefixed).
     pub data: String,
+    /// Raw RLP-encoded transaction bytes (for L2TX action hash in simulate_l1_delivery).
+    pub raw_tx_bytes: Vec<u8>,
     /// Value (hex, 0x-prefixed).
     pub value: String,
 }
@@ -384,11 +387,11 @@ impl Direction for L2ToL1 {
     async fn enrich_calls_before_retrace(
         &self,
         calls: &mut [DiscoveredCall],
+        user_tx: &UserTxContext,
         iteration: usize,
-    ) {
-        // Use the real simulate_l1_delivery for each call missing return data.
-        // This produces identical results to the inline loop: full postBatch
-        // simulation with fallback for protocol errors (ExecutionNotFound).
+    ) -> Vec<super::model::ReturnEdge> {
+        use super::model::ReturnEdge;
+        let mut all_return_calls: Vec<ReturnEdge> = Vec::new();
         for call in calls.iter_mut() {
             if !call.delivery_return_data.is_empty() || call.delivery_failed {
                 continue; // already enriched from a previous iteration
@@ -396,7 +399,7 @@ impl Direction for L2ToL1 {
 
             let scope = vec![alloy_primitives::U256::ZERO; call.trace_depth.max(1)];
 
-            if let Some((ret_data, failed, _return_calls)) =
+            if let Some((ret_data, failed, return_calls)) =
                 super::l2_to_l1::simulate_l1_delivery(
                     &self.client,
                     &self.l1_rpc_url,
@@ -410,7 +413,7 @@ impl Direction for L2ToL1 {
                     call.destination,
                     &call.calldata,
                     call.value,
-                    &[],  // rlp_encoded_tx (empty for enrichment — not used for entry hashing)
+                    &user_tx.raw_tx_bytes,
                     &scope,
                     &call.delivery_return_data,
                     call.delivery_failed,
@@ -419,6 +422,7 @@ impl Direction for L2ToL1 {
             {
                 call.delivery_return_data = ret_data;
                 call.delivery_failed = failed;
+                all_return_calls.extend(return_calls);
             }
 
             tracing::info!(
@@ -430,6 +434,7 @@ impl Direction for L2ToL1 {
                 "enriched call via simulate_l1_delivery"
             );
         }
+        all_return_calls
     }
 
     async fn build_retrace_bundle(

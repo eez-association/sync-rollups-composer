@@ -93,9 +93,21 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
             );
 
             // Direction-specific: enrich calls with delivery return data.
-            direction
-                .enrich_calls_before_retrace(&mut all_calls, iteration)
+            let _enrichment_returns = direction
+                .enrich_calls_before_retrace(&mut all_calls, user_tx, iteration)
                 .await;
+
+            // Log enrichment results for debugging
+            for (ci, c) in all_calls.iter().enumerate() {
+                tracing::info!(
+                    target: "based_rollup::discover",
+                    iteration,
+                    ci,
+                    delivery_failed = c.delivery_failed,
+                    delivery_data_len = c.delivery_return_data.len(),
+                    "post-enrichment call state"
+                );
+            }
 
             // Direction-specific: build the retrace bundle.
             let bundle = match direction
@@ -150,10 +162,18 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
             };
 
             // Track whether user tx still reverts after entries loaded.
-            user_tx_reverted = user_trace
+            let user_error_str = user_trace
                 .get("error")
                 .and_then(|v| v.as_str())
-                .is_some();
+                .unwrap_or("none");
+            user_tx_reverted = user_error_str != "none";
+            tracing::info!(
+                target: "based_rollup::discover",
+                iteration,
+                user_error = user_error_str,
+                user_tx_reverted,
+                "retrace user tx error status"
+            );
 
             // Walk the retrace for new calls.
             let new_detected = walk_trace_to_discovered(
