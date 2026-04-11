@@ -2252,150 +2252,47 @@ async fn trace_and_detect_internal_calls(
     // as a final positional override before queue_execution_table.
     let mut last_converged_walk: Vec<DiscoveredCall> = Vec::new();
 
-    // Iterative L1 discovery: if the initial trace found cross-chain calls but the
-    // user tx reverted, retrace with entries loaded to discover calls hidden behind
-    // the revert.
+    // Iterative L1 discovery via the unified discover_until_stable engine.
+    // Replaces the inline loop + in_reverted_frame correction block.
+    // discover_until_stable handles both the iterative retrace and
+    // correct_in_reverted_frame internally.
     if top_level_error && !detected_calls.is_empty() {
-        if let Some(builder_key_hex) = &builder_private_key {
-            let key_clean = builder_key_hex
-                .strip_prefix("0x")
-                .unwrap_or(builder_key_hex);
-            if let Ok(signer) = key_clean.parse::<alloy_signer_local::PrivateKeySigner>() {
-                const MAX_L1_DISCOVERY_ITERATIONS: usize = 5;
-                let user_from = from.to_string();
-                let user_to = to.to_string();
-                let user_data = data.to_string();
-                let user_value = value.to_string();
+        use super::direction::{L1ToL2, UserTxContext};
+        use super::sim_client::HttpSimClient;
 
-                for iteration in 1..=MAX_L1_DISCOVERY_ITERATIONS {
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        iteration,
-                        known_calls = detected_calls.len(),
-                        "iterative L1 discovery: retracing user tx with postBatch entries"
-                    );
-
-                    let trace_result = build_and_run_l1_postbatch_trace(
-                        client,
-                        l1_rpc_url,
-                        rollups_address,
-                        rollup_id,
-                        &signer,
-                        &detected_calls,
-                        &user_from,
-                        &user_to,
-                        &user_data,
-                        &user_value,
-                        &format!("l1-discovery-iter-{iteration}"),
-                    )
-                    .await;
-
-                    let Some((user_trace, _full_resp)) = trace_result else {
-                        tracing::warn!(
-                            target: "based_rollup::l1_proxy",
-                            iteration,
-                            "iterative L1 discovery: traceCallMany failed — stopping"
-                        );
-                        break;
-                    };
-
-                    // Walk the retrace for new cross-chain calls.
-                    let new_detected = walk_l1_trace_generic(
-                        client,
-                        l1_rpc_url,
-                        rollups_address,
-                        &user_trace,
-                        &mut proxy_cache,
-                    )
-                    .await;
-
-                    // Find truly new calls (not already in detected_calls).
-                    // Use iter().cloned() to preserve new_detected for saving.
-                    let truly_new: Vec<_> = new_detected
-                        .iter()
-                        .filter(|new_call| {
-                            !detected_calls.iter().any(|existing| {
-                                existing.destination == new_call.destination
-                                    && existing.calldata == new_call.calldata
-                                    && existing.value == new_call.value
-                                    && existing.source_address == new_call.source_address
-                            })
-                        })
-                        .cloned()
-                        .collect();
-
-                    if truly_new.is_empty() {
-                        // Save first loop retrace for early in_reverted_frame correction.
-                        last_converged_walk = new_detected;
-                        tracing::info!(
-                            target: "based_rollup::l1_proxy",
-                            iteration,
-                            total = detected_calls.len(),
-                            "iterative L1 discovery converged — no new calls"
-                        );
-                        break;
-                    }
-
-                    tracing::info!(
-                        target: "based_rollup::l1_proxy",
-                        iteration,
-                        new_count = truly_new.len(),
-                        "iterative L1 discovery found new cross-chain calls"
-                    );
-                    detected_calls.extend(truly_new);
-                }
+        let direction = L1ToL2 {
+            l2_ccm: cross_chain_manager_address,
+            l1_ccm: rollups_address,
+            rollup_id,
+            builder_key: {
+                let key_hex = builder_private_key.as_deref().unwrap_or("");
+                let key_clean = key_hex.strip_prefix("0x").unwrap_or(key_hex);
+                key_clean.parse::<alloy_signer_local::PrivateKeySigner>()
+                    .unwrap_or_else(|_| alloy_signer_local::PrivateKeySigner::random())
+            },
+            client: client.clone(),
+            l1_rpc_url: l1_rpc_url.to_string(),
+        };
+        let sim = HttpSimClient::new(client.clone(), l1_rpc_url.to_string(), l2_rpc_url.to_string());
+        let lookup = L1ProxyLookup { client, rpc_url: l1_rpc_url, rollups_address };
+        let user_tx = UserTxContext {
+            from: from.to_string(), to: to.to_string(),
+            data: data.to_string(), value: value.to_string(),
+            raw_tx_bytes: vec![], // L1→L2 doesn't need raw tx bytes for enrichment
+        };
+        match super::discover::discover_until_stable(
+            &direction, &sim, &trace_result, &user_tx, &lookup, &mut proxy_cache,
+            Some(detected_calls.clone()),
+        ).await {
+            Ok(discovered) => {
+                detected_calls = discovered.calls;
+                // last_converged_walk stays empty — discover_until_stable handles
+                // in_reverted_frame internally via correct_in_reverted_frame
             }
-        }
-    }
-
-    // Early in_reverted_frame correction from the first loop's converged retrace.
-    // Must happen BEFORE enrichment because the enrichment skip (partial revert)
-    // needs correct in_reverted_frame values.
-    if !last_converged_walk.is_empty() && last_converged_walk.len() == detected_calls.len() {
-        // Property-based matching with count pairing: for each unique
-        // (dest, calldata, value, source, depth) tuple, match the Nth occurrence
-        // in detected_calls with the Nth occurrence in last_converged_walk.
-        // This is safe even when identical calls exist (e.g., CallTwice) because
-        // the count-based pairing preserves occurrence order.
-        let mut consumed: std::collections::HashMap<
-            (Address, Vec<u8>, U256, Address, usize),
-            usize,
-        > = std::collections::HashMap::new();
-        for existing in detected_calls.iter_mut() {
-            let key = (
-                existing.destination,
-                existing.calldata.clone(),
-                existing.value,
-                existing.source_address,
-                existing.trace_depth,
-            );
-            let idx = consumed.entry(key.clone()).or_insert(0);
-            // Find the Nth matching call in last_converged_walk
-            let mut count = 0usize;
-            for retrace in &last_converged_walk {
-                if retrace.destination == key.0
-                    && retrace.calldata == key.1
-                    && retrace.value == key.2
-                    && retrace.source_address == key.3
-                    && retrace.trace_depth == key.4
-                {
-                    if count == *idx {
-                        if existing.in_reverted_frame != retrace.in_reverted_frame {
-                            tracing::debug!(
-                                target: "based_rollup::l1_proxy",
-                                dest = %existing.destination,
-                                old = existing.in_reverted_frame,
-                                new = retrace.in_reverted_frame,
-                                "early in_reverted_frame correction (before enrichment)"
-                            );
-                            existing.in_reverted_frame = retrace.in_reverted_frame;
-                        }
-                        break;
-                    }
-                    count += 1;
-                }
+            Err(e) => {
+                tracing::warn!(target: "based_rollup::l1_proxy", %e,
+                    "discover_until_stable failed — proceeding with initial calls");
             }
-            *idx += 1;
         }
     }
 
