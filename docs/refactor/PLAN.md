@@ -1079,12 +1079,12 @@ Mechanical movement.
 | 3 | 3.5 | build_queue_payload (uses 1.4b enums) | dedicated | ✅ (N/A — queue construction lives in rpc.rs from 1.4b, not composer) | — |
 | 3 | 3.6 | SimulationPlan enum + simulate_delivery() function | dedicated | ✅ (SimulationPlan + simulation_plan_for + 4 tests; execution stubs deferred) | #17, #21 |
 | 3 | 3.7 | directions as thin adapters | dedicated | ✅ (l1_to_l2/mod.rs 638 LOC, l2_to_l1/mod.rs 752 LOC — both <800; discovery wired, delivery extracted, directory split) | — |
-| 4 | 4.1 | composer_rpc split | dedicated | ⏸ deferred | — |
-| 4 | 4.2 | generic server.rs | incremental | ⏸ deferred | — |
-| 4 | 4.3 | tx_codec.rs | incremental | ⏸ deferred | — |
+| 4 | 4.1 | composer_rpc split | dedicated | ✅ (done in Phase 3: l1_to_l2/ and l2_to_l1/ directory modules) | — |
+| 4 | 4.2 | generic server.rs | incremental | ✅ (N/A — HTTP handlers are thin enough in mod.rs; common.rs has shared helpers) | — |
+| 4 | 4.3 | tx_codec.rs | incremental | ✅ (N/A — tx decode helpers are L1→L2 specific, no duplication to extract) | — |
 | 4 | 4.4 | selectors in cross_chain.rs (chosen owner) + CI grep gate | incremental | ✅ (CI gate; codebase was already clean) | #23 |
-| 4 | 4.5 | ⭐ trace split + typed structs (ex-5.2 merged) | dedicated | ✅ (CallTraceNode #[derive(Deserialize)] + helper methods; parse_trace_node migrated; full trace split deferred) | — |
-| 4 | 4.6 | entry_builder.rs (façade over 1.9) | dedicated | ⏸ deferred | — |
+| 4 | 4.5 | ⭐ trace split + typed structs (ex-5.2 merged) | dedicated | ✅ (trace/ directory: types.rs, walker.rs, proxy.rs + CallTraceNode typed struct) | — |
+| 4 | 4.6 | entry_builder.rs (façade over 1.9) | dedicated | ⏸ deferred (25 call sites across 6 files — convenience layer, not structural) | — |
 | 5 | 5.1 | remove residual unwraps | incremental | ✅ | — |
 | 5 | 5.4 | proptest / fuzz | incremental | ✅ (4 proptest for model.rs: rebase, dedup, correct_reverted_frame; existing proptests for partition_entries + prefix counting already in cross_chain_tests + derivation_tests) | — |
 | 5 | 5.7 | replay baseline gate vs 0.8 | dedicated | ⏸ deferred | blocks merge to main |
