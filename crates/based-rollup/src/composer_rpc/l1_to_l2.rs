@@ -2244,14 +2244,6 @@ async fn trace_and_detect_internal_calls(
     )
     .await;
 
-    // Track the last converged retrace walk for in_reverted_frame correction.
-    // The initial trace (without entries) sets ALL calls to in_reverted_frame=true
-    // (whole tx reverts). The converged retrace (entries loaded) reflects the REAL
-    // trace behavior: only calls inside try/catch that reverts for business logic
-    // have in_reverted_frame=true. We save at the SECOND loop convergence and apply
-    // as a final positional override before queue_execution_table.
-    let mut last_converged_walk: Vec<DiscoveredCall> = Vec::new();
-
     // Iterative L1 discovery via the unified discover_until_stable engine.
     // Replaces the inline loop + in_reverted_frame correction block.
     // discover_until_stable handles both the iterative retrace and
@@ -2295,6 +2287,61 @@ async fn trace_and_detect_internal_calls(
             }
         }
     }
+
+    process_l1_to_l2_calls(
+        client,
+        l1_rpc_url,
+        l2_rpc_url,
+        raw_tx,
+        rollups_address,
+        &builder_private_key,
+        rollup_id,
+        cross_chain_manager_address,
+        from,
+        to,
+        data,
+        value,
+        top_level_error,
+        &mut detected_calls,
+        &mut proxy_cache,
+    )
+    .await
+}
+
+/// Post-discovery processing for L1→L2 cross-chain calls.
+///
+/// Takes the detected calls from the trace/walk/discover phase and:
+/// 1. Enriches each call with L2 return data via chained simulation
+/// 2. Discovers child L2→L1 calls (nested L1→L2→L1 pattern)
+/// 3. Runs iterative discovery via `debug_traceCallMany` with `postBatch` pre-loading
+/// 4. Performs post-convergence bottom-up enrichment for reentrant patterns
+/// 5. Applies final `in_reverted_frame` correction
+/// 6. Queues the execution table on L2
+#[allow(clippy::too_many_arguments)]
+async fn process_l1_to_l2_calls(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    l2_rpc_url: &str,
+    raw_tx: &str,
+    rollups_address: Address,
+    builder_private_key: &Option<String>,
+    rollup_id: u64,
+    cross_chain_manager_address: Address,
+    from: &str,
+    to: &str,
+    data: &str,
+    value: &str,
+    top_level_error: bool,
+    detected_calls: &mut Vec<DiscoveredCall>,
+    proxy_cache: &mut HashMap<Address, Option<super::trace::ProxyInfo>>,
+) -> eyre::Result<Option<String>> {
+    // Track the last converged retrace walk for in_reverted_frame correction.
+    // The initial trace (without entries) sets ALL calls to in_reverted_frame=true
+    // (whole tx reverts). The converged retrace (entries loaded) reflects the REAL
+    // trace behavior: only calls inside try/catch that reverts for business logic
+    // have in_reverted_frame=true. We save at the SECOND loop convergence and apply
+    // as a final positional override before queue_execution_table.
+    let mut last_converged_walk: Vec<DiscoveredCall> = Vec::new();
 
     // Enrich detected calls with L2 return data by simulating each L1→L2 call
     // on L2.
@@ -2600,7 +2647,7 @@ async fn trace_and_detect_internal_calls(
     // with debug_traceCallMany. Load entries via postBatch in tx1, run user tx as
     // tx2 to see ALL calls that would succeed once entries are on-chain.
     if top_level_error && !detected_calls.is_empty() {
-        if let Some(ref builder_key_hex) = builder_private_key {
+        if let Some(builder_key_hex) = builder_private_key {
             let key_hex = builder_key_hex
                 .strip_prefix("0x")
                 .unwrap_or(builder_key_hex);
@@ -2742,7 +2789,7 @@ async fn trace_and_detect_internal_calls(
                         l1_rpc_url,
                         rollups_address,
                         user_trace,
-                        &mut proxy_cache,
+                        proxy_cache,
                     )
                     .await;
 
@@ -3159,7 +3206,7 @@ async fn trace_and_detect_internal_calls(
                         after = all_calls.len(),
                         "iterative traceCallMany discovery found additional calls"
                     );
-                    detected_calls = all_calls;
+                    *detected_calls = all_calls;
                 }
 
                 // ══════════════════════════════════════════════════════════
@@ -3424,7 +3471,7 @@ async fn trace_and_detect_internal_calls(
                                 rollups_address,
                                 rollup_id,
                                 &builder_key,
-                                &detected_calls,
+                                detected_calls,
                                 from,
                                 to,
                                 data,
@@ -3845,7 +3892,7 @@ async fn trace_and_detect_internal_calls(
         client,
         l2_rpc_url,
         raw_tx,
-        &detected_calls,
+        detected_calls,
         effective_gas_price,
     )
     .await
