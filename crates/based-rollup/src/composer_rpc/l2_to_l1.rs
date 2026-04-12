@@ -3709,6 +3709,57 @@ async fn trace_and_detect_l2_internal_calls(
         }
     }
 
+
+    process_l2_to_l1_calls(
+        client,
+        upstream_url,
+        raw_tx_hex,
+        l1_rpc_url,
+        rollups_address,
+        builder_address,
+        builder_private_key,
+        rollup_id,
+        cross_chain_manager_address,
+        &mut detected_calls,
+        &early_return_calls,
+        &tx_bytes,
+        sender,
+        to_addr,
+        value,
+        input,
+        top_level_error,
+        last_user_trace_had_error,
+    )
+    .await
+}
+
+/// Post-discovery processing: compute tx outcome, verify return calls via
+/// retrace, then route through the appropriate queuing path (partial revert,
+/// duplicate, multi-call, single-call with depth, or simple single-call).
+///
+/// Separated from `trace_and_detect_l2_internal_calls` for readability.
+/// The logic and behavior are identical — this is a purely mechanical extraction.
+#[allow(clippy::too_many_arguments)]
+async fn process_l2_to_l1_calls(
+    client: &reqwest::Client,
+    upstream_url: &str,
+    raw_tx_hex: &str,
+    l1_rpc_url: &str,
+    rollups_address: Address,
+    builder_address: Address,
+    builder_private_key: Option<&str>,
+    rollup_id: u64,
+    cross_chain_manager_address: Address,
+    detected_calls: &mut Vec<DiscoveredCall>,
+    early_return_calls: &[ReturnEdge],
+    tx_bytes: &[u8],
+    sender: Address,
+    to_addr: Address,
+    value: U256,
+    input: &[u8],
+    top_level_error: bool,
+    last_user_trace_had_error: bool,
+) -> bool {
     // Detect persistent revert: if the L2 tx STILL reverts after loading all entries,
     // the revert is from business logic (not missing entries). The L1 entries need
     // REVERT/REVERT_CONTINUE to undo cross-chain effects (§D.12 atomicity).
@@ -3786,7 +3837,7 @@ async fn trace_and_detect_l2_internal_calls(
             let continuation = crate::table_builder::build_l2_to_l1_continuation_entries(
                 &analyzed,
                 crate::cross_chain::RollupId::new(U256::from(rollup_id)),
-                &tx_bytes,
+                tx_bytes,
                 tx_outcome,
             );
 
@@ -3851,7 +3902,7 @@ async fn trace_and_detect_l2_internal_calls(
                                 .await;
 
                                 let truly_new =
-                                    filter_new_by_count(new_detected, &detected_calls, |a, b| {
+                                    filter_new_by_count(new_detected, detected_calls, |a, b| {
                                         a.destination == b.destination
                                             && a.calldata == b.calldata
                                             && a.value == b.value
@@ -3900,8 +3951,8 @@ async fn trace_and_detect_l2_internal_calls(
             client,
             upstream_url,
             raw_tx_hex,
-            &detected_calls,
-            &early_return_calls,
+            detected_calls,
+            early_return_calls,
             rollup_id,
             tx_outcome,
         )
@@ -3953,7 +4004,7 @@ async fn trace_and_detect_l2_internal_calls(
                 first.destination,
                 &first.calldata,
                 first.value,
-                &tx_bytes,
+                tx_bytes,
                 &root_scope,
                 &first.delivery_return_data,
                 first.delivery_failed,
@@ -4072,7 +4123,7 @@ async fn trace_and_detect_l2_internal_calls(
                 client,
                 upstream_url,
                 raw_tx_hex,
-                &detected_calls,
+                detected_calls,
                 &all_return_calls,
                 rollup_id,
                 tx_outcome,
@@ -4090,7 +4141,7 @@ async fn trace_and_detect_l2_internal_calls(
                 l1_rpc_url,
                 upstream_url,
                 raw_tx_hex,
-                &detected_calls,
+                detected_calls,
                 rollups_address,
                 rollup_id,
                 tx_outcome,
@@ -4114,7 +4165,7 @@ async fn trace_and_detect_l2_internal_calls(
         let mut all_detected_l2_calls = detected_calls.clone();
         // Seed with return calls already discovered during L2 iterative discovery.
         // This avoids redundant rediscovery in Phase A's first iteration.
-        let mut all_return_calls: Vec<ReturnEdge> = early_return_calls.clone();
+        let mut all_return_calls: Vec<ReturnEdge> = early_return_calls.to_vec();
         if !all_return_calls.is_empty() {
             tracing::info!(
                 target: "based_rollup::proxy",
@@ -4137,7 +4188,7 @@ async fn trace_and_detect_l2_internal_calls(
                 builder_private_key,
                 rollup_id,
                 &call_refs,
-                &tx_bytes,
+                tx_bytes,
             )
             .await;
 
@@ -4271,7 +4322,7 @@ async fn trace_and_detect_l2_internal_calls(
         call.destination,
         &call.calldata,
         call.value,
-        &tx_bytes,
+        tx_bytes,
         &root_scope,
         &call.delivery_return_data,
         call.delivery_failed,
@@ -4356,7 +4407,7 @@ async fn trace_and_detect_l2_internal_calls(
                     builder_private_key,
                     rollup_id,
                     &call_refs,
-                    &tx_bytes,
+                    tx_bytes,
                 )
                 .await;
 
@@ -4672,6 +4723,7 @@ async fn trace_and_detect_l2_internal_calls(
 
     false
 }
+
 
 /// Simulate L1→L2 return calls on L2 to detect further L2→L1 calls (depth > 1).
 ///
