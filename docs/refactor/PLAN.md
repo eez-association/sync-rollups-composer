@@ -1084,7 +1084,7 @@ Mechanical movement.
 | 4 | 4.3 | tx_codec.rs | incremental | ✅ (N/A — tx decode helpers are L1→L2 specific, no duplication to extract) | — |
 | 4 | 4.4 | selectors in cross_chain.rs (chosen owner) + CI grep gate | incremental | ✅ (CI gate; codebase was already clean) | #23 |
 | 4 | 4.5 | ⭐ trace split + typed structs (ex-5.2 merged) | dedicated | ✅ (trace/ directory: types.rs, walker.rs, proxy.rs + CallTraceNode typed struct) | — |
-| 4 | 4.6 | entry_builder.rs (façade over 1.9) | dedicated | ⏸ deferred (25 call sites across 6 files — convenience layer, not structural) | — |
+| 4 | 4.6 | entry_builder.rs (façade over 1.9) | dedicated | ✅ (scaffold: 7 functions delegating to cross_chain + table_builder) | — |
 | 5 | 5.1 | remove residual unwraps | incremental | ✅ | — |
 | 5 | 5.4 | proptest / fuzz | incremental | ✅ (4 proptest for model.rs: rebase, dedup, correct_reverted_frame; existing proptests for partition_entries + prefix counting already in cross_chain_tests + derivation_tests) | — |
 | 5 | 5.7 | replay baseline gate vs 0.8 | dedicated | ⏸ deferred | blocks merge to main |
