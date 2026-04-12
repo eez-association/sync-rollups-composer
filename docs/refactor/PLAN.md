@@ -1078,7 +1078,7 @@ Mechanical movement.
 | 3 | 3.4 | discover_until_stable (complete spec) | dedicated | ✅ (skeleton: discover.rs + model helpers + Direction hooks; caller migration pending) | — |
 | 3 | 3.5 | build_queue_payload (uses 1.4b enums) | dedicated | ✅ (N/A — queue construction lives in rpc.rs from 1.4b, not composer) | — |
 | 3 | 3.6 | SimulationPlan enum + simulate_delivery() function | dedicated | ✅ (SimulationPlan + simulation_plan_for + 4 tests; execution stubs deferred) | #17, #21 |
-| 3 | 3.7 | directions as thin adapters | dedicated | 🔄 in progress (3.7a-e ✅: proxies, walks, types, both retrace bundles, enrichment hook; wiring discover_until_stable into callers + delivery sim remaining) | — |
+| 3 | 3.7 | directions as thin adapters | dedicated | ✅ (l1_to_l2/mod.rs 638 LOC, l2_to_l1/mod.rs 752 LOC — both <800; discovery wired, delivery extracted, directory split) | — |
 | 4 | 4.1 | composer_rpc split | dedicated | ⏸ deferred | — |
 | 4 | 4.2 | generic server.rs | incremental | ⏸ deferred | — |
 | 4 | 4.3 | tx_codec.rs | incremental | ⏸ deferred | — |
