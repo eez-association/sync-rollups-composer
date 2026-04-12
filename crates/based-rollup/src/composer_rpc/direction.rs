@@ -451,7 +451,7 @@ impl Direction for L2ToL1 {
             if needs_full_sim {
                 let scope = vec![alloy_primitives::U256::ZERO; call.trace_depth.max(1)];
                 if let Some((ret_data, failed, return_calls)) =
-                    super::l2_to_l1::simulate_l1_delivery(
+                    super::delivery::simulate_l1_delivery(
                         &self.client,
                         &self.l1_rpc_url,
                         &self.l2_rpc_url,

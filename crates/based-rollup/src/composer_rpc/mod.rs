@@ -8,6 +8,7 @@
 //! Shared utilities in `common` and generic trace-based detection in `trace`.
 
 pub mod common;
+pub mod delivery;
 pub mod direction;
 pub mod discover;
 pub mod l1_to_l2;
