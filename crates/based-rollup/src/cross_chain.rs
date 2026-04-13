@@ -679,6 +679,71 @@ impl std::fmt::Display for ActionHash {
 }
 
 // ──────────────────────────────────────────────
+//  ConsumedPrefix newtype (refactor PLAN step 0.3 / Phase 6)
+//
+//  Zero-cost wrapper around `usize` representing the number of
+//  consecutive trigger transactions from the start of a block whose
+//  entries were fully consumed on L1. Closes invariants #4 and #16:
+//
+//  - #4: §4f filtering is per-call prefix counting, never
+//        all-or-nothing. The newtype makes the semantic "prefix count"
+//        distinct from generic `usize` values (e.g. array lengths,
+//        block numbers, indices) that callers might accidentally mix.
+//  - #16: §4f filtering is generic (CrossChainCallExecuted events),
+//        not Bridge selectors. The `ConsumedPrefix` is produced
+//        exclusively by `compute_consumed_trigger_prefix` which uses
+//        `ExecutionConsumed` events — no selector dependency.
+//
+//  ## Why a newtype instead of bare `usize`
+//
+//  Both call sites in `driver/verify.rs` previously received a bare
+//  `usize` and immediately compared it against `trigger_indices.len()`.
+//  Without the wrapper, nothing prevented a caller from passing, say,
+//  `total_triggers` instead of `consumed_count` into
+//  `filter_block_by_trigger_prefix`. With `ConsumedPrefix`, the type
+//  is self-documenting and requires an explicit `.as_usize()` to
+//  escape.
+// ──────────────────────────────────────────────
+
+/// The number of consecutive trigger transactions, counted from the
+/// front of a block's trigger list, whose entries were fully consumed
+/// on L1. Produced by [`compute_consumed_trigger_prefix`].
+///
+/// Invariants:
+/// - `0 <= value <= trigger_tx_indices.len()` — bounded by input.
+/// - Monotonic in the L1 consumed map — more entries available ≥ more consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConsumedPrefix(usize);
+
+impl ConsumedPrefix {
+    /// Construct a new `ConsumedPrefix`. Only called by
+    /// `compute_consumed_trigger_prefix`; callers outside
+    /// `cross_chain` cannot fabricate values without going
+    /// through the function that enforces prefix semantics.
+    pub(crate) fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// Read-only access to the underlying count. Used at comparison
+    /// and arithmetic boundaries in `driver/verify.rs`.
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+
+    /// Whether zero triggers were consumed (i.e. the very first trigger
+    /// was not present in the L1 consumed map).
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::fmt::Display for ConsumedPrefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ──────────────────────────────────────────────
 //  ParentLink + AbsoluteCallIndex (refactor PLAN step 1.3)
 //
 //  Two zero-cost wrappers that replace the `parent_call_index:
@@ -3352,14 +3417,14 @@ pub fn compute_consumed_trigger_prefix(
     ccm_address: Address,
     l1_consumed_remaining: &mut std::collections::HashMap<ActionHash, usize>,
     trigger_tx_indices: &[usize],
-) -> usize {
+) -> ConsumedPrefix {
     let sig = execution_consumed_signature_hash();
     let mut consumed_count: usize = 0;
 
     for &tx_idx in trigger_tx_indices {
         let receipt = match receipts.get(tx_idx) {
             Some(r) => r,
-            None => return consumed_count,
+            None => return ConsumedPrefix::new(consumed_count),
         };
 
         // Collect all actionHashes from ExecutionConsumed events in this tx's receipt
@@ -3377,7 +3442,7 @@ pub fn compute_consumed_trigger_prefix(
         if action_hashes.is_empty() {
             // This trigger tx had no ExecutionConsumed events — should not happen
             // for a properly identified trigger, but stop defensively.
-            return consumed_count;
+            return ConsumedPrefix::new(consumed_count);
         }
 
         // Check that ALL action hashes have remaining > 0 in the L1 map.
@@ -3388,7 +3453,7 @@ pub fn compute_consumed_trigger_prefix(
             .all(|hash| l1_consumed_remaining.get(hash).copied().unwrap_or(0) > 0);
 
         if !all_available {
-            return consumed_count;
+            return ConsumedPrefix::new(consumed_count);
         }
 
         // All passed — decrement counters
@@ -3401,7 +3466,7 @@ pub fn compute_consumed_trigger_prefix(
         consumed_count += 1;
     }
 
-    consumed_count
+    ConsumedPrefix::new(consumed_count)
 }
 
 /// Assign chained state deltas to L1 deferred entries using the intermediate root chain.

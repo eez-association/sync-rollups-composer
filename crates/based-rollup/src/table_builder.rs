@@ -1214,6 +1214,116 @@ pub struct L2ToL1ContinuationEntries {
     pub l1_entries: Vec<CrossChainExecutionEntry>,
 }
 
+// ──────────────────────────────────────────────
+//  L2ToL1ContinuationBuilder (refactor PLAN invariant #12)
+//
+//  Scaffold builder that enforces: L2→L1 multi-call continuations
+//  MUST have scope navigation (callReturn with a scope path) on
+//  at least one entry. Without it, tokens burned by bridgeTokens
+//  on L2 never return — the flash loan can't be repaid.
+//
+//  ## Usage (incremental migration)
+//
+//  Callers can migrate from direct `L2ToL1ContinuationEntries`
+//  construction to this builder at their own pace. The `build()`
+//  method panics if `with_scope_return` was never called, making
+//  the invariant a hard runtime guarantee caught by any test that
+//  exercises multi-call L2→L1 continuations.
+//
+//  ## Why assert! instead of compile-time
+//
+//  True compile-time enforcement would require a typestate pattern
+//  (`L2ToL1ContinuationBuilder<NoScope>` →
+//  `L2ToL1ContinuationBuilder<HasScope>`). That is deferred to
+//  Phase 1.9c proper; this Phase 6 scaffold uses `assert!` so
+//  that existing callers (which correctly set scope) do not need
+//  immediate refactoring, while NEW callers get a panic if they
+//  forget.
+// ──────────────────────────────────────────────
+
+/// Builder for L2→L1 continuation entry lists that enforces mandatory
+/// scope navigation (invariant #12).
+///
+/// # Panics
+///
+/// [`L2ToL1ContinuationBuilder::build`] panics if
+/// [`L2ToL1ContinuationBuilder::with_scope_return`] was never called.
+#[derive(Debug, Clone)]
+pub struct L2ToL1ContinuationBuilder {
+    l2_entries: Vec<CrossChainExecutionEntry>,
+    l1_entries: Vec<CrossChainExecutionEntry>,
+    scope_return: Option<ScopePath>,
+}
+
+impl Default for L2ToL1ContinuationBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl L2ToL1ContinuationBuilder {
+    /// Create a new empty builder.
+    pub fn new() -> Self {
+        Self {
+            l2_entries: vec![],
+            l1_entries: vec![],
+            scope_return: None,
+        }
+    }
+
+    /// Declare the scope return path for the continuation's callReturn
+    /// entry. This MUST be called before `build()`.
+    pub fn with_scope_return(mut self, scope: ScopePath) -> Self {
+        self.scope_return = Some(scope);
+        self
+    }
+
+    /// Append an L2 table entry.
+    pub fn add_l2_entry(mut self, entry: CrossChainExecutionEntry) -> Self {
+        self.l2_entries.push(entry);
+        self
+    }
+
+    /// Append an L1 deferred entry.
+    pub fn add_l1_entry(mut self, entry: CrossChainExecutionEntry) -> Self {
+        self.l1_entries.push(entry);
+        self
+    }
+
+    /// Bulk-set L2 entries (replaces any previously added).
+    pub fn with_l2_entries(mut self, entries: Vec<CrossChainExecutionEntry>) -> Self {
+        self.l2_entries = entries;
+        self
+    }
+
+    /// Bulk-set L1 entries (replaces any previously added).
+    pub fn with_l1_entries(mut self, entries: Vec<CrossChainExecutionEntry>) -> Self {
+        self.l1_entries = entries;
+        self
+    }
+
+    /// Consume the builder and return `L2ToL1ContinuationEntries`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `with_scope_return` was never called — invariant #12
+    /// requires that multi-call L2→L1 continuations always declare
+    /// scope navigation so assets can be returned within the same tx.
+    pub fn build(self) -> L2ToL1ContinuationEntries {
+        assert!(
+            self.scope_return.is_some(),
+            "L2ToL1ContinuationBuilder: scope_return is MANDATORY (invariant #12). \
+             Multi-call L2→L1 continuations MUST use scope navigation on at least one \
+             entry so that assets (e.g., tokens burned by bridgeTokens) are returned \
+             within the same transaction."
+        );
+        L2ToL1ContinuationEntries {
+            l2_entries: self.l2_entries,
+            l1_entries: self.l1_entries,
+        }
+    }
+}
+
 /// Analyze L2→L1 calls and L1→L2 return calls to discover the continuation pattern
 /// for L2→L1 multi-call continuations (the mirror of `analyze_continuation_calls`).
 ///

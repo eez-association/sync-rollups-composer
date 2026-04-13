@@ -896,7 +896,7 @@ mod filtering_invariants_tests {
         let receipts: Vec<alloy_consensus::Receipt<alloy_primitives::Log>> = vec![];
         let mut map = std::collections::HashMap::new();
         let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[]);
-        assert_eq!(k, 0);
+        assert_eq!(k.as_usize(), 0);
     }
 
     #[test]
@@ -916,7 +916,7 @@ mod filtering_invariants_tests {
         map.insert(h3, 1);
 
         let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0, 1, 2]);
-        assert_eq!(k, 3, "all 3 trigger txs should be consumed");
+        assert_eq!(k.as_usize(), 3, "all 3 trigger txs should be consumed");
         // The map is decremented to 0 for each consumed hash.
         assert_eq!(map[&h1], 0);
         assert_eq!(map[&h2], 0);
@@ -943,7 +943,7 @@ mod filtering_invariants_tests {
         map.insert(h3, 1); // present but unreachable due to prefix counting
 
         let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0, 1, 2]);
-        assert_eq!(k, 1, "prefix should stop at the second trigger (h2 missing)");
+        assert_eq!(k.as_usize(), 1, "prefix should stop at the second trigger (h2 missing)");
         // h1 was consumed, h3 must remain UN-decremented (prefix counting,
         // never all-or-nothing).
         assert_eq!(map[&h1], 0);
@@ -964,7 +964,7 @@ mod filtering_invariants_tests {
         // hb intentionally missing.
 
         let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0]);
-        assert_eq!(k, 0, "any missing hash within a tx rejects the tx");
+        assert_eq!(k.as_usize(), 0, "any missing hash within a tx rejects the tx");
         assert_eq!(
             map[&ha], 1,
             "ha must NOT be decremented when the tx as a whole is rejected"
@@ -992,7 +992,7 @@ mod filtering_invariants_tests {
         let total_before: usize = map.values().sum();
         let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0, 1, 2]);
         let total_after: usize = map.values().sum();
-        assert_eq!(k, 2);
+        assert_eq!(k.as_usize(), 2);
         assert_eq!(
             total_before - total_after,
             2,
@@ -1129,10 +1129,10 @@ mod filtering_invariants_tests {
                 let k = compute_consumed_trigger_prefix(
                     &receipts, ccm, &mut map, &trigger_indices,
                 );
-                prop_assert!(k <= trigger_count);
+                prop_assert!(k.as_usize() <= trigger_count);
                 // The prefix never exceeds the number of consecutive
                 // populated hashes from the start.
-                prop_assert!(k <= (map_population as usize).min(trigger_count));
+                prop_assert!(k.as_usize() <= (map_population as usize).min(trigger_count));
             }
 
             /// `compute_consumed_trigger_prefix` is monotonic in the map: if
@@ -1179,6 +1179,7 @@ mod filtering_invariants_tests {
                 // Adding more entries to the map never *decreases* the
                 // accepted prefix.
                 prop_assert!(k_full >= k_partial);
+                // ConsumedPrefix comparison works via PartialOrd derive.
             }
 
             /// `filter_block_by_trigger_prefix` preserves all non-trigger txs

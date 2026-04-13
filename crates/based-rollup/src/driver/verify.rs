@@ -399,7 +399,7 @@ where
         // (decrements counters as it walks), and we don't want to affect the
         // derivation's shared state.
         let mut l1_remaining = filtering.l1_consumed_remaining.clone();
-        let consumed_count = crate::cross_chain::compute_consumed_trigger_prefix(
+        let consumed = crate::cross_chain::compute_consumed_trigger_prefix(
             &receipts,
             self.config.cross_chain_manager_address,
             &mut l1_remaining,
@@ -407,6 +407,7 @@ where
         );
 
         let total_triggers = trigger_indices.len();
+        let consumed_count = consumed.as_usize();
         let unconsumed_count = total_triggers.saturating_sub(consumed_count);
 
         info!(
@@ -532,7 +533,7 @@ where
 
         // Step 5: Compute consumed trigger prefix using L1 consumed map.
         let mut l1_remaining = filtering.l1_consumed_remaining.clone();
-        let consumed_count = crate::cross_chain::compute_consumed_trigger_prefix(
+        let consumed = crate::cross_chain::compute_consumed_trigger_prefix(
             &receipts,
             self.config.cross_chain_manager_address,
             &mut l1_remaining,
@@ -540,6 +541,7 @@ where
         );
 
         let total_triggers = trigger_indices.len();
+        let consumed_count = consumed.as_usize();
         let unconsumed_count = total_triggers.saturating_sub(consumed_count);
 
         info!(
