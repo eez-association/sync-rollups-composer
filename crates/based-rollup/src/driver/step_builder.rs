@@ -687,12 +687,15 @@ where
 
         // --- L1→L2 queue (deposits, cross-chain calls) ---
         {
-            let mut queue = self
-                .queued_cross_chain_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if !queue.is_empty() {
-                let mut calls: Vec<_> = queue.drain(..).collect();
+            let drained = self.queued_cross_chain_calls.drain_pending(500);
+            if !drained.is_empty() {
+                // Remove drained receipts from the queue (fire-and-forget;
+                // confirm/wait lifecycle is not yet wired for these queues).
+                for (receipt, _) in &drained {
+                    self.queued_cross_chain_calls.remove(receipt);
+                }
+
+                let mut calls: Vec<_> = drained.into_iter().map(|(_, payload)| payload).collect();
                 // Sort by gas price descending — matches L1 miner tx ordering.
                 calls.sort_by(|a, b| {
                     b.effective_gas_price().cmp(&a.effective_gas_price())
@@ -712,7 +715,7 @@ where
                 for call in calls {
                     let is_continuation = call.is_continuation();
                     if is_continuation && had_continuation {
-                        queue.push(call);
+                        self.queued_cross_chain_calls.push(call);
                         continue;
                     }
                     if is_continuation {
@@ -799,12 +802,14 @@ where
         let mut l2_to_l1_for_repush: Vec<crate::rpc::QueuedL2ToL1Call> = Vec::new();
         let mut held_l2_txs: Vec<Bytes> = Vec::new();
         {
-            let mut queue = self
-                .queued_l2_to_l1_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if !queue.is_empty() {
-                let l2_to_l1_calls: Vec<_> = queue.drain(..).collect();
+            let drained = self.queued_l2_to_l1_calls.drain_pending(500);
+            if !drained.is_empty() {
+                // Remove drained receipts (fire-and-forget pattern).
+                for (receipt, _) in &drained {
+                    self.queued_l2_to_l1_calls.remove(receipt);
+                }
+
+                let l2_to_l1_calls: Vec<_> = drained.into_iter().map(|(_, payload)| payload).collect();
                 info!(
                     target: "based_rollup::driver",
                     count = l2_to_l1_calls.len(),
@@ -858,28 +863,20 @@ where
         self.pending_l1
             .truncate_to(rollback.pre_drain_l1_len, rollback.pre_drain_l1_groups);
         if !rollback.calls_for_repush.is_empty() {
-            let mut q = self
-                .queued_cross_chain_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
             warn!(
                 target: "based_rollup::driver",
                 count = rollback.calls_for_repush.len(),
                 "re-pushing cross-chain calls to shared queue after build failure"
             );
-            q.extend(rollback.calls_for_repush);
+            self.queued_cross_chain_calls.push_many(rollback.calls_for_repush);
         }
         if !rollback.l2_to_l1_for_repush.is_empty() {
-            let mut q = self
-                .queued_l2_to_l1_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
             warn!(
                 target: "based_rollup::driver",
                 count = rollback.l2_to_l1_for_repush.len(),
                 "re-pushing L2→L1 calls to shared queue after build failure"
             );
-            q.extend(rollback.l2_to_l1_for_repush);
+            self.queued_l2_to_l1_calls.push_many(rollback.l2_to_l1_for_repush);
         }
     }
 

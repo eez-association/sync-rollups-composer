@@ -632,13 +632,13 @@ pub struct SyncRollupsRpc<Provider> {
     /// Unified queue for cross-chain calls. Each entry bundles the CALL+RESULT
     /// execution entries with the user's gas price and raw L1 tx.
     /// The driver drains, sorts by gas price, then submits to L1.
-    queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>>,
+    queued_cross_chain_calls: crate::entry_queue::EntryQueue<QueuedCrossChainCall>,
     /// Legacy queue for raw signed L1 txs (kept for backward compatibility with
     /// `queueL1ForwardTx` RPC method — the unified path uses `queued_cross_chain_calls`).
     pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
     /// Queue for L2→L1 calls. Each entry bundles L2 table entries and L1
     /// deferred entries. The driver drains these alongside L1→L2 entries (unified roots).
-    queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<QueuedL2ToL1Call>>>,
+    queued_l2_to_l1_calls: crate::entry_queue::EntryQueue<QueuedL2ToL1Call>,
 }
 
 impl<Provider> SyncRollupsRpc<Provider> {
@@ -648,9 +648,9 @@ impl<Provider> SyncRollupsRpc<Provider> {
         evm_config: RollupEvmConfig,
         config: Arc<RollupConfig>,
         synced: Arc<std::sync::atomic::AtomicBool>,
-        queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>>,
+        queued_cross_chain_calls: crate::entry_queue::EntryQueue<QueuedCrossChainCall>,
         pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
-        queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<QueuedL2ToL1Call>>>,
+        queued_l2_to_l1_calls: crate::entry_queue::EntryQueue<QueuedL2ToL1Call>,
     ) -> Self {
         Self {
             provider,
@@ -810,27 +810,21 @@ where
         // data, causing _consumeExecution(resultHash) to revert with
         // ExecutionNotFound. With same-block execution the window is very small
         // (sub-second), but in high-contention scenarios this can still occur.
-        {
-            let mut queue = self
-                .queued_cross_chain_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if queue.len() >= 500 {
-                return Err(ErrorObjectOwned::owned(
-                    -32000,
-                    "cross-chain call queue full",
-                    None::<()>,
-                ));
-            }
-            queue.push(QueuedCrossChainCall::Simple {
-                call_entry,
-                result_entry,
-                effective_gas_price: params.gas_price,
-                raw_l1_tx: params.raw_l1_tx.clone(),
-                tx_reverts: crate::cross_chain::TxOutcome::Success,
-                l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
-            });
+        if self.queued_cross_chain_calls.len() >= 500 {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "cross-chain call queue full",
+                None::<()>,
+            ));
         }
+        self.queued_cross_chain_calls.push(QueuedCrossChainCall::Simple {
+            call_entry,
+            result_entry,
+            effective_gas_price: params.gas_price,
+            raw_l1_tx: params.raw_l1_tx.clone(),
+            tx_reverts: crate::cross_chain::TxOutcome::Success,
+            l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
+        });
 
         // Return the CALL action hash as a tracking identifier.
         Ok(call_id.as_b256())
@@ -943,29 +937,23 @@ where
             "queued L2→L1 cross-chain call"
         );
 
-        {
-            let mut queue = self
-                .queued_l2_to_l1_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if queue.len() >= 100 {
-                return Err(ErrorObjectOwned::owned(
-                    -32000,
-                    "L2→L1 queue full",
-                    None::<()>,
-                ));
-            }
-            queue.push(QueuedL2ToL1Call {
-                l2_table_entries: entries.l2_table_entries,
-                l1_deferred_entries: entries.l1_deferred_entries,
-                user: entries.user,
-                amount: entries.amount,
-                raw_l2_tx: params.raw_l2_tx.clone(),
-                rlp_encoded_tx: params.raw_l2_tx.to_vec(),
-                trigger_count: 1, // Simple L2→L1 call: one executeL2TX
-                tx_reverts: params.tx_reverts,
-            });
+        if self.queued_l2_to_l1_calls.len() >= 100 {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "L2→L1 queue full",
+                None::<()>,
+            ));
         }
+        self.queued_l2_to_l1_calls.push(QueuedL2ToL1Call {
+            l2_table_entries: entries.l2_table_entries,
+            l1_deferred_entries: entries.l1_deferred_entries,
+            user: entries.user,
+            amount: entries.amount,
+            raw_l2_tx: params.raw_l2_tx.clone(),
+            rlp_encoded_tx: params.raw_l2_tx.to_vec(),
+            trigger_count: 1, // Simple L2→L1 call: one executeL2TX
+            tx_reverts: params.tx_reverts,
+        });
 
         Ok(call_id.as_b256())
     }
@@ -1088,45 +1076,39 @@ where
         );
 
         // Queue as a single atomic unit with extra_l2_entries and l1_entries
-        {
-            let mut queue = self
-                .queued_cross_chain_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if queue.len() >= 500 {
-                return Err(ErrorObjectOwned::owned(
-                    -32000,
-                    "cross-chain call queue full",
-                    None::<()>,
-                ));
-            }
-            // Compose the L2 table entry sequence: `call_entry` is the
-            // trigger that `executeIncomingCrossChainCall` consumes,
-            // followed by the continuation entries from the table
-            // builder. The `result_entry` produced alongside `call_entry`
-            // is intentionally DROPPED — this is invariant #6 ("NEVER
-            // include a RESULT table entry when continuation entries are
-            // present"). Including it would conflict on `actionHash` with
-            // the continuation chain's first RESULT and cause
-            // `ExecutionNotFound` on L2. Pre-1.4b this was a runtime
-            // skip in `flush_to_l1`; the enum makes it a compile-time
-            // guarantee by not having a `result_entry` field on this
-            // variant.
-            let _ = result_entry; // explicitly dropped per invariant #6
-            let mut l2_table_entries =
-                Vec::with_capacity(1 + continuation.l2_entries.len());
-            l2_table_entries.push(call_entry);
-            l2_table_entries.extend(continuation.l2_entries);
-
-            queue.push(QueuedCrossChainCall::WithContinuations {
-                l2_table_entries,
-                l1_entries: continuation.l1_entries,
-                effective_gas_price: params.gas_price,
-                raw_l1_tx: params.raw_l1_tx.clone(),
-                tx_reverts: crate::cross_chain::TxOutcome::Success,
-                l1_independent_entries: continuation.l1_independent_entries,
-            });
+        if self.queued_cross_chain_calls.len() >= 500 {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "cross-chain call queue full",
+                None::<()>,
+            ));
         }
+        // Compose the L2 table entry sequence: `call_entry` is the
+        // trigger that `executeIncomingCrossChainCall` consumes,
+        // followed by the continuation entries from the table
+        // builder. The `result_entry` produced alongside `call_entry`
+        // is intentionally DROPPED — this is invariant #6 ("NEVER
+        // include a RESULT table entry when continuation entries are
+        // present"). Including it would conflict on `actionHash` with
+        // the continuation chain's first RESULT and cause
+        // `ExecutionNotFound` on L2. Pre-1.4b this was a runtime
+        // skip in `flush_to_l1`; the enum makes it a compile-time
+        // guarantee by not having a `result_entry` field on this
+        // variant.
+        let _ = result_entry; // explicitly dropped per invariant #6
+        let mut l2_table_entries =
+            Vec::with_capacity(1 + continuation.l2_entries.len());
+        l2_table_entries.push(call_entry);
+        l2_table_entries.extend(continuation.l2_entries);
+
+        self.queued_cross_chain_calls.push(QueuedCrossChainCall::WithContinuations {
+            l2_table_entries,
+            l1_entries: continuation.l1_entries,
+            effective_gas_price: params.gas_price,
+            raw_l1_tx: params.raw_l1_tx.clone(),
+            tx_reverts: crate::cross_chain::TxOutcome::Success,
+            l1_independent_entries: continuation.l1_independent_entries,
+        });
 
         Ok(BuildExecutionTableResult {
             l2_entry_count: l2_count,
@@ -1308,39 +1290,33 @@ where
         // Queue as a QueuedL2ToL1Call with L2 table entries and L1 deferred entries.
         // The L1 deferred entries go to pending_l1_entries in the driver,
         // which handles them via the trigger flow (postBatch + createProxy + trigger).
-        {
-            let mut queue = self
-                .queued_l2_to_l1_calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if queue.len() >= 100 {
-                return Err(ErrorObjectOwned::owned(
-                    -32000,
-                    "L2→L1 queue full",
-                    None::<()>,
-                ));
-            }
-            // L2TX trigger: ONE executeL2TX for the entire chained entry set.
-            // In the chained model, all entries chain from a single L2TX trigger:
-            //   L2TX → CALL(A,scope=[0]) → RESULT → CALL(B,scope=[1]) → RESULT → terminal
-            // The single executeL2TX consumes all entries via scope navigation.
-            // (The old per-call model used N triggers for N separate L2TX entries,
-            // but chaining replaced that with RESULT→CALL links.)
-            queue.push(QueuedL2ToL1Call {
-                l2_table_entries: continuation.l2_entries,
-                l1_deferred_entries: continuation.l1_entries,
-                user: params.l2_calls[0].source_address,
-                amount: params
-                    .l2_calls
-                    .iter()
-                    .map(|c| c.value)
-                    .fold(U256::ZERO, |a, b| a + b),
-                raw_l2_tx: params.raw_l2_tx.clone(),
-                rlp_encoded_tx: params.raw_l2_tx.to_vec(),
-                trigger_count: 1,
-                tx_reverts: params.tx_reverts,
-            });
+        if self.queued_l2_to_l1_calls.len() >= 100 {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "L2→L1 queue full",
+                None::<()>,
+            ));
         }
+        // L2TX trigger: ONE executeL2TX for the entire chained entry set.
+        // In the chained model, all entries chain from a single L2TX trigger:
+        //   L2TX → CALL(A,scope=[0]) → RESULT → CALL(B,scope=[1]) → RESULT → terminal
+        // The single executeL2TX consumes all entries via scope navigation.
+        // (The old per-call model used N triggers for N separate L2TX entries,
+        // but chaining replaced that with RESULT→CALL links.)
+        self.queued_l2_to_l1_calls.push(QueuedL2ToL1Call {
+            l2_table_entries: continuation.l2_entries,
+            l1_deferred_entries: continuation.l1_entries,
+            user: params.l2_calls[0].source_address,
+            amount: params
+                .l2_calls
+                .iter()
+                .map(|c| c.value)
+                .fold(U256::ZERO, |a, b| a + b),
+            raw_l2_tx: params.raw_l2_tx.clone(),
+            rlp_encoded_tx: params.raw_l2_tx.to_vec(),
+            trigger_count: 1,
+            tx_reverts: params.tx_reverts,
+        });
 
         {
             tracing::info!(

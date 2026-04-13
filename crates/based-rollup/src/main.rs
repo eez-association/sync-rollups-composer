@@ -5,6 +5,7 @@
 use based_rollup::RollupConsensusBuilder;
 use based_rollup::config::RollupConfig;
 use based_rollup::driver::Driver;
+use based_rollup::entry_queue::EntryQueue;
 use based_rollup::evm_config::RollupExecutorBuilder;
 use based_rollup::health;
 use based_rollup::rpc::{
@@ -61,8 +62,7 @@ fn main() -> Result<()> {
 
         // Unified queue for cross-chain calls (entry pairs + gas price + raw L1 tx).
         // The RPC pushes calls here; the driver drains, sorts by gas price, then submits.
-        let queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let queued_cross_chain_calls: EntryQueue<QueuedCrossChainCall> = EntryQueue::new();
         let calls_for_rpc = queued_cross_chain_calls.clone();
 
         // Shared queue for raw signed L1 txs to forward after postBatch.
@@ -74,8 +74,7 @@ fn main() -> Result<()> {
         // Shared queue for L2→L1 calls.
         // The L2 composer RPC detects cross-chain calls and queues here;
         // the driver drains alongside L1→L2 entries (unified intermediate roots).
-        let queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<QueuedL2ToL1Call>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let queued_l2_to_l1_calls: EntryQueue<QueuedL2ToL1Call> = EntryQueue::new();
         let l2_to_l1_for_rpc = queued_l2_to_l1_calls.clone();
 
         // Build the node with Ethereum components + our custom consensus

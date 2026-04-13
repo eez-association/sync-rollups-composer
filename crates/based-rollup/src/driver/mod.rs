@@ -92,13 +92,13 @@ pub struct Driver<P, Pool> {
     synced: Arc<std::sync::atomic::AtomicBool>,
     /// Unified queue for cross-chain calls (entry pairs + gas price + raw L1 tx).
     /// The RPC pushes here; the driver drains, sorts by gas price, then submits.
-    queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
+    queued_cross_chain_calls: crate::entry_queue::EntryQueue<crate::rpc::QueuedCrossChainCall>,
     /// Legacy queue for raw signed L1 transactions to forward after `postBatch`.
     /// Kept for backward compatibility with `queueL1ForwardTx` RPC method.
     pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
     /// Queue for L2→L1 calls. The RPC pushes here; the driver drains
     /// into builder_execution_entries alongside L1→L2 entries (unified intermediate roots).
-    queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedL2ToL1Call>>>,
+    queued_l2_to_l1_calls: crate::entry_queue::EntryQueue<crate::rpc::QueuedL2ToL1Call>,
     /// Pending L1 deferred entries + their trigger groups, as a
     /// single atomic unit. See [`PendingL1SubmissionQueue`] for the
     /// structural rationale (closes invariant #11).
@@ -202,9 +202,9 @@ where
         l2_provider: P,
         pool: Pool,
         synced: Arc<std::sync::atomic::AtomicBool>,
-        queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
+        queued_cross_chain_calls: crate::entry_queue::EntryQueue<crate::rpc::QueuedCrossChainCall>,
         pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
-        queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedL2ToL1Call>>>,
+        queued_l2_to_l1_calls: crate::entry_queue::EntryQueue<crate::rpc::QueuedL2ToL1Call>,
     ) -> (Self, watch::Receiver<HealthStatus>) {
         let derivation = DerivationPipeline::new(config.clone());
         let proposer = if config.builder_mode && config.builder_private_key.is_some() {
