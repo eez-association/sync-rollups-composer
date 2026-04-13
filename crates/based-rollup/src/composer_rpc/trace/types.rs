@@ -215,13 +215,10 @@ pub(crate) struct TraceNode {
     pub value: U256,
 }
 
-/// Extract `(to, from, input_bytes, value)` from a JSON trace node.
+/// Extract `(to, from, input_bytes, value)` from a typed [`CallTraceNode`].
 ///
 /// Returns `None` if any required field is missing or unparseable.
-/// Accepts both typed [`CallTraceNode`] (via conversion) and raw
-/// `serde_json::Value` (for incremental migration).
-pub(crate) fn parse_trace_node(node: &Value) -> Option<TraceNode> {
-    let typed = CallTraceNode::try_parse(node)?;
+pub(crate) fn trace_node_from_typed(typed: &CallTraceNode) -> Option<TraceNode> {
     let to = typed.to_address()?;
     let from = typed.sender_address().unwrap_or(Address::ZERO);
 
@@ -231,6 +228,17 @@ pub(crate) fn parse_trace_node(node: &Value) -> Option<TraceNode> {
         input: typed.input_bytes(),
         value: typed.value_u256(),
     })
+}
+
+/// Extract `(to, from, input_bytes, value)` from a JSON trace node.
+///
+/// Returns `None` if any required field is missing or unparseable.
+/// Accepts raw `serde_json::Value` for callers that haven't migrated
+/// to [`CallTraceNode`] yet.
+#[allow(dead_code, reason = "kept for callers outside trace/ that still use &Value")]
+pub(crate) fn parse_trace_node(node: &Value) -> Option<TraceNode> {
+    let typed = CallTraceNode::try_parse(node)?;
+    trace_node_from_typed(&typed)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

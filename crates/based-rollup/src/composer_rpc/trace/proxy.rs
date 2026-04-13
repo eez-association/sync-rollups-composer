@@ -9,7 +9,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::types::{
-    ProxyInfo, ProxyLookup, create_cross_chain_proxy_selector, has_selector, parse_trace_node,
+    CallTraceNode, ProxyInfo, ProxyLookup, create_cross_chain_proxy_selector, has_selector,
+    trace_node_from_typed,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -21,7 +22,7 @@ use super::types::{
 ///
 /// The output is an ABI-encoded address (32 bytes, right-aligned at bytes 12..32).
 pub(crate) fn try_extract_ephemeral_proxy(
-    node: &Value,
+    node: &CallTraceNode,
     input: &[u8],
 ) -> Option<(Address, ProxyInfo)> {
     // ABI layout: selector(4) + address(32) + uint256(32) = 68 bytes minimum
@@ -42,10 +43,7 @@ pub(crate) fn try_extract_ephemeral_proxy(
     }
 
     // Extract the proxy address from the output field.
-    // ABI-encoded address return: 32 bytes, address at bytes 12..32.
-    let output_hex = node.get("output").and_then(|v| v.as_str())?;
-    let output_clean = output_hex.strip_prefix("0x").unwrap_or(output_hex);
-    let output_bytes = hex::decode(output_clean).ok()?;
+    let output_bytes = node.output_bytes();
     if output_bytes.len() < 32 {
         return None;
     }
@@ -88,8 +86,19 @@ pub fn extract_ephemeral_proxies_from_trace(
     manager_addresses: &[Address],
     ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
 ) {
-    // Check if this node is a createCrossChainProxy call on a manager.
-    if let Some(parsed) = parse_trace_node(node) {
+    // Try to deserialize as CallTraceNode for typed access.
+    if let Some(typed) = CallTraceNode::try_parse(node) {
+        extract_ephemeral_proxies_typed(&typed, manager_addresses, ephemeral_proxies);
+    }
+}
+
+/// Internal typed implementation of ephemeral proxy extraction.
+fn extract_ephemeral_proxies_typed(
+    node: &CallTraceNode,
+    manager_addresses: &[Address],
+    ephemeral_proxies: &mut HashMap<Address, ProxyInfo>,
+) {
+    if let Some(parsed) = trace_node_from_typed(node) {
         let create_selector = create_cross_chain_proxy_selector();
         if manager_addresses.contains(&parsed.to) && has_selector(&parsed.input, &create_selector) {
             if let Some((proxy_addr, info)) = try_extract_ephemeral_proxy(node, &parsed.input) {
@@ -99,10 +108,8 @@ pub fn extract_ephemeral_proxies_from_trace(
     }
 
     // Recurse into children.
-    if let Some(calls) = node.get("calls").and_then(|v| v.as_array()) {
-        for child in calls {
-            extract_ephemeral_proxies_from_trace(child, manager_addresses, ephemeral_proxies);
-        }
+    for child in node.children() {
+        extract_ephemeral_proxies_typed(child, manager_addresses, ephemeral_proxies);
     }
 }
 
