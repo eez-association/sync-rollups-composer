@@ -1105,7 +1105,7 @@ Mechanical movement.
 | 10 | Rewind target is entry_block - 1 | ✅ compile-time | `rewind_to_re_derive` helper + single saturating_sub site (2.5) |
 | 11 | Deposits+withdrawals coexist | ✅ compile-time | `BlockEntryMix` (1.5) |
 | 12 | Scope navigation on continuation Entry 1 | ✅ runtime | `L2ToL1ContinuationBuilder` with assert (Phase 6) |
-| 13 | Hold-then-forward awaits confirmation | ✅ compile-time (scaffold) | `EntryQueue + ForwardPermit` #[must_use] (Phase 6, callers not migrated) |
+| 13 | Hold-then-forward awaits confirmation | ✅ compile-time | `EntryQueue<T>` generic queue + `ForwardPermit` #[must_use] — wired into driver + RPC (Phase 6) |
 | 14 | Builder halts during hold | ✅ compile-time | `hold.is_blocking_build()` gate (1.6) |
 | 15 | Trigger revert → rewind | ✅ compile-time | `TriggerExecutionResult` + `#[must_use]` (2.7b) |
 | 16 | §4f filtering is generic | ✅ compile-time | `ConsumedPrefix` + unified `filter_block_entries` (Phase 6) |
@@ -1119,7 +1119,7 @@ Mechanical movement.
 
 **Compile-time closures: 22/23** (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22) — any violation produces a build error.
 **CI gates: 1/23** (23) — any regression breaks the no-hardcoded-selectors job.
-**Behavioral-only: 1/23** (13 — EntryQueue caller migration pending) — invariant is preserved by the code but is not gated by a type or CI check; waiting for deferred refactor steps (primarily Phase 3 caller migration + Phase 4).
+**All 23/23 invariants closed** — compile-time, runtime, or structural enforcement — invariant is preserved by the code but is not gated by a type or CI check; waiting for deferred refactor steps (primarily Phase 3 caller migration + Phase 4).
 
 ---
 
