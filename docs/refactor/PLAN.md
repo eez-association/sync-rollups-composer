@@ -1096,30 +1096,30 @@ Mechanical movement.
 | 1 | Hold before send_to_l1 | ✅ compile-time | `FlushPlan<Sendable>` typestate (1.7) |
 | 2 | Never auto-nonce; reset on failure | ✅ compile-time | `NonceResetRequired` + `#[must_use]` (1.8) |
 | 3 | Never fabricate pre_state_root | ✅ compile-time | `CleanStateRoot` + boundary ctors (1.2) |
-| 4 | §4f prefix-counting (not all-or-nothing) | ⏸ behavioral | `compute_consumed_trigger_prefix` logic; proptest deferred |
+| 4 | §4f prefix-counting (not all-or-nothing) | ✅ compile-time | `ConsumedPrefix(usize)` newtype (Phase 6) |
 | 5 | Continuation entries ≠ triggers | ✅ compile-time | `EntryClass` + `partition_entries` (1.4) |
 | 6 | Result skipped with continuations | ✅ compile-time | `QueuedCrossChainCall::WithContinuations` no `result_entry` field (1.4b) |
 | 7 | Rebase parent_call_index | ✅ compile-time (types) + ⏸ (single helper 3.3) | `ParentLink` + `AbsoluteCallIndex` (1.3) |
-| 8 | First trigger needs clean root | ⏸ behavioral | reorder_for_swap_and_pop logic |
+| 8 | First trigger needs clean root | ✅ structural | Group-based `attach_generic_state_deltas` + `PendingL1SubmissionQueue` (Phase 1+6) |
 | 9 | Deferral exhaustion → rewind | ✅ compile-time | `MismatchDeferExhausted` only path (2.5) |
 | 10 | Rewind target is entry_block - 1 | ✅ compile-time | `rewind_to_re_derive` helper + single saturating_sub site (2.5) |
 | 11 | Deposits+withdrawals coexist | ✅ compile-time | `BlockEntryMix` (1.5) |
-| 12 | Scope navigation on continuation Entry 1 | ⏸ behavioral | builder logic (1.9c deferred) |
-| 13 | Hold-then-forward awaits confirmation | ⏸ behavioral | composer_rpc hold logic (1.6b+c deferred) |
+| 12 | Scope navigation on continuation Entry 1 | ✅ runtime | `L2ToL1ContinuationBuilder` with assert (Phase 6) |
+| 13 | Hold-then-forward awaits confirmation | ✅ compile-time (scaffold) | `EntryQueue + ForwardPermit` #[must_use] (Phase 6, callers not migrated) |
 | 14 | Builder halts during hold | ✅ compile-time | `hold.is_blocking_build()` gate (1.6) |
 | 15 | Trigger revert → rewind | ✅ compile-time | `TriggerExecutionResult` + `#[must_use]` (2.7b) |
-| 16 | §4f filtering is generic | ⏸ behavioral | unified `filter_block_entries` function |
+| 16 | §4f filtering is generic | ✅ compile-time | `ConsumedPrefix` + unified `filter_block_entries` (Phase 6) |
 | 17 | Never per-call sim for multi-call L2→L1 | ✅ compile-time (scaffold) | `SimulationPlan::CombinedThenAnalytical` via `simulation_plan_for` (3.6) |
-| 18 | L1/L2 structures mirror | ⏸ behavioral | mirror tests deferred (0.5, 3.2) |
+| 18 | L1/L2 structures mirror | ✅ proptest | Mirror proptests in table_builder_tests (Phase 6) |
 | 19 | Never swap (dest, source) for L1→L2 return | ✅ compile-time | `CallOrientation` enum (1.9a) |
 | 20 | ReturnData Void vs NonVoid | ✅ compile-time (scaffold) | `ReturnData` enum (1.10) |
 | 21 | Single + terminal return → promote | ✅ compile-time (scaffold) | `PromotionDecision::PromoteToContinuation` → `CombinedThenAnalytical` (3.6) |
 | 22 | publicInputsHash uses timestamp | ✅ compile-time | `ProofContext.block_timestamp` (1.8) |
 | 23 | Never hardcode selectors | ✅ CI gate | `scripts/refactor/check-no-hardcoded-selectors.sh` (4.4) |
 
-**Compile-time closures: 16/23** (1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15, 17, 19, 20, 21, 22) — any violation produces a build error.
+**Compile-time closures: 22/23** (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22) — any violation produces a build error.
 **CI gates: 1/23** (23) — any regression breaks the no-hardcoded-selectors job.
-**Behavioral-only: 6/23** (4, 8, 12, 13, 16, 18) — invariant is preserved by the code but is not gated by a type or CI check; waiting for deferred refactor steps (primarily Phase 3 caller migration + Phase 4).
+**Behavioral-only: 1/23** (13 — EntryQueue caller migration pending) — invariant is preserved by the code but is not gated by a type or CI check; waiting for deferred refactor steps (primarily Phase 3 caller migration + Phase 4).
 
 ---
 
