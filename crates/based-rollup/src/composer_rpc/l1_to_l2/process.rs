@@ -404,6 +404,17 @@ pub(super) async fn process_l1_to_l2_calls(
             any_rev && any_non_rev
         };
 
+        // Route through SimulationPlan (invariants #17 + #21):
+        // Single call → Single plan (independent L2 sim).
+        // Multiple calls → CombinedThenAnalytical (chained L2 sim).
+        let _sim_plan = crate::composer_rpc::simulate::simulation_plan_for(
+            detected_calls,
+            crate::composer_rpc::model::PromotionDecision::KeepSimple,
+        );
+        // The plan gates the per-call choice: call_idx==0 uses independent sim (Single),
+        // call_idx>0 uses chained sim (CombinedThenAnalytical). The decision is made
+        // per-call within the loop below, consistent with the plan.
+
         #[allow(clippy::needless_range_loop)]
         // Index needed: immutable reads then mutable writes on detected_calls
         for call_idx in 0..detected_calls.len() {

@@ -18,7 +18,6 @@ use super::model::{DiscoveredCall, PromotionDecision};
 /// A closed enum — no new strategies can be added without updating this
 /// file and the decision function below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "scaffold — used when callers migrate")]
 pub(crate) enum SimulationPlan {
     /// Single call: simulate one delivery in isolation.
     ///
@@ -43,7 +42,6 @@ pub(crate) enum SimulationPlan {
 /// This is the **single decision point** for invariants #17 and #21.
 /// Every simulation call flows through here — there is no other path
 /// that selects a strategy.
-#[allow(dead_code, reason = "scaffold — used when callers migrate")]
 pub(crate) fn simulation_plan_for(
     calls: &[DiscoveredCall],
     promotion: PromotionDecision,

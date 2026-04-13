@@ -752,10 +752,20 @@ pub(super) async fn process_l2_to_l1_calls(
         }
 
         // If we found any nested L2→L1 calls OR return calls, promote to multi-call path.
-        // The return call check is critical: a depth-2 pattern with 1 L2→L1 call + 1
-        // terminal L1→L2 return call (e.g., Logger→Logger→Counter) has all_l2_calls=1
-        // but needs continuation entries for the inner return call (issue #245).
-        if all_l2_calls.len() > 1 || !all_return_calls.is_empty() {
+        // Route through SimulationPlan (invariants #17 + #21):
+        // - return calls present → PromoteToContinuation → CombinedThenAnalytical
+        // - multiple L2 calls → KeepSimple with len > 1 → CombinedThenAnalytical
+        // - single call, no returns → KeepSimple with len == 1 → Single
+        let promotion = if !all_return_calls.is_empty() {
+            crate::composer_rpc::model::PromotionDecision::PromoteToContinuation
+        } else {
+            crate::composer_rpc::model::PromotionDecision::KeepSimple
+        };
+        let sim_plan = crate::composer_rpc::simulate::simulation_plan_for(
+            detected_calls,
+            promotion,
+        );
+        if sim_plan == crate::composer_rpc::simulate::SimulationPlan::CombinedThenAnalytical {
             tracing::info!(
                 target: "based_rollup::proxy",
                 total_l2_calls = all_l2_calls.len(),
