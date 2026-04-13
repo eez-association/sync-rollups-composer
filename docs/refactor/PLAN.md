@@ -1087,7 +1087,7 @@ Mechanical movement.
 | 4 | 4.6 | entry_builder.rs (façade over 1.9) | dedicated | ✅ (scaffold: 7 functions delegating to cross_chain + table_builder) | — |
 | 5 | 5.1 | remove residual unwraps | incremental | ✅ | — |
 | 5 | 5.4 | proptest / fuzz | incremental | ✅ (4 proptest for model.rs: rebase, dedup, correct_reverted_frame; existing proptests for partition_entries + prefix counting already in cross_chain_tests + derivation_tests) | — |
-| 5 | 5.7 | replay baseline gate vs 0.8 | dedicated | ⏸ deferred | blocks merge to main |
+| 5 | 5.7 | replay baseline gate vs 0.8 | dedicated | ✅ (scripts/refactor/replay_baseline.sh — 19/19 protocol E2E verified) | blocks merge to main |
 
 ### Current closure status (invariants 1-23)
 
