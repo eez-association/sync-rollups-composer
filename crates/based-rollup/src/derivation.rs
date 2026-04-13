@@ -665,7 +665,18 @@ impl DerivationPipeline {
                 // snapshot to the driver. The driver handles ALL filtering
                 // generically via trial-execution + ExecutionConsumed events +
                 // prefix counting. No type-specific counting is needed here.
-                let filtering = if has_unconsumed_entries && !batch_has_revert && i == 0 {
+                //
+                // Apply to the first block (original behavior) AND the last
+                // block in multi-block batches. The entry-bearing block
+                // (with loadExecutionTable + executeIncomingCrossChainCall)
+                // is always the last block submitted by flush_to_l1.
+                // Intermediate blocks must NOT be filtered — their builder
+                // tx nonces assume the prior block's unfiltered state.
+                // (issue #29)
+                let filtering = if has_unconsumed_entries
+                    && !batch_has_revert
+                    && (i == 0 || is_last_in_batch)
+                {
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,
