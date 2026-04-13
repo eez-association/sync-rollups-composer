@@ -186,7 +186,7 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                 let mut all_placeholder_entries = Vec::new();
                                 for rp in &reverted_proxies {
                                     let placeholder =
-                                        crate::cross_chain::build_l2_to_l1_call_entries(
+                                        crate::composer_rpc::entry_builder::build_l2_to_l1_entries(
                                             rp.original_address,
                                             rp.data.clone(),
                                             rp.value,
@@ -240,7 +240,7 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                     };
 
                                     if let Some(sys_addr) = system_addr {
-                                        let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
+                                        let load_calldata = crate::composer_rpc::entry_builder::encode_load_table(
                                             &all_placeholder_entries,
                                         );
                                         let load_data =
@@ -647,7 +647,7 @@ async fn try_chained_l2_enrichment(
         let reverted_proxies: Vec<_> = discovered.into_iter().filter(|d| d.reverted).collect();
 
         for rp in &reverted_proxies {
-            let placeholder = crate::cross_chain::build_l2_to_l1_call_entries(
+            let placeholder = crate::composer_rpc::entry_builder::build_l2_to_l1_entries(
                 rp.original_address,
                 rp.data.clone(),
                 rp.value,
@@ -728,7 +728,7 @@ async fn try_chained_l2_enrichment(
 
     // Build Phase 2 bundle: [loadExecutionTable_tx, call_0, call_1, ..., call_N-1].
     let load_calldata =
-        crate::cross_chain::encode_load_execution_table_calldata(&all_placeholder_entries);
+        crate::composer_rpc::entry_builder::encode_load_table(&all_placeholder_entries);
     let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
     let ccm_hex = format!("{cross_chain_manager_address}");
 
@@ -1085,7 +1085,7 @@ pub(super) async fn simulate_l2_return_call_delivery(
 
         // Build placeholder L2 entries for loadExecutionTable so scope navigation
         // can find entries if the destination triggers further cross-chain calls.
-        let placeholder_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+        let placeholder_entries = crate::composer_rpc::entry_builder::build_l2_to_l1_entries(
             rc.destination,
             rc.data.clone(),
             rc.value,
@@ -1101,7 +1101,7 @@ pub(super) async fn simulate_l2_return_call_delivery(
         let mut detected_for_call: Vec<DiscoveredCall> = Vec::new();
 
         // Build traceCallMany: [loadExecutionTable, executeIncomingCrossChainCall]
-        let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
+        let load_calldata = crate::composer_rpc::entry_builder::encode_load_table(
             &placeholder_entries.l2_table_entries,
         );
         let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));

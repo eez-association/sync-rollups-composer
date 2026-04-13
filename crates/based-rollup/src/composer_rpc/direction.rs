@@ -216,14 +216,14 @@ impl Direction for L1ToL2 {
             .collect();
 
         let analyzed =
-            crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
+            super::entry_builder::analyze_l1_to_l2_continuations(&l1_detected, rollup_id);
 
         let mut entries = if analyzed.is_empty() {
             let l2_pairs: Vec<_> = l1_detected
                 .iter()
                 .flat_map(|c| {
                     let (call_entry, result_entry) =
-                        cross_chain::build_cross_chain_call_entries(
+                        super::entry_builder::build_simple_pair(
                             cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                             c.destination,
                             c.data.clone(),
@@ -236,9 +236,9 @@ impl Direction for L1ToL2 {
                     vec![call_entry, result_entry]
                 })
                 .collect();
-            cross_chain::convert_pairs_to_l1_entries(&l2_pairs)
+            super::entry_builder::pairs_to_l1_format(&l2_pairs)
         } else {
-            let cont = crate::table_builder::build_continuation_entries(
+            let cont = super::entry_builder::build_continuations(
                 &analyzed,
                 cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
             );
@@ -499,7 +499,7 @@ impl Direction for L2ToL1 {
         // Build L2 table entries from discovered calls.
         let mut l2_table_entries = Vec::new();
         for call in calls {
-            let call_entries = crate::cross_chain::build_l2_to_l1_call_entries(
+            let call_entries = super::entry_builder::build_l2_to_l1_entries(
                 call.destination,
                 call.calldata.clone(),
                 call.value,
@@ -516,7 +516,7 @@ impl Direction for L2ToL1 {
 
         // Encode loadExecutionTable calldata.
         let load_table_calldata =
-            crate::cross_chain::encode_load_execution_table_calldata(&l2_table_entries);
+            super::entry_builder::encode_load_table(&l2_table_entries);
         let load_table_hex = format!("0x{}", hex::encode(load_table_calldata.as_ref()));
 
         // Build the bundle: [loadExecutionTable, userTx] in one bundle

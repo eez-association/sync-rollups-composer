@@ -110,7 +110,7 @@ pub(super) async fn process_l2_to_l1_calls(
             })
             .collect();
 
-        let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+        let analyzed = crate::composer_rpc::entry_builder::analyze_l2_to_l1_continuations(
             &tb_l2_calls,
             &tb_return_calls,
             rollup_id,
@@ -125,7 +125,7 @@ pub(super) async fn process_l2_to_l1_calls(
             );
 
             if !continuation.l2_entries.is_empty() {
-                let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(
+                let load_calldata = crate::composer_rpc::entry_builder::encode_load_table(
                     &continuation.l2_entries,
                 );
                 let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));

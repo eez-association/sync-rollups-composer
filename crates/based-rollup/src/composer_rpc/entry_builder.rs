@@ -6,8 +6,7 @@
 //!
 //! Introduced in refactor step 4.6 (PLAN.md §Phase 4).
 
-// Façade functions are scaffold — callers migrate incrementally.
-#![allow(dead_code, unused_imports, clippy::too_many_arguments)]
+#![allow(clippy::too_many_arguments)]
 
 use alloy_primitives::{Address, Bytes, U256};
 
@@ -120,6 +119,7 @@ pub(crate) fn encode_load_table(entries: &[CrossChainExecutionEntry]) -> Bytes {
 }
 
 /// Build placeholder entries for L2 simulation (empty state deltas).
+#[allow(dead_code)]
 pub(crate) fn build_placeholder_entries(
     destination: Address,
     calldata: Vec<u8>,

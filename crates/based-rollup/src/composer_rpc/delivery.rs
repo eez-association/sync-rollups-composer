@@ -133,7 +133,7 @@ pub(crate) async fn simulate_l1_delivery(
         // On subsequent iterations, include continuation entries for discovered return calls.
         let entries = if all_return_calls.is_empty() {
             // Simple case: just the original L2→L1 call
-            let call_entries = cross_chain::build_l2_to_l1_call_entries(
+            let call_entries = super::entry_builder::build_l2_to_l1_entries(
                 destination,
                 data.to_vec(),
                 value,
@@ -178,7 +178,7 @@ pub(crate) async fn simulate_l1_delivery(
                     })
                     .collect();
 
-            let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+            let analyzed = super::entry_builder::analyze_l2_to_l1_continuations(
                 &[root_call],
                 &return_calls_for_builder,
                 rollup_id,
@@ -852,7 +852,7 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         })
         .collect();
 
-    let analyzed = crate::table_builder::analyze_continuation_calls(&l1_detected, rollup_id);
+    let analyzed = super::entry_builder::analyze_l1_to_l2_continuations(&l1_detected, rollup_id);
 
     // Log the call tree
     tracing::info!(
@@ -894,7 +894,7 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         let l2_pairs: Vec<_> = l1_detected
             .iter()
             .flat_map(|c| {
-                let (call_entry, result_entry) = cross_chain::build_cross_chain_call_entries(
+                let (call_entry, result_entry) = super::entry_builder::build_simple_pair(
                     cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                     c.destination,
                     c.data.clone(),
@@ -907,9 +907,9 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
                 vec![call_entry, result_entry]
             })
             .collect();
-        cross_chain::convert_pairs_to_l1_entries(&l2_pairs)
+        super::entry_builder::pairs_to_l1_format(&l2_pairs)
     } else {
-        let cont = crate::table_builder::build_continuation_entries(
+        let cont = super::entry_builder::build_continuations(
             &analyzed,
             cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
         );
@@ -1255,7 +1255,7 @@ pub(crate) async fn simulate_l1_combined_delivery(
 
             let entries = if my_return_calls.is_empty() {
                 // Simple case: just this L2→L1 call.
-                let call_entries = cross_chain::build_l2_to_l1_call_entries(
+                let call_entries = super::entry_builder::build_l2_to_l1_entries(
                     call.destination,
                     call.calldata.to_vec(),
                     call.value,
@@ -1302,7 +1302,7 @@ pub(crate) async fn simulate_l1_combined_delivery(
                         })
                         .collect();
 
-                let analyzed = crate::table_builder::analyze_l2_to_l1_continuation_calls(
+                let analyzed = super::entry_builder::analyze_l2_to_l1_continuations(
                     &[root_call],
                     &return_calls_for_builder,
                     rollup_id,

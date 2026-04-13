@@ -30,7 +30,7 @@ pub(super) async fn run_l2_sim_bundle(
     exec_calldata: &[u8],
     value: U256,
 ) -> Option<(Value, bool)> {
-    let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(load_entries);
+    let load_calldata = crate::composer_rpc::entry_builder::encode_load_table(load_entries);
     let load_data = format!("0x{}", super::hex::encode(load_calldata.as_ref()));
     let exec_data = format!("0x{}", super::hex::encode(exec_calldata));
     let value_hex = format!("0x{:x}", value);
@@ -256,7 +256,7 @@ pub(super) async fn simulate_l1_to_l2_call_on_l2(
 
         let mut placeholders = Vec::new();
         for child in &children {
-            let placeholder = crate::cross_chain::build_l2_to_l1_call_entries(
+            let placeholder = crate::composer_rpc::entry_builder::build_l2_to_l1_entries(
                 child.original_address,
                 child.data.clone(),
                 child.value,
@@ -581,7 +581,7 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
     all_entries.push(void_entry);
 
     // Build the loadExecutionTable calldata.
-    let load_calldata = crate::cross_chain::encode_load_execution_table_calldata(&all_entries);
+    let load_calldata = crate::composer_rpc::entry_builder::encode_load_table(&all_entries);
     let load_data = format!("0x{}", super::hex::encode(load_calldata.as_ref()));
 
     // Build the transaction array: loadTable + prior execs + current exec.

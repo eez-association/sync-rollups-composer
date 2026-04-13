@@ -1588,14 +1588,14 @@ pub(super) async fn process_l1_to_l2_calls(
                                         in_reverted_frame: c.in_reverted_frame,
                                     })
                                     .collect();
-                            let analyzed = crate::table_builder::analyze_continuation_calls(
+                            let analyzed = crate::composer_rpc::entry_builder::analyze_l1_to_l2_continuations(
                                 &l1_detected,
                                 rollup_id,
                             );
                             if analyzed.is_empty() {
                                 continue;
                             }
-                            let cont = crate::table_builder::build_continuation_entries(
+                            let cont = crate::composer_rpc::entry_builder::build_continuations(
                                 &analyzed,
                                 crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
                             );
