@@ -8,7 +8,41 @@ use alloy_sol_types::sol;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::{Response, StatusCode};
+use serde::Deserialize;
 use serde_json::Value;
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Typed JSON-RPC response
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Typed JSON-RPC response. Eliminates `.get("result")` / `.get("error")` pattern.
+#[derive(Debug, Deserialize)]
+pub(crate) struct JsonRpcResponse {
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub id: Value,
+}
+
+impl JsonRpcResponse {
+    /// Returns the result value, or an error if the response has an error field.
+    pub fn into_result(self) -> eyre::Result<Value> {
+        if let Some(error) = self.error {
+            eyre::bail!(
+                "JSON-RPC error: {}",
+                serde_json::to_string(&error).unwrap_or_default()
+            );
+        }
+        self.result
+            .ok_or_else(|| eyre::eyre!("JSON-RPC response missing result"))
+    }
+
+    /// Returns the result as a string reference (for eth_call hex responses).
+    pub fn result_str(&self) -> Option<&str> {
+        self.result.as_ref()?.as_str()
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  ABI bindings via sol! macro — selectors derived at compile time
@@ -275,11 +309,11 @@ pub(crate) async fn eth_call_view(
         "id": 99995
     });
     let resp = client.post(rpc_url).json(&req).send().await.ok()?;
-    let body: Value = resp.json().await.ok()?;
-    if body.get("error").is_some() {
+    let body: JsonRpcResponse = resp.json().await.ok()?;
+    if body.error.is_some() {
         return None;
     }
-    body.get("result")?.as_str().map(|s| s.to_string())
+    body.result_str().map(|s| s.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -303,17 +337,17 @@ pub(crate) async fn get_l1_block_context(
         "id": 99997
     });
 
-    let resp = client
+    let rpc_resp: JsonRpcResponse = client
         .post(l1_rpc_url)
         .json(&req)
         .send()
         .await?
-        .json::<Value>()
+        .json()
         .await?;
 
-    let block = resp
-        .get("result")
-        .ok_or_else(|| eyre::eyre!("no result from eth_getBlockByNumber"))?;
+    let block = rpc_resp
+        .into_result()
+        .map_err(|e| eyre::eyre!("eth_getBlockByNumber failed: {e}"))?;
 
     let number_hex = block
         .get("number")
@@ -427,13 +461,13 @@ pub(crate) async fn detect_cross_chain_proxy_on_l2(
     });
 
     let resp = client.post(upstream_url).json(&req).send().await.ok()?;
-    let body: Value = resp.json().await.ok()?;
+    let body: JsonRpcResponse = resp.json().await.ok()?;
 
-    if body.get("error").is_some() {
+    if body.error.is_some() {
         return None;
     }
 
-    let hex_data = body.get("result")?.as_str()?;
+    let hex_data = body.result_str()?;
     let hex_clean = hex_data.strip_prefix("0x").unwrap_or(hex_data);
 
     // Return data: 64 hex chars (32 bytes) for address + 64 hex chars for uint64
