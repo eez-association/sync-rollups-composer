@@ -10,6 +10,7 @@ pub mod consensus;
 pub mod cross_chain;
 pub mod derivation;
 pub mod driver;
+pub mod entry_queue;
 pub mod evm_config;
 pub mod execution_planner;
 pub mod health;
