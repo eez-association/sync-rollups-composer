@@ -614,9 +614,9 @@ pub(super) async fn process_l1_to_l2_calls(
             "id": 99978
         });
         if let Ok(resp) = client.post(l1_rpc_url).json(&sim_req).send().await {
-            if let Ok(body) = resp.json::<Value>().await {
-                if let Some(traces) = body
-                    .get("result")
+            if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                if let Some(traces) = body.result
+                    .as_ref()
                     .and_then(|r| r.get(0))
                     .and_then(|b| b.as_array())
                 {
@@ -645,7 +645,7 @@ pub(super) async fn process_l1_to_l2_calls(
                             }
                         }
                     }
-                } else if let Some(error) = body.get("error") {
+                } else if let Some(ref error) = body.error {
                     tracing::warn!(
                         target: "based_rollup::l1_proxy",
                         ?error,
@@ -741,10 +741,9 @@ pub(super) async fn process_l1_to_l2_calls(
                     } else {
                         ""
                     };
-                    // Determine postBatch success from resp
+                    // Determine postBatch success from resp (already the result value)
                     let postbatch_ok = resp
-                        .get("result")
-                        .and_then(|r| r.get(0))
+                        .get(0)
                         .and_then(|b| b.as_array())
                         .and_then(|arr| arr.first())
                         .map(|tx1| tx1.get("error").is_none())
@@ -1092,11 +1091,10 @@ pub(super) async fn process_l1_to_l2_calls(
                                 let sim_results = if let Ok(resp) =
                                     client.post(l1_rpc_url).json(&sim_req).send().await
                                 {
-                                    if let Ok(body) = resp.json::<Value>().await {
-                                        body.get("result")
-                                            .and_then(|r| r.get(0))
-                                            .and_then(|b| b.as_array())
-                                            .cloned()
+                                    if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                                        body.result
+                                            .and_then(|r| r.get(0).cloned())
+                                            .and_then(|b| b.as_array().cloned())
                                     } else {
                                         None
                                     }
@@ -1919,34 +1917,31 @@ pub(super) async fn queue_execution_table(
         "id": 99991
     });
 
-    let resp = client
+    let rpc_resp: super::super::common::JsonRpcResponse = client
         .post(l2_rpc_url)
         .json(&req)
         .send()
         .await?
-        .json::<Value>()
+        .json()
         .await?;
 
-    if let Some(error) = resp.get("error") {
-        return Err(eyre::eyre!("buildExecutionTable failed: {error}"));
-    }
+    let result_val = rpc_resp
+        .into_result()
+        .map_err(|e| eyre::eyre!("buildExecutionTable failed: {e}"))?;
 
-    let call_id = resp
-        .get("result")
-        .and_then(|v| v.get("callId"))
+    let call_id = result_val
+        .get("callId")
         .and_then(|v| v.as_str())
         .unwrap_or("0x")
         .to_string();
 
-    let l2_count = resp
-        .get("result")
-        .and_then(|v| v.get("l2EntryCount"))
+    let l2_count = result_val
+        .get("l2EntryCount")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    let l1_count = resp
-        .get("result")
-        .and_then(|v| v.get("l1EntryCount"))
+    let l1_count = result_val
+        .get("l1EntryCount")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 

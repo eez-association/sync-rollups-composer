@@ -141,11 +141,11 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
         });
 
         match client.post(l2_rpc_url).json(&trace_req).send().await {
-            Ok(resp) => match resp.json::<Value>().await {
+            Ok(resp) => match resp.json::<super::super::common::JsonRpcResponse>().await {
                 Ok(body) => {
                     // Extract output from trace: result[0][0].output
-                    if let Some(trace) = body
-                        .get("result")
+                    if let Some(trace) = body.result
+                        .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
                         .and_then(|arr| arr.first())
@@ -219,8 +219,8 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                         if let Ok(r) =
                                             client.post(l2_rpc_url).json(&sys_req).send().await
                                         {
-                                            if let Ok(b) = r.json::<Value>().await {
-                                                b.get("result").and_then(|v| v.as_str()).and_then(
+                                            if let Ok(b) = r.json::<super::super::common::JsonRpcResponse>().await {
+                                                b.result_str().and_then(
                                                     |s| {
                                                         let clean =
                                                             s.strip_prefix("0x").unwrap_or(s);
@@ -281,11 +281,11 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                             .await
                                         {
                                             Ok(r2) => {
-                                                if let Ok(b2) = r2.json::<Value>().await {
+                                                if let Ok(b2) = r2.json::<super::super::common::JsonRpcResponse>().await {
                                                     // Extract tx1 (index 1) trace — the return call
                                                     // execution with entries loaded.
-                                                    if let Some(traces) = b2
-                                                        .get("result")
+                                                    if let Some(traces) = b2.result
+                                                        .as_ref()
                                                         .and_then(|r| r.get(0))
                                                         .and_then(|b| b.as_array())
                                                     {
@@ -437,8 +437,8 @@ async fn lookup_l2_proxy_address(
         "id": 99955
     });
     let resp = client.post(l2_rpc_url).json(&req).send().await.ok()?;
-    let body: Value = resp.json().await.ok()?;
-    let s = body.get("result")?.as_str()?;
+    let body: super::super::common::JsonRpcResponse = resp.json().await.ok()?;
+    let s = body.result_str()?;
     let clean = s.strip_prefix("0x").unwrap_or(s);
     if clean.len() >= 64 {
         Some(format!("0x{}", &clean[24..64]))
@@ -547,7 +547,7 @@ async fn try_chained_l2_enrichment(
         }
     };
 
-    let body: Value = match resp.json().await {
+    let rpc_body: super::super::common::JsonRpcResponse = match resp.json().await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
@@ -560,9 +560,19 @@ async fn try_chained_l2_enrichment(
     };
 
     // Expected structure: result[0] = array of N trace objects (one per tx in the bundle).
-    let traces = match body
-        .get("result")
-        .and_then(|r| r.get(0))
+    let result_val = match rpc_body.into_result() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "based_rollup::composer_rpc",
+                %e,
+                "chained L2 enrichment: RPC error in bundled trace response"
+            );
+            return false;
+        }
+    };
+    let traces = match result_val
+        .get(0)
         .and_then(|b| b.as_array())
     {
         Some(arr) => arr,
@@ -692,8 +702,8 @@ async fn try_chained_l2_enrichment(
             "id": 99961
         });
         if let Ok(r) = client.post(l2_rpc_url).json(&sys_req).send().await {
-            if let Ok(b) = r.json::<Value>().await {
-                b.get("result").and_then(|v| v.as_str()).and_then(|s| {
+            if let Ok(b) = r.json::<super::super::common::JsonRpcResponse>().await {
+                b.result_str().and_then(|s| {
                     let clean = s.strip_prefix("0x").unwrap_or(s);
                     if clean.len() >= 64 {
                         Some(format!("0x{}", &clean[24..64]))
@@ -777,7 +787,7 @@ async fn try_chained_l2_enrichment(
         }
     };
 
-    let body2: Value = match resp2.json().await {
+    let rpc_body2: super::super::common::JsonRpcResponse = match resp2.json().await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
@@ -795,9 +805,24 @@ async fn try_chained_l2_enrichment(
     };
 
     // Expected: result[0] = array of 1+N traces (index 0 = loadExecutionTable, 1..N = calls).
-    let traces2 = match body2
-        .get("result")
-        .and_then(|r| r.get(0))
+    let result_val2 = match rpc_body2.into_result() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "based_rollup::composer_rpc",
+                %e,
+                "chained L2 enrichment Phase 2: RPC error"
+            );
+            for &pos in &reverted_positions {
+                let idx = needs_enrichment[pos];
+                return_calls[idx].return_data = backups[pos].0.clone();
+                return_calls[idx].delivery_failed = backups[pos].1;
+            }
+            return false;
+        }
+    };
+    let traces2 = match result_val2
+        .get(0)
         .and_then(|b| b.as_array())
     {
         Some(arr) if arr.len() == 1 + needs_enrichment.len() => arr,
@@ -1017,8 +1042,8 @@ pub(super) async fn simulate_l2_return_call_delivery(
             "id": 99969
         });
         let sys_addr = if let Ok(resp) = client.post(l2_rpc_url).json(&sys_req).send().await {
-            if let Ok(body) = resp.json::<Value>().await {
-                body.get("result").and_then(|v| v.as_str()).and_then(|s| {
+            if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                body.result_str().and_then(|s| {
                     let clean = s.strip_prefix("0x").unwrap_or(s);
                     if clean.len() >= 64 {
                         Some(format!("0x{}", &clean[24..64]))
@@ -1136,10 +1161,10 @@ pub(super) async fn simulate_l2_return_call_delivery(
         });
 
         if let Ok(resp) = client.post(l2_rpc_url).json(&trace_req).send().await {
-            if let Ok(body) = resp.json::<Value>().await {
+            if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
                 // Extract tx[1] trace (executeIncomingCrossChainCall with entries loaded)
-                if let Some(traces) = body
-                    .get("result")
+                if let Some(traces) = body.result
+                    .as_ref()
                     .and_then(|r| r.get(0))
                     .and_then(|b| b.as_array())
                 {

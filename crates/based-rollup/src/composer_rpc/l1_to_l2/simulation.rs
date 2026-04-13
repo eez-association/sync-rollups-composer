@@ -69,7 +69,7 @@ pub(super) async fn run_l2_sim_bundle(
             return None;
         }
     };
-    let body: Value = match resp.json().await {
+    let rpc_body: super::super::common::JsonRpcResponse = match resp.json().await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
@@ -84,9 +84,9 @@ pub(super) async fn run_l2_sim_bundle(
     // Extract the exec trace (tx[1]).
     // result[0] = bundle traces array, result[0][1] = exec tx trace.
     // Fall back to result[0][0] if only 1 trace returned.
-    let traces = body
-        .get("result")
-        .and_then(|r| r.get(0))
+    let result_val = rpc_body.into_result().ok()?;
+    let traces = result_val
+        .get(0)
         .and_then(|b| b.as_array())?;
 
     let exec_trace = if traces.len() >= 2 {
@@ -457,9 +457,9 @@ pub(super) async fn simulate_l1_to_l2_call_on_l2(
                 "id": 99959
             });
             if let Ok(resp) = client.post(l2_rpc_url).json(&direct_req).send().await {
-                if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(trace) = body
-                        .get("result")
+                if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                    if let Some(trace) = body.result
+                        .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
                         .and_then(|a| a.first())
@@ -648,7 +648,7 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
         }
     };
 
-    let body: serde_json::Value = match resp.json().await {
+    let rpc_body: super::super::common::JsonRpcResponse = match resp.json().await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
@@ -673,9 +673,30 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
 
     // Extract the last trace (current call's trace).
     // result[0] = bundle traces array, result[0][last] = current call trace.
-    let traces = match body
-        .get("result")
-        .and_then(|r| r.get(0))
+    let result_val = match rpc_body.into_result() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "based_rollup::l1_proxy",
+                %e,
+                "chained L2 simulation: RPC error"
+            );
+            return simulate_l1_to_l2_call_on_l2(
+                client,
+                l2_rpc_url,
+                cross_chain_manager_address,
+                destination,
+                data,
+                value,
+                source_address,
+                rollup_id,
+                l2_scope,
+            )
+            .await;
+        }
+    };
+    let traces = match result_val
+        .get(0)
         .and_then(|b| b.as_array())
     {
         Some(arr) => {
@@ -826,9 +847,9 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
 
             let mut resolved_proxies = bundle_ephemeral_proxies.clone();
             if let Ok(resp2) = client.post(l2_rpc_url).json(&trace_req2).send().await {
-                if let Ok(body2) = resp2.json::<serde_json::Value>().await {
-                    if let Some(traces2) = body2
-                        .get("result")
+                if let Ok(body2) = resp2.json::<super::super::common::JsonRpcResponse>().await {
+                    if let Some(traces2) = body2.result
+                        .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
                     {

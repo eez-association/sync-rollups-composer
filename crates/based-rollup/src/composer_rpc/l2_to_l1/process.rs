@@ -168,9 +168,9 @@ pub(super) async fn process_l2_to_l1_calls(
                 let mut proxy_cache =
                     std::collections::HashMap::<Address, Option<super::super::trace::ProxyInfo>>::new();
                 if let Ok(resp) = client.post(upstream_url).json(&retrace_req).send().await {
-                    if let Ok(body) = resp.json::<Value>().await {
-                        if let Some(traces) = body
-                            .get("result")
+                    if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                        if let Some(traces) = body.result
+                            .as_ref()
                             .and_then(|r| r.get(0))
                             .and_then(|b| b.as_array())
                         {
@@ -344,9 +344,9 @@ pub(super) async fn process_l2_to_l1_calls(
 
             let mut chained_rc_data: Vec<(Vec<u8>, bool)> = Vec::new();
             if let Ok(resp) = client.post(upstream_url).json(&sim_req).send().await {
-                if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(traces) = body
-                        .get("result")
+                if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                    if let Some(traces) = body.result
+                        .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
                     {
@@ -816,8 +816,8 @@ pub(super) async fn process_l2_to_l1_calls(
                         });
                         async {
                             let resp = client.post(upstream_url).json(&req).send().await.ok()?;
-                            let body: Value = resp.json().await.ok()?;
-                            let s = body.get("result")?.as_str()?;
+                            let body: super::super::common::JsonRpcResponse = resp.json().await.ok()?;
+                            let s = body.result_str()?;
                             let clean = s.strip_prefix("0x").unwrap_or(s);
                             if clean.len() >= 64 {
                                 Some(format!("0x{}", &clean[24..64]))
@@ -852,9 +852,9 @@ pub(super) async fn process_l2_to_l1_calls(
 
                     match client.post(upstream_url).json(&trace_req).send().await {
                         Ok(resp) => {
-                            if let Ok(body) = resp.json::<Value>().await {
-                                if let Some(trace) = body
-                                    .get("result")
+                            if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                                if let Some(trace) = body.result
+                                    .as_ref()
                                     .and_then(|r| r.get(0))
                                     .and_then(|b| b.as_array())
                                     .and_then(|arr| arr.first())
@@ -997,8 +997,8 @@ pub(super) async fn process_l2_to_l1_calls(
     });
 
     if let Ok(resp) = client.post(upstream_url).json(&initiate_req).send().await {
-        if let Ok(body) = resp.json::<Value>().await {
-            if body.get("error").is_none() {
+        if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+            if body.error.is_none() {
                 return true;
             }
         }
@@ -1125,8 +1125,8 @@ async fn queue_l2_to_l1_multi_call_entries(
     let first = &detected_l2_calls[0];
     match client.post(upstream_url).json(&req).send().await {
         Ok(resp) => {
-            if let Ok(body) = resp.json::<Value>().await {
-                if let Some(error) = body.get("error") {
+            if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                if let Some(ref error) = body.error {
                     tracing::warn!(
                         target: "based_rollup::proxy",
                         %error,
@@ -1147,13 +1147,12 @@ async fn queue_l2_to_l1_multi_call_entries(
                     .await;
                 }
 
-                let l2_count = body
-                    .get("result")
+                let result_val = body.result.as_ref();
+                let l2_count = result_val
                     .and_then(|v| v.get("l2EntryCount"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let l1_count = body
-                    .get("result")
+                let l1_count = result_val
                     .and_then(|v| v.get("l1EntryCount"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
@@ -1242,8 +1241,8 @@ async fn queue_l2_to_l1_fallback(
     );
 
     if let Ok(resp) = client.post(upstream_url).json(&initiate_req).send().await {
-        if let Ok(body) = resp.json::<Value>().await {
-            if body.get("error").is_none() {
+        if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+            if body.error.is_none() {
                 return Some(());
             }
         }
@@ -1345,7 +1344,7 @@ async fn queue_independent_calls_l2_to_l1(
                 continue;
             }
         };
-        let body: serde_json::Value = match resp.json().await {
+        let body: super::super::common::JsonRpcResponse = match resp.json().await {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
@@ -1358,7 +1357,7 @@ async fn queue_independent_calls_l2_to_l1(
             }
         };
 
-        if let Some(error) = body.get("error") {
+        if let Some(ref error) = body.error {
             tracing::warn!(
                 target: "based_rollup::composer_rpc::l2_to_l1",
                 call_idx = i,

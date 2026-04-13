@@ -122,25 +122,17 @@ impl SimulationClient for HttpSimClient {
             "id": 1
         });
 
-        let resp = self
+        let rpc_resp: super::common::JsonRpcResponse = self
             .client
             .post(url)
             .json(&req)
             .send()
             .await?
-            .json::<Value>()
+            .json()
             .await?;
 
-        if let Some(error) = resp.get("error") {
-            eyre::bail!(
-                "debug_traceCallMany RPC error: {}",
-                serde_json::to_string(error).unwrap_or_default()
-            );
-        }
-
-        resp.get("result")
-            .cloned()
-            .ok_or_else(|| eyre::eyre!("debug_traceCallMany: missing result field"))
+        rpc_resp.into_result()
+            .map_err(|e| eyre::eyre!("debug_traceCallMany RPC error: {e}"))
     }
 
     async fn eth_call_view(
@@ -158,11 +150,11 @@ impl SimulationClient for HttpSimClient {
         });
 
         let resp = self.client.post(url).json(&req).send().await.ok()?;
-        let body: Value = resp.json().await.ok()?;
-        if body.get("error").is_some() {
+        let body: super::common::JsonRpcResponse = resp.json().await.ok()?;
+        if body.error.is_some() {
             return None;
         }
-        body.get("result")?.as_str().map(|s| s.to_string())
+        body.result_str().map(|s| s.to_string())
     }
 
     async fn get_block_context(
@@ -177,18 +169,18 @@ impl SimulationClient for HttpSimClient {
             "id": 99997
         });
 
-        let resp = self
+        let rpc_resp: super::common::JsonRpcResponse = self
             .client
             .post(url)
             .json(&req)
             .send()
             .await?
-            .json::<Value>()
+            .json()
             .await?;
 
-        let block = resp
-            .get("result")
-            .ok_or_else(|| eyre::eyre!("get_block_context: no result"))?;
+        let block = rpc_resp
+            .into_result()
+            .map_err(|e| eyre::eyre!("get_block_context: {e}"))?;
 
         let number_hex = block
             .get("number")

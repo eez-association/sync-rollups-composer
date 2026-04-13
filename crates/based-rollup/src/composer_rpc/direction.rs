@@ -419,8 +419,9 @@ impl Direction for L2ToL1 {
                 }))
                 .send().await
             {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    if let Some(trace) = body.get("result")
+                if let Ok(body) = resp.json::<super::common::JsonRpcResponse>().await {
+                    if let Some(trace) = body.result
+                        .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
                         .and_then(|arr| arr.first())

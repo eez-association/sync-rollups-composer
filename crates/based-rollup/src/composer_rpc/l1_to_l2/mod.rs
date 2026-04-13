@@ -413,26 +413,24 @@ async fn trace_and_detect_internal_calls(
             "id": 1
         });
 
-        let resp = client
+        let rpc_resp: super::common::JsonRpcResponse = client
             .post(l1_rpc_url)
             .json(&trace_req)
             .send()
             .await?
-            .json::<Value>()
+            .json()
             .await?;
 
-        if let Some(error) = resp.get("error") {
-            tracing::debug!(
-                target: "based_rollup::l1_proxy",
-                ?error,
-                "debug_traceCall failed — forwarding tx without cross-chain detection"
-            );
-            return Ok(None);
-        }
-
-        match resp.get("result").cloned() {
-            Some(r) => r,
-            None => return Ok(None),
+        match rpc_resp.into_result() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    target: "based_rollup::l1_proxy",
+                    %e,
+                    "debug_traceCall failed — forwarding tx without cross-chain detection"
+                );
+                return Ok(None);
+            }
         }
     };
 

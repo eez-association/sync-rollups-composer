@@ -374,8 +374,8 @@ async fn simulate_in_background(client: &reqwest::Client, upstream_url: &str, ra
 
     match client.post(upstream_url).json(&simulate_req).send().await {
         Ok(resp) => {
-            if let Ok(body) = resp.json::<Value>().await {
-                if let Some(error) = body.get("error") {
+            if let Ok(body) = resp.json::<super::common::JsonRpcResponse>().await {
+                if let Some(ref error) = body.error {
                     tracing::debug!(
                         target: "based_rollup::proxy",
                         %error,
@@ -463,13 +463,12 @@ async fn trace_and_detect_l2_internal_calls(
         Ok(r) => r,
         Err(_) => return false,
     };
-    let code_body: Value = match code_resp.json().await {
+    let code_body: super::common::JsonRpcResponse = match code_resp.json().await {
         Ok(v) => v,
         Err(_) => return false,
     };
     let code = code_body
-        .get("result")
-        .and_then(|v| v.as_str())
+        .result_str()
         .unwrap_or("0x");
     if code == "0x" || code.len() <= 2 {
         return false; // EOA — no internal calls possible
@@ -521,7 +520,7 @@ async fn trace_and_detect_l2_internal_calls(
         }
     };
 
-    let trace_body: Value = match trace_resp.json().await {
+    let trace_body: super::common::JsonRpcResponse = match trace_resp.json().await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(
@@ -534,20 +533,17 @@ async fn trace_and_detect_l2_internal_calls(
         }
     };
 
-    if trace_body.get("error").is_some() {
-        let error = trace_body.get("error");
-        tracing::error!(
-            target: "based_rollup::proxy",
-            ?error,
-            "cross-chain detection failed: debug_traceCall returned RPC error — \
-             tx forwarded without cross-chain entry queuing"
-        );
-        return false;
-    }
-
-    let trace_result = match trace_body.get("result") {
-        Some(r) => r,
-        None => return false,
+    let trace_result = match trace_body.into_result() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                target: "based_rollup::proxy",
+                %e,
+                "cross-chain detection failed: debug_traceCall returned RPC error — \
+                 tx forwarded without cross-chain entry queuing"
+            );
+            return false;
+        }
     };
 
     // Walk the trace tree using the generic protocol-level walker.
@@ -558,7 +554,7 @@ async fn trace_and_detect_l2_internal_calls(
         client,
         upstream_url,
         cross_chain_manager_address,
-        trace_result,
+        &trace_result,
         &mut proxy_cache,
     )
     .await;
@@ -651,7 +647,7 @@ async fn trace_and_detect_l2_internal_calls(
         let discovery_result = super::discover::discover_until_stable(
             &direction,
             &sim,
-            trace_result,
+            &trace_result,
             &user_tx,
             &lookup,
             &mut proxy_cache,
