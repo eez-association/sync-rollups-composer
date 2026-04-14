@@ -933,13 +933,19 @@ where
         let mut has_txs = false;
 
         // Check unified queue first — gas prices are already extracted.
-        self.queued_cross_chain_calls.for_each_pending(|call| {
-            has_txs = true;
-            // Unified queue stores max_fee_per_gas as effective_gas_price.
-            // Use it for both fee and priority fee (conservative overbid).
-            max_fee = max_fee.max(call.effective_gas_price());
-            max_priority_fee = max_priority_fee.max(call.effective_gas_price());
-        });
+        {
+            let queue = self
+                .queued_cross_chain_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for call in queue.iter() {
+                has_txs = true;
+                // Unified queue stores max_fee_per_gas as effective_gas_price.
+                // Use it for both fee and priority fee (conservative overbid).
+                max_fee = max_fee.max(call.effective_gas_price());
+                max_priority_fee = max_priority_fee.max(call.effective_gas_price());
+            }
+        }
 
         // Also check legacy forward tx queue.
         {
