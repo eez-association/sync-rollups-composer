@@ -687,7 +687,7 @@ where
             if !queue.is_empty() {
                 let mut calls: Vec<_> = queue.drain(..).collect();
                 // Sort by gas price descending — matches L1 miner tx ordering.
-                calls.sort_by(|a, b| b.effective_gas_price().cmp(&a.effective_gas_price()));
+                calls.sort_by_key(|b| std::cmp::Reverse(b.effective_gas_price()));
 
                 info!(
                     target: "based_rollup::driver",
