@@ -143,7 +143,7 @@ pub(crate) async fn simulate_l1_delivery(
                 final_return_data.clone(), // use known data (from iterative discovery or previous iteration)
                 final_delivery_failed,     // use known failed flag
                 root_scope.to_vec(),       // l1_delivery_scope from trace depth
-                cross_chain::TxOutcome::Success,                     // tx_reverts (simulation path, not real queueing)
+                cross_chain::TxOutcome::Success, // tx_reverts (simulation path, not real queueing)
             );
             call_entries.l1_deferred_entries
         } else {
@@ -245,20 +245,24 @@ pub(crate) async fn simulate_l1_delivery(
             .unwrap_or(0);
 
         // Get verification key from Rollups contract.
-        let vk =
-            match super::common::get_verification_key(client, l1_rpc_url, rollups_address, rollup_id)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "based_rollup::proxy",
-                        %e,
-                        "failed to get verification key for simulation"
-                    );
-                    return Some((final_return_data, final_delivery_failed, all_return_calls));
-                }
-            };
+        let vk = match super::common::get_verification_key(
+            client,
+            l1_rpc_url,
+            rollups_address,
+            rollup_id,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target: "based_rollup::proxy",
+                    %e,
+                    "failed to get verification key for simulation"
+                );
+                return Some((final_return_data, final_delivery_failed, all_return_calls));
+            }
+        };
 
         // Sign ECDSA proof for postBatch.
         let call_data_bytes = alloy_primitives::Bytes::new();
@@ -339,27 +343,28 @@ pub(crate) async fn simulate_l1_delivery(
             "id": 4
         });
 
-        let rpc_resp: super::common::JsonRpcResponse = match client.post(l1_rpc_url).json(&trace_req).send().await {
-            Ok(r) => match r.json().await {
-                Ok(v) => v,
+        let rpc_resp: super::common::JsonRpcResponse =
+            match client.post(l1_rpc_url).json(&trace_req).send().await {
+                Ok(r) => match r.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "based_rollup::proxy",
+                            %e,
+                            "traceCallMany response parse failed"
+                        );
+                        return Some((final_return_data, final_delivery_failed, all_return_calls));
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         target: "based_rollup::proxy",
                         %e,
-                        "traceCallMany response parse failed"
+                        "traceCallMany request failed"
                     );
                     return Some((final_return_data, final_delivery_failed, all_return_calls));
                 }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    target: "based_rollup::proxy",
-                    %e,
-                    "traceCallMany request failed"
-                );
-                return Some((final_return_data, final_delivery_failed, all_return_calls));
-            }
-        };
+            };
 
         // Extract traces from result — now 2 traces: [postBatch, executeL2TX].
         let result_val = match rpc_resp.into_result() {
@@ -373,10 +378,7 @@ pub(crate) async fn simulate_l1_delivery(
                 return Some((final_return_data, final_delivery_failed, all_return_calls));
             }
         };
-        let bundle_traces = match result_val
-            .get(0)
-            .and_then(|b| b.as_array())
-        {
+        let bundle_traces = match result_val.get(0).and_then(|b| b.as_array()) {
             Some(arr) if arr.len() >= 2 => arr,
             _ => {
                 tracing::warn!(
@@ -1065,7 +1067,12 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         "id": 3
     });
 
-    let rpc_resp: super::common::JsonRpcResponse = match client.post(l1_rpc_url).json(&trace_req).send().await {
+    let rpc_resp: super::common::JsonRpcResponse = match client
+        .post(l1_rpc_url)
+        .json(&trace_req)
+        .send()
+        .await
+    {
         Ok(r) => match r.json().await {
             Ok(v) => v,
             Err(e) => {
@@ -1091,10 +1098,7 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
             return None;
         }
     };
-    let bundle_traces = match result_val
-        .get(0)
-        .and_then(|b| b.as_array())
-    {
+    let bundle_traces = match result_val.get(0).and_then(|b| b.as_array()) {
         Some(arr) if arr.len() >= 2 => arr,
         _ => {
             tracing::warn!(
@@ -1237,7 +1241,10 @@ pub(crate) async fn simulate_l1_combined_delivery(
             // Collect return calls belonging to this trigger call.
             let my_return_calls: Vec<&ReturnEdge> = all_return_calls
                 .iter()
-                .filter(|rc| rc.parent_call_index == cross_chain::ParentLink::Child(cross_chain::AbsoluteCallIndex::new(i)))
+                .filter(|rc| {
+                    rc.parent_call_index
+                        == cross_chain::ParentLink::Child(cross_chain::AbsoluteCallIndex::new(i))
+                })
                 .collect();
 
             // Scope: for single calls, use trace_depth-1 (direct caller excluded).
@@ -1368,20 +1375,17 @@ pub(crate) async fn simulate_l1_combined_delivery(
             .unwrap_or(0);
 
         // Get verification key from Rollups contract.
-        let vk =
-            match get_verification_key(client, l1_rpc_url, rollups_address, rollup_id)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "based_rollup::proxy",
-                        %e,
-                        "failed to get verification key for combined simulation"
-                    );
-                    break;
-                }
-            };
+        let vk = match get_verification_key(client, l1_rpc_url, rollups_address, rollup_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target: "based_rollup::proxy",
+                    %e,
+                    "failed to get verification key for combined simulation"
+                );
+                break;
+            }
+        };
 
         // Sign ECDSA proof for combined postBatch.
         let call_data_bytes = alloy_primitives::Bytes::new();
@@ -1413,11 +1417,8 @@ pub(crate) async fn simulate_l1_combined_delivery(
         let proof = alloy_primitives::Bytes::from(proof_bytes);
 
         // Encode postBatch calldata.
-        let post_batch_calldata = cross_chain::encode_post_batch_calldata(
-            &combined_entries,
-            call_data_bytes,
-            proof,
-        );
+        let post_batch_calldata =
+            cross_chain::encode_post_batch_calldata(&combined_entries, call_data_bytes, proof);
 
         // Build the traceCallMany bundle:
         //   tx0: postBatch(combined_entries)
@@ -1475,27 +1476,28 @@ pub(crate) async fn simulate_l1_combined_delivery(
             "id": 5
         });
 
-        let rpc_resp: super::common::JsonRpcResponse = match client.post(l1_rpc_url).json(&trace_req).send().await {
-            Ok(r) => match r.json().await {
-                Ok(v) => v,
+        let rpc_resp: super::common::JsonRpcResponse =
+            match client.post(l1_rpc_url).json(&trace_req).send().await {
+                Ok(r) => match r.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "based_rollup::proxy",
+                            %e,
+                            "combined traceCallMany response parse failed"
+                        );
+                        break;
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         target: "based_rollup::proxy",
                         %e,
-                        "combined traceCallMany response parse failed"
+                        "combined traceCallMany request failed"
                     );
                     break;
                 }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    target: "based_rollup::proxy",
-                    %e,
-                    "combined traceCallMany request failed"
-                );
-                break;
-            }
-        };
+            };
 
         // Extract traces from result.
         let result_val = match rpc_resp.into_result() {
@@ -1509,10 +1511,7 @@ pub(crate) async fn simulate_l1_combined_delivery(
                 break;
             }
         };
-        let bundle_traces = match result_val
-            .get(0)
-            .and_then(|b| b.as_array())
-        {
+        let bundle_traces = match result_val.get(0).and_then(|b| b.as_array()) {
             Some(arr) if arr.len() >= expected_trace_count => arr,
             _ => {
                 let actual = result_val
@@ -1593,7 +1592,8 @@ pub(crate) async fn simulate_l1_combined_delivery(
 
             // Tag return calls with parent_call_index so we know which trigger produced them.
             for mut rc in new_returns {
-                rc.parent_call_index = cross_chain::ParentLink::Child(cross_chain::AbsoluteCallIndex::new(call_idx));
+                rc.parent_call_index =
+                    cross_chain::ParentLink::Child(cross_chain::AbsoluteCallIndex::new(call_idx));
                 new_return_calls_this_iteration.push(rc);
             }
         }
@@ -1663,7 +1663,10 @@ pub(crate) async fn simulate_l1_combined_delivery(
     for (i, _call) in calls.iter().enumerate() {
         let my_return_calls: Vec<ReturnEdge> = all_return_calls
             .iter()
-            .filter(|rc| rc.parent_call_index == cross_chain::ParentLink::Child(cross_chain::AbsoluteCallIndex::new(i)))
+            .filter(|rc| {
+                rc.parent_call_index
+                    == cross_chain::ParentLink::Child(cross_chain::AbsoluteCallIndex::new(i))
+            })
             .cloned()
             .collect();
 
@@ -1773,9 +1776,7 @@ pub(crate) async fn simulate_chained_delivery_l2_to_l1(
                 return fallback_per_call_l2_to_l1_simulation(client, l1_rpc_url, calls).await;
             }
         };
-        let code_hex = code_body
-            .result_str()
-            .unwrap_or("0x");
+        let code_hex = code_body.result_str().unwrap_or("0x");
         if code_hex == "0x" || code_hex == "0x0" {
             tracing::info!(
                 target: "based_rollup::proxy",
@@ -1891,10 +1892,7 @@ pub(crate) async fn simulate_chained_delivery_l2_to_l1(
             return fallback_per_call_l2_to_l1_simulation(client, l1_rpc_url, calls).await;
         }
     };
-    let traces = match result_val
-        .get(0)
-        .and_then(|b| b.as_array())
-    {
+    let traces = match result_val.get(0).and_then(|b| b.as_array()) {
         Some(arr) if arr.len() == calls.len() => arr,
         _ => {
             let actual_len = result_val
@@ -1970,19 +1968,20 @@ pub(crate) async fn fallback_per_call_l2_to_l1_simulation(
             "id": 99941
         });
 
-        let rpc_resp: super::common::JsonRpcResponse = match client.post(l1_rpc_url).json(&trace_req).send().await {
-            Ok(r) => match r.json().await {
-                Ok(v) => v,
+        let rpc_resp: super::common::JsonRpcResponse =
+            match client.post(l1_rpc_url).json(&trace_req).send().await {
+                Ok(r) => match r.json().await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        results.push((vec![], true));
+                        continue;
+                    }
+                },
                 Err(_) => {
                     results.push((vec![], true));
                     continue;
                 }
-            },
-            Err(_) => {
-                results.push((vec![], true));
-                continue;
-            }
-        };
+            };
 
         let result_val = match rpc_resp.into_result() {
             Ok(v) => v,

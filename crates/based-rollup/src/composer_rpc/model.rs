@@ -33,19 +33,13 @@ impl trace::ProxyLookup for L1ProxyLookup<'_> {
     fn lookup_proxy(
         &self,
         address: Address,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<trace::ProxyInfo>> + Send + '_>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<trace::ProxyInfo>> + Send + '_>>
+    {
         Box::pin(async move {
             let calldata = encode_authorized_proxies_calldata(address);
 
-            let hex_data = eth_call_view(
-                self.client,
-                self.rpc_url,
-                self.rollups_address,
-                &calldata,
-            )
-            .await?;
+            let hex_data =
+                eth_call_view(self.client, self.rpc_url, self.rollups_address, &calldata).await?;
 
             // First 32 bytes = originalAddress
             let addr = parse_address_from_abi_return(&hex_data)?;
@@ -85,9 +79,8 @@ impl trace::ProxyLookup for L2ProxyLookup<'_> {
     fn lookup_proxy(
         &self,
         address: Address,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<trace::ProxyInfo>> + Send + '_>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<trace::ProxyInfo>> + Send + '_>>
+    {
         Box::pin(async move {
             let result = detect_cross_chain_proxy_on_l2(
                 self.client,
@@ -114,7 +107,10 @@ impl trace::ProxyLookup for L2ProxyLookup<'_> {
 /// (`DetectedInternalCall`, `DetectedL2InternalCall`). Both L1→L2 and
 /// L2→L1 produce instances of this type from `trace::walk_trace_tree`.
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "scaffold for 3.4-3.7 migration — callers still use direction-specific types")]
+#[allow(
+    dead_code,
+    reason = "scaffold for 3.4-3.7 migration — callers still use direction-specific types"
+)]
 pub(crate) struct DiscoveredCall {
     /// Destination address on the target chain.
     pub destination: Address,
@@ -371,11 +367,11 @@ mod tests {
     /// Generate a random DiscoveredCall for property testing.
     fn arb_discovered_call() -> impl Strategy<Value = DiscoveredCall> {
         (
-            any::<[u8; 20]>(),  // destination
-            prop::collection::vec(any::<u8>(), 0..32),  // calldata
-            any::<u64>(),       // value
-            any::<[u8; 20]>(),  // source
-            any::<bool>(),      // in_reverted_frame
+            any::<[u8; 20]>(),                         // destination
+            prop::collection::vec(any::<u8>(), 0..32), // calldata
+            any::<u64>(),                              // value
+            any::<[u8; 20]>(),                         // source
+            any::<bool>(),                             // in_reverted_frame
         )
             .prop_map(|(dest, calldata, val, src, reverted)| DiscoveredCall {
                 destination: Address::from(dest),
@@ -393,15 +389,11 @@ mod tests {
     }
 
     fn arb_child_call(max_idx: usize) -> impl Strategy<Value = DiscoveredCall> {
-        (
-            arb_discovered_call(),
-            0..max_idx.max(1),
-        )
-            .prop_map(|(mut call, idx)| {
-                call.parent_call_index =
-                    ParentLink::Child(AbsoluteCallIndex::from_usize_at_boundary(idx));
-                call
-            })
+        (arb_discovered_call(), 0..max_idx.max(1)).prop_map(|(mut call, idx)| {
+            call.parent_call_index =
+                ParentLink::Child(AbsoluteCallIndex::from_usize_at_boundary(idx));
+            call
+        })
     }
 
     proptest! {

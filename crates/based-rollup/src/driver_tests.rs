@@ -588,7 +588,9 @@ fn test_backfill_includes_deposit_only_blocks_in_sequence() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: if has_user_txs {
                 Bytes::from(vec![0xc0])
             } else {
@@ -622,7 +624,9 @@ fn test_backfill_all_deposit_only_blocks() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: Bytes::new(), // all deposit-only
             intermediate_roots: vec![],
         });
@@ -660,7 +664,9 @@ fn test_backfill_empty_blocks_prepend_correctly() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: if i == 8 {
                 Bytes::new() // deposit-only
             } else {
@@ -1029,7 +1035,9 @@ fn test_backfill_prepends_before_existing_pending() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
         });
@@ -1856,7 +1864,9 @@ fn test_clear_pending_state_clears_all_fields() {
             l2_block_number: i + 1,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
         });
@@ -1903,7 +1913,9 @@ fn test_clear_pending_state_comprehensive_all_populated() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: Bytes::from(vec![0xc0, i as u8]),
             intermediate_roots: vec![],
         });
@@ -1976,7 +1988,9 @@ fn test_flush_drops_already_submitted_blocks() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
         });
@@ -2007,7 +2021,9 @@ fn test_flush_drops_all_when_l1_ahead() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
         });
@@ -3234,7 +3250,7 @@ fn test_pre_state_root_mismatch_with_cross_chain_entries() {
     let pending_block_103 = PendingBlock {
         l2_block_number: 103,
         pre_state_root: B256::with_last_byte(0xBB),
-        state_root: x,       // speculative (with entries)
+        state_root: x, // speculative (with entries)
         clean_state_root: crate::cross_chain::CleanStateRoot::new(y), // clean (without entries)
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
@@ -3318,7 +3334,9 @@ fn test_clear_pending_state_before_rewind_prevents_stale_entries() {
             l2_block_number: i,
             pre_state_root: B256::with_last_byte(i as u8),
             state_root: B256::with_last_byte(i as u8 + 100),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8 + 100)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8 + 100,
+            )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
         });
@@ -3558,7 +3576,9 @@ fn test_builder_continues_building_while_hold_active() {
             l2_block_number: i,
             pre_state_root: B256::ZERO,
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: alloy_primitives::Bytes::new(),
             intermediate_roots: vec![],
         });
@@ -3636,7 +3656,9 @@ fn test_full_rewind_cycle_state_transitions() {
             l2_block_number: i,
             pre_state_root: B256::with_last_byte(i as u8),
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: alloy_primitives::Bytes::new(),
             intermediate_roots: vec![],
         });
@@ -3668,7 +3690,9 @@ fn test_full_rewind_cycle_state_transitions() {
             l2_block_number: i,
             pre_state_root: B256::with_last_byte(i as u8),
             state_root: B256::with_last_byte(i as u8),
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(i as u8)),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(
+                i as u8,
+            )),
             encoded_transactions: alloy_primitives::Bytes::new(),
             intermediate_roots: vec![],
         });

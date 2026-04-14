@@ -63,8 +63,8 @@ pub(crate) fn simulation_plan_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, U256};
     use crate::cross_chain::ParentLink;
+    use alloy_primitives::{Address, U256};
 
     fn dummy_call() -> DiscoveredCall {
         DiscoveredCall {

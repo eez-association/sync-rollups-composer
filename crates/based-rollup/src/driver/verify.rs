@@ -24,9 +24,7 @@
 
 use super::Driver;
 use super::hold::{DeferralResult, MAX_ENTRY_VERIFY_DEFERRALS};
-use super::types::{
-    DESIRED_GAS_LIMIT, DriverMode, VerificationDecision, calc_gas_limit,
-};
+use super::types::{DESIRED_GAS_LIMIT, DriverMode, VerificationDecision, calc_gas_limit};
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, Bytes};
 use eyre::{OptionExt, Result, WrapErr};
@@ -217,7 +215,9 @@ where
                             MAX_ENTRY_VERIFY_DEFERRALS
                         ));
                     }
-                    DeferralResult::MustRewind { target: rewind_target } => {
+                    DeferralResult::MustRewind {
+                        target: rewind_target,
+                    } => {
                         // Exhausted deferrals — entry likely not consumed (user's L1 tx
                         // reverted or partial consumption). Rewind to re-derive the block
                         // with §4f filtering, which produces the correct nonces for
@@ -237,9 +237,7 @@ where
                             self.config.deployment_l1_block
                         };
                         self.rewind_to_re_derive(rewind_target, rollback_l1_block);
-                        return Ok(VerificationDecision::MismatchDeferExhausted {
-                            rewind_target,
-                        });
+                        return Ok(VerificationDecision::MismatchDeferExhausted { rewind_target });
                     }
                     DeferralResult::NotArmed => {
                         // Unreachable: we checked `is_armed_for(...)` above.

@@ -10,9 +10,7 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 
-use crate::cross_chain::{
-    self, CrossChainExecutionEntry, RollupId, TxOutcome,
-};
+use crate::cross_chain::{self, CrossChainExecutionEntry, RollupId, TxOutcome};
 use crate::table_builder;
 
 // ──────────────────────────────────────────────────────────────────────────────

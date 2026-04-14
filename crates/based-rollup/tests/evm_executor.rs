@@ -1050,7 +1050,9 @@ fn test_cross_chain_multi_entry_batch_three_increments() {
 
         all_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(
+                result_action_hash,
+            ),
             next_action: result_action,
         });
 
@@ -1203,7 +1205,9 @@ fn test_cross_chain_multi_entry_different_destinations() {
 
         all_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(
+                result_action_hash,
+            ),
             next_action: result_action,
         });
 
@@ -1387,7 +1391,9 @@ fn test_cross_chain_batch_with_unconsumed_entries() {
     let _entries = [
         CrossChainExecutionEntry {
             state_deltas: vec![],
-            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
+            action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(
+                result_action_hash,
+            ),
             next_action: result_action,
         },
         CrossChainExecutionEntry {

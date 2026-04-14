@@ -475,23 +475,41 @@ async fn trace_and_detect_internal_calls(
             builder_key: {
                 let key_hex = builder_private_key.as_deref().unwrap_or("");
                 let key_clean = key_hex.strip_prefix("0x").unwrap_or(key_hex);
-                key_clean.parse::<alloy_signer_local::PrivateKeySigner>()
+                key_clean
+                    .parse::<alloy_signer_local::PrivateKeySigner>()
                     .unwrap_or_else(|_| alloy_signer_local::PrivateKeySigner::random())
             },
             client: client.clone(),
             l1_rpc_url: l1_rpc_url.to_string(),
         };
-        let sim = HttpSimClient::new(client.clone(), l1_rpc_url.to_string(), l2_rpc_url.to_string());
-        let lookup = L1ProxyLookup { client, rpc_url: l1_rpc_url, rollups_address };
+        let sim = HttpSimClient::new(
+            client.clone(),
+            l1_rpc_url.to_string(),
+            l2_rpc_url.to_string(),
+        );
+        let lookup = L1ProxyLookup {
+            client,
+            rpc_url: l1_rpc_url,
+            rollups_address,
+        };
         let user_tx = UserTxContext {
-            from: from.to_string(), to: to.to_string(),
-            data: data.to_string(), value: value.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            data: data.to_string(),
+            value: value.to_string(),
             raw_tx_bytes: vec![], // L1→L2 doesn't need raw tx bytes for enrichment
         };
         match super::discover::discover_until_stable(
-            &direction, &sim, &trace_result, &user_tx, &lookup, &mut proxy_cache,
+            &direction,
+            &sim,
+            &trace_result,
+            &user_tx,
+            &lookup,
+            &mut proxy_cache,
             Some(detected_calls.clone()),
-        ).await {
+        )
+        .await
+        {
             Ok(discovered) => {
                 detected_calls = discovered.calls;
                 // last_converged_walk stays empty — discover_until_stable handles

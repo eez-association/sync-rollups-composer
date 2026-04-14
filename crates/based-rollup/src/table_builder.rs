@@ -351,7 +351,11 @@ pub fn build_continuation_entries(
         let any_non_reverted = l1_to_l2_calls.iter().any(|(_, c)| !c.in_reverted_frame);
         let has_l2_to_l1_children = l1_to_l2_calls.iter().any(|(parent_idx, _)| {
             calls.iter().any(|c| {
-                c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(*parent_idx)) && c.direction == CallDirection::L2ToL1
+                c.parent_call_index
+                    == crate::cross_chain::ParentLink::Child(
+                        crate::cross_chain::AbsoluteCallIndex::new(*parent_idx),
+                    )
+                    && c.direction == CallDirection::L2ToL1
             })
         });
         any_reverted && any_non_reverted && !has_l2_to_l1_children
@@ -399,7 +403,11 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index
+                        == crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(call_idx),
+                        )
+                        && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -484,7 +492,10 @@ pub fn build_continuation_entries(
                 // return data from L1 execution.
                 let outer_call_idx = l1_to_l2_calls[pos - 1].0;
                 let outer_child = calls.iter().find(|c| {
-                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(outer_call_idx))
+                    c.parent_call_index
+                        == crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(outer_call_idx),
+                        )
                         && c.direction == CallDirection::L2ToL1
                 });
 
@@ -545,7 +556,11 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index
+                        == crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(call_idx),
+                        )
+                        && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -775,7 +790,11 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index
+                        == crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(call_idx),
+                        )
+                        && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -827,7 +846,11 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index
+                        == crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(call_idx),
+                        )
+                        && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -895,7 +918,11 @@ pub fn build_continuation_entries(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)) && c.direction == CallDirection::L2ToL1
+                    c.parent_call_index
+                        == crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(call_idx),
+                        )
+                        && c.direction == CallDirection::L2ToL1
                 })
                 .collect();
 
@@ -1429,7 +1456,9 @@ pub fn analyze_l2_to_l1_continuation_calls(
             result.push(DetectedCall {
                 direction: CallDirection::L2ToL1,
                 call_action: child_action,
-                parent_call_index: crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(parent_idx)),
+                parent_call_index: crate::cross_chain::ParentLink::Child(
+                    crate::cross_chain::AbsoluteCallIndex::new(parent_idx),
+                ),
                 is_continuation: false,
                 depth: 1,
                 delivery_return_data: vec![], // child executes on L2, no L1 delivery data
@@ -1464,7 +1493,12 @@ fn find_children(detected: &[DetectedCall], parent_idx: usize) -> Vec<(usize, &D
     detected
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(parent_idx)))
+        .filter(|(_, c)| {
+            c.parent_call_index
+                == crate::cross_chain::ParentLink::Child(
+                    crate::cross_chain::AbsoluteCallIndex::new(parent_idx),
+                )
+        })
         .collect()
 }
 
@@ -1511,10 +1545,7 @@ fn push_reentrant_child_entries(
         //
         // Invariant #19 closure: `CallOrientation::address_pair_for`
         // is the single site that holds the swap rule.
-        let orientation = CallOrientation::from_child(
-            child.call_action.rollup_id,
-            our_rollup_id,
-        );
+        let orientation = CallOrientation::from_child(child.call_action.rollup_id, our_rollup_id);
         let is_return_call = orientation.is_return();
         let (trigger_dest, trigger_source) = orientation.address_pair_for(
             child.call_action.destination,
@@ -1860,10 +1891,8 @@ pub fn build_l2_to_l1_continuation_entries(
             //   destination = child.destination (L2 contract, e.g., PingPongL2)
             //   source_address = child.source_address (proxy's originalAddress on L1)
             // Invariant #19: single site for the swap rule.
-            let first_orientation = CallOrientation::from_child(
-                first_child.call_action.rollup_id,
-                our_rollup_id,
-            );
+            let first_orientation =
+                CallOrientation::from_child(first_child.call_action.rollup_id, our_rollup_id);
             let (cr_dest, cr_source) = first_orientation.address_pair_for(
                 first_child.call_action.destination,
                 first_child.call_action.source_address,
@@ -1907,10 +1936,8 @@ pub fn build_l2_to_l1_continuation_entries(
                 this_call_children.iter().enumerate().skip(1)
             {
                 // Invariant #19: single site for the swap rule.
-                let child_orientation = CallOrientation::from_child(
-                    child.call_action.rollup_id,
-                    our_rollup_id,
-                );
+                let child_orientation =
+                    CallOrientation::from_child(child.call_action.rollup_id, our_rollup_id);
                 let (ccr_dest, ccr_source) = child_orientation.address_pair_for(
                     child.call_action.destination,
                     child.call_action.source_address,
@@ -2480,7 +2507,10 @@ pub fn build_l2_to_l1_continuation_entries(
             // Save the terminal for the REVERT_CONTINUE entry
             let terminal = std::mem::replace(
                 &mut last.next_action,
-                revert_action(our_rollup_id, ScopePath::from_index(alloy_primitives::U256::ZERO)), // scope=[0]
+                revert_action(
+                    our_rollup_id,
+                    ScopePath::from_index(alloy_primitives::U256::ZERO),
+                ), // scope=[0]
             );
 
             // Append REVERT_CONTINUE → terminal RESULT

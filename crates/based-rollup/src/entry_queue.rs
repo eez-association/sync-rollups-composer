@@ -128,10 +128,7 @@ impl EntryQueue {
     ///
     /// Returns `Err` if the receipt is evicted from the queue (e.g.
     /// by [`remove`](Self::remove)) before it reaches `Confirmed`.
-    pub async fn wait_confirmation(
-        &self,
-        receipt: QueueReceipt,
-    ) -> eyre::Result<ForwardPermit> {
+    pub async fn wait_confirmation(&self, receipt: QueueReceipt) -> eyre::Result<ForwardPermit> {
         loop {
             {
                 let state = self.inner.lock().await;
@@ -381,9 +378,7 @@ mod tests {
 
         // Spawn a waiter that will park until confirmation.
         let q_clone = q.clone();
-        let waiter = tokio::spawn(async move {
-            q_clone.wait_confirmation(r).await
-        });
+        let waiter = tokio::spawn(async move { q_clone.wait_confirmation(r).await });
 
         // Give the waiter a chance to park.
         tokio::task::yield_now().await;
@@ -403,9 +398,7 @@ mod tests {
 
         // Spawn a waiter.
         let q_clone = q.clone();
-        let waiter = tokio::spawn(async move {
-            q_clone.wait_confirmation(r).await
-        });
+        let waiter = tokio::spawn(async move { q_clone.wait_confirmation(r).await });
 
         // Give the waiter a chance to park.
         tokio::task::yield_now().await;

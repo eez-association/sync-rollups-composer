@@ -227,10 +227,7 @@ impl FlushPlan<Collected> {
     /// different block. `Collected` is **NOT** `Sendable` —
     /// the only way to reach a sendable state is via
     /// [`FlushPlan::arm_hold`].
-    pub fn new_collected(
-        blocks: Vec<PendingBlock>,
-        pending_l1: PendingL1SubmissionQueue,
-    ) -> Self {
+    pub fn new_collected(blocks: Vec<PendingBlock>, pending_l1: PendingL1SubmissionQueue) -> Self {
         // `entry_block` is the last block's number if any blocks
         // are present; otherwise `None`. The pre-1.7 code did
         // `self.hold.arm(blocks.last().unwrap().l2_block_number)`

@@ -20,7 +20,10 @@
 //! will move it out to `driver/protocol_txs.rs`.
 
 use super::Driver;
-use super::types::{BuiltBlock, FCU_SYNCING_INITIAL_BACKOFF_MS, FCU_SYNCING_MAX_RETRIES, FORK_CHOICE_DEPTH, compute_forkchoice_state};
+use super::types::{
+    BuiltBlock, FCU_SYNCING_INITIAL_BACKOFF_MS, FCU_SYNCING_MAX_RETRIES, FORK_CHOICE_DEPTH,
+    compute_forkchoice_state,
+};
 use alloy_primitives::{B256, Bytes};
 use alloy_rpc_types_engine::{ForkchoiceState, ForkchoiceUpdated, PayloadAttributes};
 use eyre::{Result, WrapErr};

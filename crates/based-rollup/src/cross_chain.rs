@@ -1008,11 +1008,7 @@ impl TxOutcome {
     /// Construct from a `bool` at a JSON / wire boundary. `false`
     /// becomes `Success`, `true` becomes `Revert`.
     pub fn from_bool(reverts: bool) -> Self {
-        if reverts {
-            Self::Revert
-        } else {
-            Self::Success
-        }
+        if reverts { Self::Revert } else { Self::Success }
     }
 
     /// Convert back to the legacy `tx_reverts: bool` representation.
@@ -2146,9 +2142,9 @@ pub fn build_l2_to_l1_call_entries(
         source_rollup: RollupId::MAINNET,
         scope: ScopePath::root(),
     };
-    let l1_delivery_result_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
-        &l1_delivery_result.to_sol_action(),
-    )));
+    let l1_delivery_result_hash = ActionHash::new(keccak256(
+        ICrossChainManagerL2::Action::abi_encode(&l1_delivery_result.to_sol_action()),
+    ));
 
     // Entry 2 nextAction: terminal RESULT for L2TX (per SYNC_ROLLUPS_PROTOCOL_SPEC §C.6).
     // Always void with rollupId = triggering rollupId (L2). This applies regardless of
@@ -2356,7 +2352,8 @@ pub fn convert_l1_entries_to_l2_pairs(
         action_map.entry(hash).or_default().push(a);
     }
     // Track which occurrence of each hash has been consumed so far.
-    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> = std::collections::HashMap::new();
+    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> =
+        std::collections::HashMap::new();
 
     // Detect if this batch has continuation entries (multi-call patterns).
     // Continuation entries have nextAction.action_type == CALL.
@@ -2399,9 +2396,9 @@ pub fn convert_l1_entries_to_l2_pairs(
                 next_action: (*call_action).clone(),
             };
             // Reconstruct RESULT table entry
-            let result_action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
-                &entry.next_action.to_sol_action(),
-            )));
+            let result_action_hash = ActionHash::new(keccak256(
+                ICrossChainManagerL2::Action::abi_encode(&entry.next_action.to_sol_action()),
+            ));
             let result_entry = CrossChainExecutionEntry {
                 state_deltas: vec![],
                 action_hash: result_action_hash,
@@ -2487,7 +2484,8 @@ pub fn reconstruct_continuation_l2_entries(
     }
     // Track consumption index per hash for occurrence-aware matching.
     // Each lookup consumes the NEXT entry, not always the first (#256).
-    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> = std::collections::HashMap::new();
+    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> =
+        std::collections::HashMap::new();
 
     let mut continuation_entries = Vec::new();
 
@@ -2586,9 +2584,9 @@ pub fn reconstruct_continuation_l2_entries(
             source_rollup: RollupId::MAINNET,
             scope: ScopePath::root(),
         };
-        let scope_result_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
-            &scope_result_for_lookup.to_sol_action(),
-        )));
+        let scope_result_hash = ActionHash::new(keccak256(
+            ICrossChainManagerL2::Action::abi_encode(&scope_result_for_lookup.to_sol_action()),
+        ));
 
         // Look up scope resolution: hash(scope_RESULT) → RESULT(delivery_data)
         // Occurrence-aware: consume the NEXT matching entry (#256).

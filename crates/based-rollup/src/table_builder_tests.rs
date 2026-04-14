@@ -498,7 +498,12 @@ fn test_l2_to_l1_depth2_entry_generation() {
         call_c.clone(),
         call_d.clone(),
     ];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
+    let result = build_l2_to_l1_continuation_entries(
+        &detected,
+        l2_id,
+        &[0xc0],
+        crate::cross_chain::TxOutcome::Success,
+    );
 
     // ── L2 entries: 5 total ──
     assert_eq!(
@@ -927,7 +932,12 @@ fn test_l2_to_l1_depth1_regression() {
     let call_c = make_l2_to_l1_detected(dest_c, vec![0xC1], src_c, l2_id, Some(1), 1);
 
     let detected = vec![call_a.clone(), call_b.clone(), call_c.clone()];
-    let result = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
+    let result = build_l2_to_l1_continuation_entries(
+        &detected,
+        l2_id,
+        &[0xc0],
+        crate::cross_chain::TxOutcome::Success,
+    );
 
     // ── L2 entries: exactly 3 ──
     assert_eq!(
@@ -1218,7 +1228,12 @@ fn test_l2_scope_resolution_uses_l2_return_data() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
+    let cont = build_l2_to_l1_continuation_entries(
+        &detected,
+        l2_id,
+        &[0xc0],
+        crate::cross_chain::TxOutcome::Success,
+    );
 
     // L2 entries: 2 (CALL + scope resolution)
     assert_eq!(cont.l2_entries.len(), 2, "should have 2 L2 entries");
@@ -1353,7 +1368,12 @@ fn test_l2_mixed_void_nonvoid_children() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
+    let cont = build_l2_to_l1_continuation_entries(
+        &detected,
+        l2_id,
+        &[0xc0],
+        crate::cross_chain::TxOutcome::Success,
+    );
 
     // Should have L2 entries: CALL(parent) → callReturn[0] for child_a,
     // then RESULT(void) → callReturn[1] for child_b (transition uses child_a's void data),
@@ -1458,7 +1478,12 @@ fn test_l1_reentrant_child_delivery_return_data() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
+    let cont = build_l2_to_l1_continuation_entries(
+        &detected,
+        l2_id,
+        &[0xc0],
+        crate::cross_chain::TxOutcome::Success,
+    );
 
     // L1 entries should include the delivery RESULT with non-void data
     let void_l1 = result_void(RollupId::MAINNET);
@@ -1549,7 +1574,12 @@ fn test_void_children_still_use_result_void() {
         },
     ];
 
-    let cont = build_l2_to_l1_continuation_entries(&detected, l2_id, &[0xc0], crate::cross_chain::TxOutcome::Success);
+    let cont = build_l2_to_l1_continuation_entries(
+        &detected,
+        l2_id,
+        &[0xc0],
+        crate::cross_chain::TxOutcome::Success,
+    );
 
     // All RESULT entries should use result_void hashes
     let void_l2_hash = compute_action_hash(&result_void(l2_id));
@@ -1631,7 +1661,10 @@ fn test_reorder_for_swap_and_pop_all_singletons_is_noop() {
     ];
     let original = entries.clone();
     reorder_for_swap_and_pop(&mut entries);
-    assert_eq!(entries, original, "no group ≥ 3 means the function is a no-op");
+    assert_eq!(
+        entries, original,
+        "no group ≥ 3 means the function is a no-op"
+    );
 }
 
 #[test]
@@ -1698,11 +1731,23 @@ fn test_reorder_for_swap_and_pop_groups_first_then_singletons() {
     ];
     reorder_for_swap_and_pop(&mut entries);
     // Multi-group [hash=1] sits first.
-    assert_eq!(entries[0].action_hash, ActionHash::new(B256::with_last_byte(1)));
-    assert_eq!(entries[1].action_hash, ActionHash::new(B256::with_last_byte(1)));
-    assert_eq!(entries[2].action_hash, ActionHash::new(B256::with_last_byte(1)));
+    assert_eq!(
+        entries[0].action_hash,
+        ActionHash::new(B256::with_last_byte(1))
+    );
+    assert_eq!(
+        entries[1].action_hash,
+        ActionHash::new(B256::with_last_byte(1))
+    );
+    assert_eq!(
+        entries[2].action_hash,
+        ActionHash::new(B256::with_last_byte(1))
+    );
     // Singleton last.
-    assert_eq!(entries[3].action_hash, ActionHash::new(B256::with_last_byte(2)));
+    assert_eq!(
+        entries[3].action_hash,
+        ActionHash::new(B256::with_last_byte(2))
+    );
     assert_eq!(entries[3].next_action.value, U256::from(99));
 }
 
@@ -2025,9 +2070,7 @@ mod proptests_reorder {
 
 mod mirror_loop_tests {
     use super::*;
-    use crate::test_support::mirror_case::{
-        canonical_cases, MirrorCase, MirrorPattern,
-    };
+    use crate::test_support::mirror_case::{MirrorCase, MirrorPattern, canonical_cases};
 
     /// Each canonical case constructs successfully and produces at least
     /// one entry across L1 + L2.
@@ -2185,9 +2228,8 @@ mod mirror_loop_tests {
 
 mod mirror_property_tests {
     use crate::cross_chain::{
-        ActionHash, CrossChainActionType, RollupId, ScopePath,
+        ActionHash, CrossChainActionType, RollupId, ScopePath, TxOutcome,
         build_cross_chain_call_entries, build_l2_to_l1_call_entries,
-        TxOutcome,
     };
     use alloy_primitives::{Address, U256};
     use proptest::prelude::*;

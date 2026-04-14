@@ -492,7 +492,10 @@ fn test_parse_batch_posted_logs_mixed_rollup_ids_partial_match() {
         1,
         "only the entry with rollup_id=1 delta should match"
     );
-    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)));
+    assert_eq!(
+        result[0].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA))
+    );
     assert_eq!(result[0].l1_block_number, 200);
 }
 
@@ -600,7 +603,10 @@ fn test_from_sol_execution_entry_multi_delta_roundtrip() {
 
     let rust_entry = CrossChainExecutionEntry::from_sol(&sol_entry).expect("valid entry");
     assert_eq!(rust_entry.state_deltas.len(), 2);
-    assert_eq!(rust_entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xDD)));
+    assert_eq!(
+        rust_entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0xDD))
+    );
     assert_eq!(
         rust_entry.next_action.action_type,
         CrossChainActionType::L2Tx
@@ -787,7 +793,10 @@ fn test_parse_batch_posted_logs_matches_via_next_action_rollup_id_not_state_delt
         1,
         "entry must match via nextAction.rollupId even without state delta match"
     );
-    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x42)));
+    assert_eq!(
+        result[0].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x42))
+    );
     assert_eq!(result[0].l1_block_number, 100);
     assert_eq!(
         result[0].entry.next_action.rollup_id,
@@ -914,19 +923,28 @@ fn test_parse_batch_posted_logs_preserves_l1_block_ordering() {
         result[0].l1_block_number, 100,
         "first entry should be from first log"
     );
-    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01)));
+    assert_eq!(
+        result[0].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01))
+    );
 
     assert_eq!(
         result[1].l1_block_number, 200,
         "second entry should be from second log"
     );
-    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02)));
+    assert_eq!(
+        result[1].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02))
+    );
 
     assert_eq!(
         result[2].l1_block_number, 150,
         "third entry should be from third log"
     );
-    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03)));
+    assert_eq!(
+        result[2].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03))
+    );
 }
 
 #[test]
@@ -995,9 +1013,18 @@ fn test_parse_batch_posted_logs_multiple_entries_per_log_same_block() {
     }
 
     // Order should be preserved
-    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)));
-    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xBB)));
-    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xCC)));
+    assert_eq!(
+        result[0].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA))
+    );
+    assert_eq!(
+        result[1].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0xBB))
+    );
+    assert_eq!(
+        result[2].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0xCC))
+    );
 }
 
 #[test]
@@ -1050,7 +1077,10 @@ fn test_parse_batch_posted_logs_match_via_both_delta_and_action() {
         1,
         "entry matching via both paths should appear exactly once"
     );
-    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0xDD)));
+    assert_eq!(
+        result[0].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0xDD))
+    );
 }
 
 // ── encode_post_batch_calldata tests ──
@@ -1296,19 +1326,28 @@ fn test_parse_batch_posted_logs_preserves_intra_log_entry_order_mixed_action_typ
     assert_eq!(result.len(), 3, "all 3 entries should match our rollup");
 
     // Verify ordering preserved: CALL(0x01), RESULT(0x02), CALL(0x03)
-    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01)));
+    assert_eq!(
+        result[0].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01))
+    );
     assert_eq!(
         result[0].entry.next_action.action_type,
         CrossChainActionType::Call
     );
 
-    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02)));
+    assert_eq!(
+        result[1].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x02))
+    );
     assert_eq!(
         result[1].entry.next_action.action_type,
         CrossChainActionType::Result
     );
 
-    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03)));
+    assert_eq!(
+        result[2].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x03))
+    );
     assert_eq!(
         result[2].entry.next_action.action_type,
         CrossChainActionType::Call
@@ -1371,16 +1410,28 @@ fn test_parse_batch_posted_logs_multi_log_multi_entry_preserves_global_order() {
     assert_eq!(result.len(), 4);
 
     // Global order: log1[0], log1[1], log2[0], log2[1]
-    assert_eq!(result[0].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x10)));
+    assert_eq!(
+        result[0].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x10))
+    );
     assert_eq!(result[0].l1_block_number, 100);
 
-    assert_eq!(result[1].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x11)));
+    assert_eq!(
+        result[1].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x11))
+    );
     assert_eq!(result[1].l1_block_number, 100);
 
-    assert_eq!(result[2].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x20)));
+    assert_eq!(
+        result[2].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x20))
+    );
     assert_eq!(result[2].l1_block_number, 200);
 
-    assert_eq!(result[3].entry.action_hash, crate::cross_chain::ActionHash::new(B256::with_last_byte(0x21)));
+    assert_eq!(
+        result[3].entry.action_hash,
+        crate::cross_chain::ActionHash::new(B256::with_last_byte(0x21))
+    );
     assert_eq!(result[3].l1_block_number, 200);
 }
 
@@ -1783,7 +1834,10 @@ fn test_build_cross_chain_call_entries_empty_data() {
     assert!(!result_entry.next_action.failed);
     // Action hashes should be non-zero
     assert_ne!(call_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
-    assert_ne!(result_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
+    assert_ne!(
+        result_entry.action_hash,
+        crate::cross_chain::ActionHash::ZERO
+    );
 }
 
 #[test]
@@ -2020,7 +2074,10 @@ fn test_build_block_entries_creates_immediate_entries() {
     for entry in &entries {
         assert_eq!(entry.action_hash, crate::cross_chain::ActionHash::ZERO);
         assert_eq!(entry.state_deltas.len(), 1);
-        assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(1)));
+        assert_eq!(
+            entry.state_deltas[0].rollup_id,
+            RollupId::new(U256::from(1))
+        );
     }
     // Verify state root chaining
     assert_eq!(
@@ -2226,7 +2283,10 @@ fn test_attach_chained_state_deltas() {
     assert_eq!(entries[0].state_deltas.len(), 1);
     assert_eq!(entries[0].state_deltas[0].current_state, y);
     assert_eq!(entries[0].state_deltas[0].new_state, x1);
-    assert_eq!(entries[0].state_deltas[0].rollup_id, RollupId::new(U256::from(1)));
+    assert_eq!(
+        entries[0].state_deltas[0].rollup_id,
+        RollupId::new(U256::from(1))
+    );
 
     assert_eq!(entries[2].state_deltas.len(), 1);
     assert_eq!(entries[2].state_deltas[0].current_state, x1);
@@ -2265,7 +2325,7 @@ fn test_build_l2_to_l1_call_entries_propagates_return_data() {
         return_data.clone(),
         false,
         vec![], // l1_delivery_scope: empty for tests (no deep nesting)
-        crate::cross_chain::TxOutcome::Success,  // tx_reverts
+        crate::cross_chain::TxOutcome::Success, // tx_reverts
     );
 
     // L2 table entry 0: CALL entry, nextAction = RESULT with delivery return data.
@@ -2330,7 +2390,7 @@ fn test_build_withdrawal_entries_still_void() {
         vec![],     // delivery_return_data: EOA recipient
         false,      // delivery_failed
         vec![],     // l1_delivery_scope
-        crate::cross_chain::TxOutcome::Success,      // tx_reverts
+        crate::cross_chain::TxOutcome::Success, // tx_reverts
     );
 
     // L2 RESULT entries should have empty data (EOA target, no return data).
@@ -2370,8 +2430,8 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         vec![0xc0], // rlp_encoded_tx placeholder
         vec![],
         false,
-        vec![], // l1_delivery_scope
-        crate::cross_chain::TxOutcome::Success,  // tx_reverts
+        vec![],                                 // l1_delivery_scope
+        crate::cross_chain::TxOutcome::Success, // tx_reverts
     );
 
     // Build entries with non-empty return data.
@@ -2385,8 +2445,8 @@ fn test_build_l2_to_l1_entries_hash_consistency_with_return_data() {
         vec![0xc0], // rlp_encoded_tx placeholder
         return_data,
         false,
-        vec![], // l1_delivery_scope
-        crate::cross_chain::TxOutcome::Success,  // tx_reverts
+        vec![],                                 // l1_delivery_scope
+        crate::cross_chain::TxOutcome::Success, // tx_reverts
     );
 
     // The CALL entry hash should be the same (same CALL action regardless of return data).
@@ -3114,10 +3174,7 @@ fn test_partition_entries_all_triggers() {
 #[test]
 fn test_partition_entries_all_table_when_action_hash_mismatches() {
     let our_id = RollupId::new(U256::from(1));
-    let entries = vec![
-        mk_continuation_entry(our_id),
-        mk_continuation_entry(our_id),
-    ];
+    let entries = vec![mk_continuation_entry(our_id), mk_continuation_entry(our_id)];
     let (table, triggers) = partition_entries(&entries, our_id);
     assert_eq!(table.len(), 2);
     assert!(triggers.is_empty());

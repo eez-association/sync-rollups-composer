@@ -17,10 +17,8 @@
 //!   of transactions saved during a previous rewind.
 
 use super::Driver;
-use super::types::{
-    DriverMode, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS,
-};
 use super::TriggerMetadata;
+use super::types::{DriverMode, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS};
 use crate::cross_chain::CrossChainExecutionEntry;
 use crate::proposer::PendingBlock;
 use alloy_primitives::{B256, Bytes};
@@ -373,9 +371,8 @@ where
         rpc_entries: &[CrossChainExecutionEntry],
     ) -> (crate::cross_chain::CleanStateRoot, Vec<B256>) {
         // Count true triggers (not continuation table entries).
-        let our_rollup_id = crate::cross_chain::RollupId::new(alloy_primitives::U256::from(
-            self.config.rollup_id,
-        ));
+        let our_rollup_id =
+            crate::cross_chain::RollupId::new(alloy_primitives::U256::from(self.config.rollup_id));
         let num_protocol_triggers = rpc_entries
             .iter()
             .filter(|e| {
@@ -440,8 +437,7 @@ where
 
         // Attach state deltas to pending L1 entries.
         if !self.pending_l1.is_empty() && !intermediate_roots.is_empty() {
-            let group_starts: Vec<usize> =
-                self.pending_l1.groups.iter().map(|g| g.start).collect();
+            let group_starts: Vec<usize> = self.pending_l1.groups.iter().map(|g| g.start).collect();
             crate::cross_chain::attach_generic_state_deltas(
                 &mut self.pending_l1.entries,
                 &intermediate_roots,
@@ -664,10 +660,7 @@ where
     ///
     /// Returns a [`QueueDrainResult`] whose `rollback` field must be
     /// consumed via [`rollback_queue_drain`] if block building fails.
-    async fn drain_rpc_queues(
-        &mut self,
-        current_l1_block: u64,
-    ) -> Result<QueueDrainResult> {
+    async fn drain_rpc_queues(&mut self, current_l1_block: u64) -> Result<QueueDrainResult> {
         let provider = self.get_l1_provider().clone();
 
         // Fetch cross-chain execution entries from L1 for builder blocks.
@@ -694,9 +687,7 @@ where
             if !queue.is_empty() {
                 let mut calls: Vec<_> = queue.drain(..).collect();
                 // Sort by gas price descending — matches L1 miner tx ordering.
-                calls.sort_by(|a, b| {
-                    b.effective_gas_price().cmp(&a.effective_gas_price())
-                });
+                calls.sort_by(|a, b| b.effective_gas_price().cmp(&a.effective_gas_price()));
 
                 info!(
                     target: "based_rollup::driver",
@@ -787,7 +778,8 @@ where
                     if !raw_l1_tx_for_forward.is_empty() {
                         queued_l1_txs.push(raw_l1_tx_for_forward);
                     }
-                    self.pending_l1.append_group(group_l1_entries, group_mode, None);
+                    self.pending_l1
+                        .append_group(group_l1_entries, group_mode, None);
                     calls_for_repush.push(call);
                 }
                 rpc_entry_count = rpc_entries.len();

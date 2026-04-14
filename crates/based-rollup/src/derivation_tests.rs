@@ -943,7 +943,11 @@ mod filtering_invariants_tests {
         map.insert(h3, 1); // present but unreachable due to prefix counting
 
         let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0, 1, 2]);
-        assert_eq!(k.as_usize(), 1, "prefix should stop at the second trigger (h2 missing)");
+        assert_eq!(
+            k.as_usize(),
+            1,
+            "prefix should stop at the second trigger (h2 missing)"
+        );
         // h1 was consumed, h3 must remain UN-decremented (prefix counting,
         // never all-or-nothing).
         assert_eq!(map[&h1], 0);
@@ -964,7 +968,11 @@ mod filtering_invariants_tests {
         // hb intentionally missing.
 
         let k = compute_consumed_trigger_prefix(&receipts, ccm, &mut map, &[0]);
-        assert_eq!(k.as_usize(), 0, "any missing hash within a tx rejects the tx");
+        assert_eq!(
+            k.as_usize(),
+            0,
+            "any missing hash within a tx rejects the tx"
+        );
         assert_eq!(
             map[&ha], 1,
             "ha must NOT be decremented when the tx as a whole is rejected"

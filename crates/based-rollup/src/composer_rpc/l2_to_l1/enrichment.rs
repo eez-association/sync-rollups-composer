@@ -7,8 +7,8 @@
 use alloy_primitives::{Address, U256};
 use serde_json::Value;
 
-use crate::cross_chain::RollupId;
 use super::super::model::{DiscoveredCall, L2ProxyLookup, ReturnEdge};
+use crate::cross_chain::RollupId;
 
 /// A cross-chain proxy call discovered by walking an L2 callTracer trace tree.
 ///
@@ -30,8 +30,10 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
     rollup_id: u64,
 ) {
     // Shared proxy cache across all return calls in this enrichment pass.
-    let mut proxy_cache: std::collections::HashMap<Address, Option<super::super::trace::ProxyInfo>> =
-        std::collections::HashMap::new();
+    let mut proxy_cache: std::collections::HashMap<
+        Address,
+        Option<super::super::trace::ProxyInfo>,
+    > = std::collections::HashMap::new();
 
     // --- Phase 1: Collect indices that need enrichment and resolve proxy addresses ---
     let needs_enrichment: Vec<usize> = if return_calls.len() >= 2 {
@@ -41,9 +43,7 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
     } else {
         // Single call: only enrich if empty
         (0..return_calls.len())
-            .filter(|&i| {
-                return_calls[i].return_data.is_empty() && !return_calls[i].delivery_failed
-            })
+            .filter(|&i| return_calls[i].return_data.is_empty() && !return_calls[i].delivery_failed)
             .collect()
     };
 
@@ -144,7 +144,8 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
             Ok(resp) => match resp.json::<super::super::common::JsonRpcResponse>().await {
                 Ok(body) => {
                     // Extract output from trace: result[0][0].output
-                    if let Some(trace) = body.result
+                    if let Some(trace) = body
+                        .result
                         .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
@@ -196,7 +197,7 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                             vec![],     // delivery_return_data placeholder
                                             false,      // delivery_failed placeholder
                                             vec![],     // l1_delivery_scope placeholder
-                                            crate::cross_chain::TxOutcome::Success,      // tx_reverts
+                                            crate::cross_chain::TxOutcome::Success, // tx_reverts
                                         );
                                     all_placeholder_entries.extend(placeholder.l2_table_entries);
                                 }
@@ -219,18 +220,18 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                         if let Ok(r) =
                                             client.post(l2_rpc_url).json(&sys_req).send().await
                                         {
-                                            if let Ok(b) = r.json::<super::super::common::JsonRpcResponse>().await {
-                                                b.result_str().and_then(
-                                                    |s| {
-                                                        let clean =
-                                                            s.strip_prefix("0x").unwrap_or(s);
-                                                        if clean.len() >= 64 {
-                                                            Some(format!("0x{}", &clean[24..64]))
-                                                        } else {
-                                                            None
-                                                        }
-                                                    },
-                                                )
+                                            if let Ok(b) = r
+                                                .json::<super::super::common::JsonRpcResponse>()
+                                                .await
+                                            {
+                                                b.result_str().and_then(|s| {
+                                                    let clean = s.strip_prefix("0x").unwrap_or(s);
+                                                    if clean.len() >= 64 {
+                                                        Some(format!("0x{}", &clean[24..64]))
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
                                             } else {
                                                 None
                                             }
@@ -240,9 +241,10 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                     };
 
                                     if let Some(sys_addr) = system_addr {
-                                        let load_calldata = crate::composer_rpc::entry_builder::encode_load_table(
-                                            &all_placeholder_entries,
-                                        );
+                                        let load_calldata =
+                                            crate::composer_rpc::entry_builder::encode_load_table(
+                                                &all_placeholder_entries,
+                                            );
                                         let load_data =
                                             format!("0x{}", hex::encode(load_calldata.as_ref()));
                                         let ccm_hex = format!("{cross_chain_manager_address}");
@@ -281,10 +283,14 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                             .await
                                         {
                                             Ok(r2) => {
-                                                if let Ok(b2) = r2.json::<super::super::common::JsonRpcResponse>().await {
+                                                if let Ok(b2) = r2
+                                                    .json::<super::super::common::JsonRpcResponse>()
+                                                    .await
+                                                {
                                                     // Extract tx1 (index 1) trace — the return call
                                                     // execution with entries loaded.
-                                                    if let Some(traces) = b2.result
+                                                    if let Some(traces) = b2
+                                                        .result
                                                         .as_ref()
                                                         .and_then(|r| r.get(0))
                                                         .and_then(|b| b.as_array())
@@ -302,8 +308,8 @@ pub(crate) async fn enrich_return_calls_via_l2_trace(
                                                                     "L2 return call still reverts after \
                                                                      loadExecutionTable — marking as failed"
                                                                 );
-                                                                return_calls[i]
-                                                                    .delivery_failed = true;
+                                                                return_calls[i].delivery_failed =
+                                                                    true;
                                                             } else if let Some(out_hex) = t2
                                                                 .get("output")
                                                                 .and_then(|v| v.as_str())
@@ -571,10 +577,7 @@ async fn try_chained_l2_enrichment(
             return false;
         }
     };
-    let traces = match result_val
-        .get(0)
-        .and_then(|b| b.as_array())
-    {
+    let traces = match result_val.get(0).and_then(|b| b.as_array()) {
         Some(arr) => arr,
         None => {
             tracing::warn!(
@@ -638,8 +641,10 @@ async fn try_chained_l2_enrichment(
 
     // For each reverted call, walk its trace to find inner proxy calls that need
     // loadExecutionTable entries.
-    let mut proxy_cache: std::collections::HashMap<Address, Option<super::super::trace::ProxyInfo>> =
-        std::collections::HashMap::new();
+    let mut proxy_cache: std::collections::HashMap<
+        Address,
+        Option<super::super::trace::ProxyInfo>,
+    > = std::collections::HashMap::new();
     let mut all_placeholder_entries = Vec::new();
 
     for &pos in &reverted_positions {
@@ -667,7 +672,7 @@ async fn try_chained_l2_enrichment(
                 vec![],     // delivery_return_data placeholder
                 false,      // delivery_failed placeholder
                 vec![],     // l1_delivery_scope placeholder
-                crate::cross_chain::TxOutcome::Success,      // tx_reverts
+                crate::cross_chain::TxOutcome::Success, // tx_reverts
             );
             all_placeholder_entries.extend(placeholder.l2_table_entries);
         }
@@ -821,10 +826,7 @@ async fn try_chained_l2_enrichment(
             return false;
         }
     };
-    let traces2 = match result_val2
-        .get(0)
-        .and_then(|b| b.as_array())
-    {
+    let traces2 = match result_val2.get(0).and_then(|b| b.as_array()) {
         Some(arr) if arr.len() == 1 + needs_enrichment.len() => arr,
         _ => {
             tracing::warn!(
@@ -1022,8 +1024,10 @@ pub(super) async fn simulate_l2_return_call_delivery(
     );
 
     let mut all_detected: Vec<DiscoveredCall> = Vec::new();
-    let mut proxy_cache: std::collections::HashMap<Address, Option<super::super::trace::ProxyInfo>> =
-        std::collections::HashMap::new();
+    let mut proxy_cache: std::collections::HashMap<
+        Address,
+        Option<super::super::trace::ProxyInfo>,
+    > = std::collections::HashMap::new();
 
     // loadExecutionTable requires the system address (onlySystemAddress modifier).
     // On our L2 chain, CCM.SYSTEM_ADDRESS is the builder address (set in constructor).
@@ -1120,7 +1124,7 @@ pub(super) async fn simulate_l2_return_call_delivery(
             vec![],     // delivery_return_data placeholder
             false,      // delivery_failed placeholder
             vec![],     // l1_delivery_scope placeholder
-            crate::cross_chain::TxOutcome::Success,      // tx_reverts
+            crate::cross_chain::TxOutcome::Success, // tx_reverts
         );
 
         let mut detected_for_call: Vec<DiscoveredCall> = Vec::new();
@@ -1163,7 +1167,8 @@ pub(super) async fn simulate_l2_return_call_delivery(
         if let Ok(resp) = client.post(l2_rpc_url).json(&trace_req).send().await {
             if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
                 // Extract tx[1] trace (executeIncomingCrossChainCall with entries loaded)
-                if let Some(traces) = body.result
+                if let Some(traces) = body
+                    .result
                     .as_ref()
                     .and_then(|r| r.get(0))
                     .and_then(|b| b.as_array())

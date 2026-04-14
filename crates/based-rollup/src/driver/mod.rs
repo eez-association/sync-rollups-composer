@@ -151,9 +151,7 @@ pub use flush_plan::{
     Collected, FlushPlan, HoldArmed, NoEntries, RollbackPackage, SendResult, Sendable,
 };
 pub use hold::{DeferralResult, EntryVerificationHold, MAX_ENTRY_VERIFY_DEFERRALS};
-pub use pending_queue::{
-    BlockEntryMix, PendingL1Group, PendingL1SubmissionQueue, TriggerMetadata,
-};
+pub use pending_queue::{BlockEntryMix, PendingL1Group, PendingL1SubmissionQueue, TriggerMetadata};
 pub use types::{BuiltBlock, DriverMode};
 use types::{
     CHECKPOINT_INTERVAL, FORK_CHOICE_DEPTH, L1ConfirmedAnchor, MAX_BACKOFF_SECS,

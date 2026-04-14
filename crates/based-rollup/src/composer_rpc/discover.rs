@@ -28,8 +28,8 @@ use serde_json::Value;
 
 use super::direction::{Direction, UserTxContext};
 use super::model::{
-    DiscoveredCall, DiscoveredSet, PromotionDecision, correct_in_reverted_frame,
-    dedup_discovered_calls, walk_trace_to_discovered, MAX_DISCOVERY_ITERATIONS,
+    DiscoveredCall, DiscoveredSet, MAX_DISCOVERY_ITERATIONS, PromotionDecision,
+    correct_in_reverted_frame, dedup_discovered_calls, walk_trace_to_discovered,
 };
 use super::sim_client::SimulationClient;
 use super::trace;
@@ -42,7 +42,10 @@ use super::trace;
 ///
 /// Returns a [`DiscoveredSet`] with all discovered forward calls.
 /// Return edges are populated later by delivery simulation (step 3.6).
-#[allow(dead_code, reason = "scaffold — callers migrate from direction-specific functions")]
+#[allow(
+    dead_code,
+    reason = "scaffold — callers migrate from direction-specific functions"
+)]
 pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
     direction: &D,
     sim: &S,
@@ -80,8 +83,8 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
     }
 
     // Check if the top-level call reverted — indicates entries need pre-loading.
-    let top_level_error = initial_trace.get("error").is_some()
-        || initial_trace.get("revertReason").is_some();
+    let top_level_error =
+        initial_trace.get("error").is_some() || initial_trace.get("revertReason").is_some();
 
     // Step 2: Iterative discovery if top-level reverted.
     let mut last_retrace_results: Vec<DiscoveredCall> = Vec::new();

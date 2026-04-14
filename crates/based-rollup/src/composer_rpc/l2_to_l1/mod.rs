@@ -46,7 +46,6 @@ use super::common::{
 };
 use super::model::{L2ProxyLookup, ReturnEdge};
 
-
 /// Run the RPC proxy server.
 ///
 /// Listens on `0.0.0.0:{proxy_port}` and forwards all JSON-RPC requests to
@@ -467,9 +466,7 @@ async fn trace_and_detect_l2_internal_calls(
         Ok(v) => v,
         Err(_) => return false,
     };
-    let code = code_body
-        .result_str()
-        .unwrap_or("0x");
+    let code = code_body.result_str().unwrap_or("0x");
     if code == "0x" || code.len() <= 2 {
         return false; // EOA — no internal calls possible
     }
@@ -716,7 +713,6 @@ async fn trace_and_detect_l2_internal_calls(
             }
         }
     }
-
 
     process::process_l2_to_l1_calls(
         client,

@@ -1148,7 +1148,9 @@ async fn test_proposer_submits_to_l1() {
         l2_block_number: 1,
         pre_state_root: B256::ZERO,
         state_root: dummy_state_root(1),
-        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(1)),
+        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+            dummy_state_root(1),
+        ),
         encoded_transactions: payload.clone(),
         intermediate_roots: vec![],
     };
@@ -1249,7 +1251,9 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 1,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(1),
-            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(1)),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(1),
+            ),
             encoded_transactions: Bytes::from_static(b"batch1"),
             intermediate_roots: vec![],
         },
@@ -1257,7 +1261,9 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 2,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(2),
-            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(2)),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(2),
+            ),
             encoded_transactions: Bytes::from_static(b"batch2"),
             intermediate_roots: vec![],
         },
@@ -1265,7 +1271,9 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 3,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(3),
-            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(3)),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(3),
+            ),
             encoded_transactions: Bytes::from_static(b"batch3"),
             intermediate_roots: vec![],
         },
@@ -2334,7 +2342,9 @@ async fn test_proposer_reads_state_root_after_submissions() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::new(),
             intermediate_roots: vec![],
         })
@@ -2729,7 +2739,9 @@ async fn test_concurrent_proposer_submissions() {
         l2_block_number: 1,
         pre_state_root: B256::ZERO,
         state_root: dummy_state_root(1),
-        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(1)),
+        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+            dummy_state_root(1),
+        ),
         encoded_transactions: Bytes::from_static(b"race"),
         intermediate_roots: vec![],
     };
@@ -2843,7 +2855,9 @@ async fn test_large_batch_chunking() {
                 l2_block_number: n,
                 pre_state_root: on_chain_root,
                 state_root: dummy_state_root(n),
-                clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
+                clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                    dummy_state_root(n),
+                ),
                 encoded_transactions: Bytes::from(format!("chunk_{n}").into_bytes()),
                 intermediate_roots: vec![],
             })
@@ -3061,7 +3075,9 @@ async fn test_proposer_backfill_from_local_chain() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::from(format!("p1_block_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -3098,7 +3114,9 @@ async fn test_proposer_backfill_from_local_chain() {
             l2_block_number: n,
             pre_state_root: dummy_state_root(3),
             state_root: dummy_state_root(n),
-            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::from(format!("p2_block_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -3670,7 +3688,9 @@ async fn test_proposer_max_batch_size() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(dummy_state_root(n)),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::from(format!("prop_max_{n}").into_bytes()),
             intermediate_roots: vec![],
         })

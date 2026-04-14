@@ -33,7 +33,7 @@ pub use walker::walk_trace_tree;
 #[cfg(test)]
 mod tests {
     use super::types::{
-        execute_cross_chain_call_selector, create_cross_chain_proxy_selector, has_selector,
+        create_cross_chain_proxy_selector, execute_cross_chain_call_selector, has_selector,
     };
     use super::*;
     use serde_json::{Value, json};

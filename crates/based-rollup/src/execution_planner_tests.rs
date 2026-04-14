@@ -301,7 +301,10 @@ fn test_build_entries_from_encoded_produces_valid_entry() {
 
     let entry = &entries[0];
     assert_eq!(entry.state_deltas.len(), 1);
-    assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(42)));
+    assert_eq!(
+        entry.state_deltas[0].rollup_id,
+        RollupId::new(U256::from(42))
+    );
     assert_eq!(entry.state_deltas[0].current_state, pre);
     assert_eq!(entry.state_deltas[0].new_state, post);
     assert_ne!(entry.action_hash, crate::cross_chain::ActionHash::ZERO);
@@ -447,7 +450,10 @@ fn test_e2e_pipeline_roundtrip_build_to_load_execution_table() {
     let builder_entries = build_entries_from_encoded(rollup_id, pre_root, post_root, &rlp_buf);
     assert_eq!(builder_entries.len(), 1);
     let original_entry = &builder_entries[0];
-    assert_ne!(original_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
+    assert_ne!(
+        original_entry.action_hash,
+        crate::cross_chain::ActionHash::ZERO
+    );
     assert_eq!(original_entry.state_deltas[0].current_state, pre_root);
     assert_eq!(original_entry.state_deltas[0].new_state, post_root);
 
@@ -1447,7 +1453,10 @@ fn test_build_state_only_entry_different_roots_produces_entry() {
     assert_eq!(entry.state_deltas.len(), 1);
     assert_eq!(entry.state_deltas[0].current_state, pre);
     assert_eq!(entry.state_deltas[0].new_state, post);
-    assert_eq!(entry.state_deltas[0].rollup_id, RollupId::new(U256::from(42)));
+    assert_eq!(
+        entry.state_deltas[0].rollup_id,
+        RollupId::new(U256::from(42))
+    );
     assert_eq!(entry.state_deltas[0].ether_delta, I256::ZERO);
 }
 
@@ -1565,7 +1574,10 @@ fn test_cross_chain_call_result_pair_l1_pipeline_roundtrip() {
         return_data.clone(),
     );
     assert_ne!(call_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
-    assert_ne!(result_entry.action_hash, crate::cross_chain::ActionHash::ZERO);
+    assert_ne!(
+        result_entry.action_hash,
+        crate::cross_chain::ActionHash::ZERO
+    );
     assert_ne!(call_entry.action_hash, result_entry.action_hash);
 
     // Step 2: Convert to L1 format and roundtrip through postBatch → BatchPosted → parse
@@ -1823,7 +1835,11 @@ fn test_mixed_empty_and_nonempty_blocks_chain_state_deltas() {
         crate::cross_chain::ActionHash::ZERO,
         "non-empty block has non-zero hash"
     );
-    assert_eq!(e1[0].action_hash, crate::cross_chain::ActionHash::ZERO, "empty block has zero hash");
+    assert_eq!(
+        e1[0].action_hash,
+        crate::cross_chain::ActionHash::ZERO,
+        "empty block has zero hash"
+    );
     assert_ne!(
         e2[0].action_hash,
         crate::cross_chain::ActionHash::ZERO,

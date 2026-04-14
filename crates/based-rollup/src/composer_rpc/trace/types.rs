@@ -25,7 +25,10 @@ use std::pin::Pin;
 /// present on reverted calls, `calls` is absent on leaf nodes).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "fields used incrementally as callers migrate from Value")]
+#[allow(
+    dead_code,
+    reason = "fields used incrementally as callers migrate from Value"
+)]
 pub(crate) struct CallTraceNode {
     /// Target address of the call.
     #[serde(default)]
@@ -235,7 +238,10 @@ pub(crate) fn trace_node_from_typed(typed: &CallTraceNode) -> Option<TraceNode> 
 /// Returns `None` if any required field is missing or unparseable.
 /// Accepts raw `serde_json::Value` for callers that haven't migrated
 /// to [`CallTraceNode`] yet.
-#[allow(dead_code, reason = "kept for callers outside trace/ that still use &Value")]
+#[allow(
+    dead_code,
+    reason = "kept for callers outside trace/ that still use &Value"
+)]
 pub(crate) fn parse_trace_node(node: &Value) -> Option<TraceNode> {
     let typed = CallTraceNode::try_parse(node)?;
     trace_node_from_typed(&typed)

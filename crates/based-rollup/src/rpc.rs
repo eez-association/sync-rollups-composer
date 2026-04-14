@@ -293,9 +293,7 @@ impl QueuedCrossChainCall {
     /// entries that never forward a user tx.
     pub fn raw_l1_tx(&self) -> &Bytes {
         match self {
-            Self::Simple { raw_l1_tx, .. } | Self::WithContinuations { raw_l1_tx, .. } => {
-                raw_l1_tx
-            }
+            Self::Simple { raw_l1_tx, .. } | Self::WithContinuations { raw_l1_tx, .. } => raw_l1_tx,
         }
     }
 
@@ -1113,8 +1111,7 @@ where
             // guarantee by not having a `result_entry` field on this
             // variant.
             let _ = result_entry; // explicitly dropped per invariant #6
-            let mut l2_table_entries =
-                Vec::with_capacity(1 + continuation.l2_entries.len());
+            let mut l2_table_entries = Vec::with_capacity(1 + continuation.l2_entries.len());
             l2_table_entries.push(call_entry);
             l2_table_entries.extend(continuation.l2_entries);
 

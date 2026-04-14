@@ -8,10 +8,10 @@
 use alloy_primitives::{Address, U256};
 use serde_json::Value;
 
-use crate::cross_chain::{filter_new_by_count, ScopePath};
-use super::enrichment;
 use super::super::delivery::{simulate_chained_delivery_l2_to_l1, simulate_l1_combined_delivery};
 use super::super::model::{DiscoveredCall, ReturnEdge};
+use super::enrichment;
+use crate::cross_chain::{ScopePath, filter_new_by_count};
 
 // Re-export for backward compatibility with internal callers.
 use super::super::delivery::simulate_l1_delivery;
@@ -125,9 +125,8 @@ pub(super) async fn process_l2_to_l1_calls(
             );
 
             if !continuation.l2_entries.is_empty() {
-                let load_calldata = crate::composer_rpc::entry_builder::encode_load_table(
-                    &continuation.l2_entries,
-                );
+                let load_calldata =
+                    crate::composer_rpc::entry_builder::encode_load_table(&continuation.l2_entries);
                 let load_data = format!("0x{}", hex::encode(load_calldata.as_ref()));
                 let ccm_hex = format!("{cross_chain_manager_address}");
                 let builder_hex = format!("{builder_address}");
@@ -165,11 +164,14 @@ pub(super) async fn process_l2_to_l1_calls(
                     "post-discovery retrace: retracing user tx with continuation entries"
                 );
 
-                let mut proxy_cache =
-                    std::collections::HashMap::<Address, Option<super::super::trace::ProxyInfo>>::new();
+                let mut proxy_cache = std::collections::HashMap::<
+                    Address,
+                    Option<super::super::trace::ProxyInfo>,
+                >::new();
                 if let Ok(resp) = client.post(upstream_url).json(&retrace_req).send().await {
                     if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
-                        if let Some(traces) = body.result
+                        if let Some(traces) = body
+                            .result
                             .as_ref()
                             .and_then(|r| r.get(0))
                             .and_then(|b| b.as_array())
@@ -345,7 +347,8 @@ pub(super) async fn process_l2_to_l1_calls(
             let mut chained_rc_data: Vec<(Vec<u8>, bool)> = Vec::new();
             if let Ok(resp) = client.post(upstream_url).json(&sim_req).send().await {
                 if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
-                    if let Some(traces) = body.result
+                    if let Some(traces) = body
+                        .result
                         .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
@@ -389,7 +392,9 @@ pub(super) async fn process_l2_to_l1_calls(
                 if is_same_pattern {
                     for rc in &detected_return_calls {
                         let mut rc_clone = rc.clone();
-                        rc_clone.parent_call_index = crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(i));
+                        rc_clone.parent_call_index = crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(i),
+                        );
                         // Use REAL chained data instead of cloned data
                         if rc_data_idx < chained_rc_data.len() {
                             let (ref data, failed) = chained_rc_data[rc_data_idx];
@@ -761,10 +766,8 @@ pub(super) async fn process_l2_to_l1_calls(
         } else {
             crate::composer_rpc::model::PromotionDecision::KeepSimple
         };
-        let sim_plan = crate::composer_rpc::simulate::simulation_plan_for(
-            detected_calls,
-            promotion,
-        );
+        let sim_plan =
+            crate::composer_rpc::simulate::simulation_plan_for(detected_calls, promotion);
         if sim_plan == crate::composer_rpc::simulate::SimulationPlan::CombinedThenAnalytical {
             tracing::info!(
                 target: "based_rollup::proxy",
@@ -790,7 +793,9 @@ pub(super) async fn process_l2_to_l1_calls(
             for rc in &all_return_calls {
                 let mut rc_clone = rc.clone();
                 if rc_clone.parent_call_index.is_root() {
-                    rc_clone.parent_call_index = crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(0));
+                    rc_clone.parent_call_index = crate::cross_chain::ParentLink::Child(
+                        crate::cross_chain::AbsoluteCallIndex::new(0),
+                    );
                 }
 
                 // Simulate the return call's execution on L2 via debug_traceCallMany
@@ -826,7 +831,8 @@ pub(super) async fn process_l2_to_l1_calls(
                         });
                         async {
                             let resp = client.post(upstream_url).json(&req).send().await.ok()?;
-                            let body: super::super::common::JsonRpcResponse = resp.json().await.ok()?;
+                            let body: super::super::common::JsonRpcResponse =
+                                resp.json().await.ok()?;
                             let s = body.result_str()?;
                             let clean = s.strip_prefix("0x").unwrap_or(s);
                             if clean.len() >= 64 {
@@ -862,8 +868,11 @@ pub(super) async fn process_l2_to_l1_calls(
 
                     match client.post(upstream_url).json(&trace_req).send().await {
                         Ok(resp) => {
-                            if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
-                                if let Some(trace) = body.result
+                            if let Ok(body) =
+                                resp.json::<super::super::common::JsonRpcResponse>().await
+                            {
+                                if let Some(trace) = body
+                                    .result
                                     .as_ref()
                                     .and_then(|r| r.get(0))
                                     .and_then(|b| b.as_array())
@@ -1096,24 +1105,27 @@ async fn queue_l2_to_l1_multi_call_entries(
             });
             if let Some(idx) = rc.parent_call_index.child_index() {
                 obj.as_object_mut()
-                    .expect("serde_json::json!({ ... }) always yields an Object").insert(
-                    "parentCallIndex".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(idx.as_usize())),
-                );
+                    .expect("serde_json::json!({ ... }) always yields an Object")
+                    .insert(
+                        "parentCallIndex".to_string(),
+                        serde_json::Value::Number(serde_json::Number::from(idx.as_usize())),
+                    );
             }
             if !rc.return_data.is_empty() {
                 obj.as_object_mut()
-                    .expect("serde_json::json!({ ... }) always yields an Object").insert(
-                    "l2ReturnData".to_string(),
-                    serde_json::Value::String(format!("0x{}", hex::encode(&rc.return_data))),
-                );
+                    .expect("serde_json::json!({ ... }) always yields an Object")
+                    .insert(
+                        "l2ReturnData".to_string(),
+                        serde_json::Value::String(format!("0x{}", hex::encode(&rc.return_data))),
+                    );
             }
             if rc.delivery_failed {
                 obj.as_object_mut()
-                    .expect("serde_json::json!({ ... }) always yields an Object").insert(
-                    "l2DeliveryFailed".to_string(),
-                    serde_json::Value::Bool(true),
-                );
+                    .expect("serde_json::json!({ ... }) always yields an Object")
+                    .insert(
+                        "l2DeliveryFailed".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
             }
             obj
         })

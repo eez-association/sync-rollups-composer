@@ -172,7 +172,11 @@ mod tests {
             FixtureName::MultiCallCallTwice,
         ];
         for name in names {
-            assert!(get(name).is_some(), "fixture {:?} not in ALL_FIXTURES", name);
+            assert!(
+                get(name).is_some(),
+                "fixture {:?} not in ALL_FIXTURES",
+                name
+            );
         }
     }
 

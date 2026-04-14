@@ -818,7 +818,10 @@ fn test_build_block_entries_produces_correct_state_deltas() {
         entries[0].state_deltas[0].new_state,
         B256::with_last_byte(0x01)
     );
-    assert_eq!(entries[0].state_deltas[0].rollup_id, RollupId::new(U256::from(1)));
+    assert_eq!(
+        entries[0].state_deltas[0].rollup_id,
+        RollupId::new(U256::from(1))
+    );
 
     // Second entry: state delta 0x01 -> 0x02
     assert_eq!(

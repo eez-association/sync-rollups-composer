@@ -276,4 +276,3 @@ pub(super) fn compute_forkchoice_state(
         finalized_block_hash: finalized,
     }
 }
-

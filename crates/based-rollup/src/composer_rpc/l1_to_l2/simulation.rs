@@ -4,14 +4,14 @@
 //! `debug_traceCallMany` bundles to capture return data and detect
 //! child L2→L1 proxy calls.
 
-use alloy_primitives::{Address, U256};
 use crate::cross_chain::{RollupId, ScopePath};
+use alloy_primitives::{Address, U256};
 use serde_json::Value;
 use std::collections::HashMap;
 
 use super::process::{
-    extract_inner_destination_return_data, extract_return_data_from_trace,
-    destination_call_succeeded_in_trace, walk_l2_simulation_trace,
+    destination_call_succeeded_in_trace, extract_inner_destination_return_data,
+    extract_return_data_from_trace, walk_l2_simulation_trace,
 };
 
 /// Execute a `debug_traceCallMany` bundle on L2:
@@ -85,9 +85,7 @@ pub(super) async fn run_l2_sim_bundle(
     // result[0] = bundle traces array, result[0][1] = exec tx trace.
     // Fall back to result[0][0] if only 1 trace returned.
     let result_val = rpc_body.into_result().ok()?;
-    let traces = result_val
-        .get(0)
-        .and_then(|b| b.as_array())?;
+    let traces = result_val.get(0).and_then(|b| b.as_array())?;
 
     let exec_trace = if traces.len() >= 2 {
         &traces[1]
@@ -140,7 +138,11 @@ pub(super) async fn simulate_l1_to_l2_call_on_l2(
     source_address: Address,
     rollup_id: u64,
     l2_scope: &[U256],
-) -> (Vec<u8>, bool, Vec<super::super::common::DiscoveredProxyCall>) {
+) -> (
+    Vec<u8>,
+    bool,
+    Vec<super::super::common::DiscoveredProxyCall>,
+) {
     // Step 1: Query SYSTEM_ADDRESS from the CCM.
     // Uses typed ABI encoding via sol! macro — NEVER hardcode selectors.
     let sys_calldata = super::super::common::encode_system_address_calldata();
@@ -152,17 +154,18 @@ pub(super) async fn simulate_l1_to_l2_call_on_l2(
     )
     .await;
 
-    let sys_addr = match sys_result.and_then(|s| super::super::common::parse_address_from_abi_return(&s)) {
-        Some(addr) => addr,
-        None => {
-            tracing::warn!(
-                target: "based_rollup::l1_proxy",
-                dest = %destination,
-                "SYSTEM_ADDRESS query failed on L2 CCM — cannot simulate"
-            );
-            return (vec![], false, vec![]);
-        }
-    };
+    let sys_addr =
+        match sys_result.and_then(|s| super::super::common::parse_address_from_abi_return(&s)) {
+            Some(addr) => addr,
+            None => {
+                tracing::warn!(
+                    target: "based_rollup::l1_proxy",
+                    dest = %destination,
+                    "SYSTEM_ADDRESS query failed on L2 CCM — cannot simulate"
+                );
+                return (vec![], false, vec![]);
+            }
+        };
 
     let sys_addr_hex = format!("{sys_addr}");
     let ccm_hex = format!("{cross_chain_manager_address}");
@@ -266,7 +269,7 @@ pub(super) async fn simulate_l1_to_l2_call_on_l2(
                 vec![],     // delivery_return_data placeholder
                 false,      // delivery_failed placeholder
                 vec![],     // l1_delivery_scope placeholder
-                crate::cross_chain::TxOutcome::Success,      // tx_reverts
+                crate::cross_chain::TxOutcome::Success, // tx_reverts
             );
             placeholders.extend(placeholder.l2_table_entries);
         }
@@ -458,7 +461,8 @@ pub(super) async fn simulate_l1_to_l2_call_on_l2(
             });
             if let Ok(resp) = client.post(l2_rpc_url).json(&direct_req).send().await {
                 if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
-                    if let Some(trace) = body.result
+                    if let Some(trace) = body
+                        .result
                         .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
@@ -518,7 +522,11 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
     prior_exec_calldatas: &[(Vec<u8>, U256)],
     sys_addr: Option<Address>,
     l2_scope: &[U256],
-) -> (Vec<u8>, bool, Vec<super::super::common::DiscoveredProxyCall>) {
+) -> (
+    Vec<u8>,
+    bool,
+    Vec<super::super::common::DiscoveredProxyCall>,
+) {
     let sys_addr = match sys_addr {
         Some(a) => a,
         None => {
@@ -695,10 +703,7 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
             .await;
         }
     };
-    let traces = match result_val
-        .get(0)
-        .and_then(|b| b.as_array())
-    {
+    let traces = match result_val.get(0).and_then(|b| b.as_array()) {
         Some(arr) => {
             // Log each tx's success/failure for generic debugging of any chained simulation.
             for (ti, t) in arr.iter().enumerate() {
@@ -760,7 +765,8 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
 
     // Scan prior traces for external createCrossChainProxy calls
     // (e.g., if user code explicitly creates proxies during delivery).
-    let mut bundle_ephemeral_proxies: HashMap<Address, super::super::trace::ProxyInfo> = HashMap::new();
+    let mut bundle_ephemeral_proxies: HashMap<Address, super::super::trace::ProxyInfo> =
+        HashMap::new();
     for prior_trace in &traces[..traces.len() - 1] {
         super::super::trace::extract_ephemeral_proxies_from_trace(
             prior_trace,
@@ -848,7 +854,8 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
             let mut resolved_proxies = bundle_ephemeral_proxies.clone();
             if let Ok(resp2) = client.post(l2_rpc_url).json(&trace_req2).send().await {
                 if let Ok(body2) = resp2.json::<super::super::common::JsonRpcResponse>().await {
-                    if let Some(traces2) = body2.result
+                    if let Some(traces2) = body2
+                        .result
                         .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
@@ -892,7 +899,9 @@ pub(super) async fn simulate_l1_to_l2_call_chained_on_l2(
                                         continue;
                                     }
                                     // Second 32 bytes: originalRollupId (uint256, last 8 bytes as u64)
-                                    if let Ok(rid_bytes) = super::hex::decode(&output_clean[64..128]) {
+                                    if let Ok(rid_bytes) =
+                                        super::hex::decode(&output_clean[64..128])
+                                    {
                                         if rid_bytes.len() >= 32 {
                                             let start = rid_bytes.len().saturating_sub(8);
                                             let mut rid: u64 = 0;

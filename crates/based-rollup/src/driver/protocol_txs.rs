@@ -66,9 +66,7 @@ pub(super) struct ProtocolTxPlan<S> {
 impl ProtocolTxPlan<stage::Bootstrapped> {
     /// Create a plan pre-loaded with bootstrap transactions (deploys,
     /// canonical bridge, bootstrap transfers).
-    pub(super) fn new(
-        bootstrap_txs: Vec<reth_ethereum_primitives::TransactionSigned>,
-    ) -> Self {
+    pub(super) fn new(bootstrap_txs: Vec<reth_ethereum_primitives::TransactionSigned>) -> Self {
         Self {
             txs: bootstrap_txs,
             _stage: PhantomData,
@@ -274,9 +272,8 @@ where
         let (table_tx, trigger_txs) = if !execution_entries.is_empty()
             && !self.config.cross_chain_manager_address.is_zero()
         {
-            let our_rollup_id = cross_chain::RollupId::new(alloy_primitives::U256::from(
-                self.config.rollup_id,
-            ));
+            let our_rollup_id =
+                cross_chain::RollupId::new(alloy_primitives::U256::from(self.config.rollup_id));
             let (table_entries, mut trigger_entries) =
                 cross_chain::partition_entries(execution_entries, our_rollup_id);
 

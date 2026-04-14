@@ -111,7 +111,10 @@ pub(crate) trait Direction: sealed::Sealed + Send + Sync + 'static {
 
 /// User transaction context needed for retrace bundle construction.
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "scaffold — used by Direction::build_retrace_bundle")]
+#[allow(
+    dead_code,
+    reason = "scaffold — used by Direction::build_retrace_bundle"
+)]
 pub(crate) struct UserTxContext {
     /// Sender address.
     pub from: String,
@@ -222,17 +225,16 @@ impl Direction for L1ToL2 {
             let l2_pairs: Vec<_> = l1_detected
                 .iter()
                 .flat_map(|c| {
-                    let (call_entry, result_entry) =
-                        super::entry_builder::build_simple_pair(
-                            cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
-                            c.destination,
-                            c.data.clone(),
-                            c.value,
-                            c.source_address,
-                            cross_chain::RollupId::MAINNET,
-                            c.call_success,
-                            c.l2_return_data.clone(),
-                        );
+                    let (call_entry, result_entry) = super::entry_builder::build_simple_pair(
+                        cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
+                        c.destination,
+                        c.data.clone(),
+                        c.value,
+                        c.source_address,
+                        cross_chain::RollupId::MAINNET,
+                        c.call_success,
+                        c.l2_return_data.clone(),
+                    );
                     vec![call_entry, result_entry]
                 })
                 .collect();
@@ -250,14 +252,10 @@ impl Direction for L1ToL2 {
         }
 
         // Fix placeholder state deltas with real on-chain root.
-        let on_chain_root = get_rollup_state_root(
-            &self.client,
-            &self.l1_rpc_url,
-            self.l1_ccm,
-            rollup_id,
-        )
-        .await
-        .unwrap_or(alloy_primitives::B256::ZERO);
+        let on_chain_root =
+            get_rollup_state_root(&self.client, &self.l1_rpc_url, self.l1_ccm, rollup_id)
+                .await
+                .unwrap_or(alloy_primitives::B256::ZERO);
         for e in &mut entries {
             for d in &mut e.state_deltas {
                 d.current_state = on_chain_root;
@@ -266,12 +264,12 @@ impl Direction for L1ToL2 {
         }
 
         // Get L1 block context + verification key for proof.
-        let (block_number, block_hash, _) =
-            get_l1_block_context(&self.client, &self.l1_rpc_url).await.ok()?;
-        let vk =
-            get_verification_key(&self.client, &self.l1_rpc_url, self.l1_ccm, rollup_id)
-                .await
-                .ok()?;
+        let (block_number, block_hash, _) = get_l1_block_context(&self.client, &self.l1_rpc_url)
+            .await
+            .ok()?;
+        let vk = get_verification_key(&self.client, &self.l1_rpc_url, self.l1_ccm, rollup_id)
+            .await
+            .ok()?;
 
         // Sign ECDSA proof for postBatch.
         let timestamp = std::time::SystemTime::now()
@@ -410,17 +408,21 @@ impl Direction for L2ToL1 {
                 }]
             }]);
             let mut needs_full_sim = false;
-            if let Ok(resp) = self.client.post(&self.l1_rpc_url)
+            if let Ok(resp) = self
+                .client
+                .post(&self.l1_rpc_url)
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "debug_traceCallMany",
                     "params": [sim_req, serde_json::Value::Null, {"tracer": "callTracer"}],
                     "id": 99979
                 }))
-                .send().await
+                .send()
+                .await
             {
                 if let Ok(body) = resp.json::<super::common::JsonRpcResponse>().await {
-                    if let Some(trace) = body.result
+                    if let Some(trace) = body
+                        .result
                         .as_ref()
                         .and_then(|r| r.get(0))
                         .and_then(|b| b.as_array())
@@ -516,8 +518,7 @@ impl Direction for L2ToL1 {
         }
 
         // Encode loadExecutionTable calldata.
-        let load_table_calldata =
-            super::entry_builder::encode_load_table(&l2_table_entries);
+        let load_table_calldata = super::entry_builder::encode_load_table(&l2_table_entries);
         let load_table_hex = format!("0x{}", hex::encode(load_table_calldata.as_ref()));
 
         // Build the bundle: [loadExecutionTable, userTx] in one bundle

@@ -4,14 +4,14 @@
 //! trace/walk/discover phase and enriches them with L2 return data, discovers
 //! child L2→L1 calls, runs iterative discovery, and queues the execution table.
 
-use alloy_primitives::{Address, U256};
 use crate::cross_chain::{RollupId, ScopePath, filter_new_by_count};
+use alloy_primitives::{Address, U256};
 use serde_json::Value;
 use std::collections::HashMap;
 
 use super::super::model::{DiscoveredCall, L1ProxyLookup, L2ProxyLookup};
 use super::simulation::{
-    run_l2_sim_bundle, simulate_l1_to_l2_call_on_l2, simulate_l1_to_l2_call_chained_on_l2,
+    run_l2_sim_bundle, simulate_l1_to_l2_call_chained_on_l2, simulate_l1_to_l2_call_on_l2,
 };
 
 /// Extract return data bytes from a callTracer trace node's `output` field.
@@ -67,7 +67,10 @@ pub(super) fn destination_call_succeeded_in_trace(trace: &Value, destination: Ad
     walk(trace, &dest_hex_lower).unwrap_or(false)
 }
 
-pub(super) fn extract_inner_destination_return_data(trace: &Value, destination: Address) -> Option<Vec<u8>> {
+pub(super) fn extract_inner_destination_return_data(
+    trace: &Value,
+    destination: Address,
+) -> Option<Vec<u8>> {
     let dest_hex_lower = format!("{destination}").to_lowercase();
 
     // BFS (breadth-first search) to find the SHALLOWEST successful call
@@ -86,8 +89,8 @@ pub(super) fn extract_inner_destination_return_data(trace: &Value, destination: 
         if let Some(to) = node.get("to").and_then(|v| v.as_str()) {
             if to.to_lowercase() == dest_hex_lower && node.get("error").is_none() {
                 let output = node.get("output").and_then(|v| v.as_str()).unwrap_or("0x");
-                let data =
-                    super::hex::decode(output.strip_prefix("0x").unwrap_or(output)).unwrap_or_default();
+                let data = super::hex::decode(output.strip_prefix("0x").unwrap_or(output))
+                    .unwrap_or_default();
                 return Some(data);
             }
         }
@@ -278,7 +281,8 @@ pub(super) fn extract_delivery_return_from_l1_trace_with_calldata(
     child_calldata: Option<&[u8]>,
 ) -> Vec<u8> {
     let dest_lower = format!("{child_dest}").to_lowercase();
-    let calldata_hex = child_calldata.map(|cd| format!("0x{}", super::hex::encode(cd)).to_lowercase());
+    let calldata_hex =
+        child_calldata.map(|cd| format!("0x{}", super::hex::encode(cd)).to_lowercase());
 
     fn find_delivery_output(
         node: &Value,
@@ -580,8 +584,10 @@ pub(super) async fn process_l1_to_l2_calls(
                         source_address: child.source_address,
                         delivery_failed: false, // defaults to false; will be enriched later if needed
                         delivery_return_data: vec![], // will be enriched via L1 simulation
-                        parent_call_index: crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(call_idx)), // linked to parent L1→L2 call
-                        trace_depth: 0,     // L2→L1 child: depth in L2 simulation
+                        parent_call_index: crate::cross_chain::ParentLink::Child(
+                            crate::cross_chain::AbsoluteCallIndex::new(call_idx),
+                        ), // linked to parent L1→L2 call
+                        trace_depth: 0,         // L2→L1 child: depth in L2 simulation
                         discovery_iteration: 0, // will be updated in iterative loop
                         in_reverted_frame: false, // L2→L1 children: not in reverted frame
                     },
@@ -626,7 +632,8 @@ pub(super) async fn process_l1_to_l2_calls(
         });
         if let Ok(resp) = client.post(l1_rpc_url).json(&sim_req).send().await {
             if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
-                if let Some(traces) = body.result
+                if let Some(traces) = body
+                    .result
                     .as_ref()
                     .and_then(|r| r.get(0))
                     .and_then(|b| b.as_array())
@@ -875,7 +882,8 @@ pub(super) async fn process_l1_to_l2_calls(
                         // Build RESULT entries and exec calldatas from ALL existing
                         // calls (already enriched) for chained simulation.
                         let sys_addr = {
-                            let sys_calldata = super::super::common::encode_system_address_calldata();
+                            let sys_calldata =
+                                super::super::common::encode_system_address_calldata();
                             let sys_result = super::super::common::eth_call_view(
                                 client,
                                 l2_rpc_url,
@@ -883,8 +891,9 @@ pub(super) async fn process_l1_to_l2_calls(
                                 &sys_calldata,
                             )
                             .await;
-                            sys_result
-                                .and_then(|s| super::super::common::parse_address_from_abi_return(&s))
+                            sys_result.and_then(|s| {
+                                super::super::common::parse_address_from_abi_return(&s)
+                            })
                         };
                         let mut prior_result_entries: Vec<
                             crate::cross_chain::CrossChainExecutionEntry,
@@ -1102,7 +1111,9 @@ pub(super) async fn process_l1_to_l2_calls(
                                 let sim_results = if let Ok(resp) =
                                     client.post(l1_rpc_url).json(&sim_req).send().await
                                 {
-                                    if let Ok(body) = resp.json::<super::super::common::JsonRpcResponse>().await {
+                                    if let Ok(body) =
+                                        resp.json::<super::super::common::JsonRpcResponse>().await
+                                    {
                                         body.result
                                             .and_then(|r| r.get(0).cloned())
                                             .and_then(|b| b.as_array().cloned())
@@ -1200,7 +1211,9 @@ pub(super) async fn process_l1_to_l2_calls(
                                 // for all remaining unset children. This works because
                                 // we process calls sequentially.
                                 if child.parent_call_index.is_root() {
-                                    child.parent_call_index = crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(parent_idx));
+                                    child.parent_call_index = crate::cross_chain::ParentLink::Child(
+                                        crate::cross_chain::AbsoluteCallIndex::new(parent_idx),
+                                    );
                                     child_idx += 1;
                                 } else {
                                     break;
@@ -1270,9 +1283,12 @@ pub(super) async fn process_l1_to_l2_calls(
                     for (i, c) in detected_calls.iter().enumerate() {
                         if c.parent_call_index.is_root() && c.delivery_return_data.is_empty() {
                             // Check if this call has children
-                            let has_children = detected_calls
-                                .iter()
-                                .any(|other| other.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(i)));
+                            let has_children = detected_calls.iter().any(|other| {
+                                other.parent_call_index
+                                    == crate::cross_chain::ParentLink::Child(
+                                        crate::cross_chain::AbsoluteCallIndex::new(i),
+                                    )
+                            });
                             if has_children {
                                 needed = true;
                                 break;
@@ -1407,7 +1423,8 @@ pub(super) async fn process_l1_to_l2_calls(
                             &sys_calldata,
                         )
                         .await;
-                        sys_result.and_then(|s| super::super::common::parse_address_from_abi_return(&s))
+                        sys_result
+                            .and_then(|s| super::super::common::parse_address_from_abi_return(&s))
                     };
 
                     let sys_addr_str = match sys_addr {
@@ -1446,18 +1463,24 @@ pub(super) async fn process_l1_to_l2_calls(
 
                         // Process each reentrant parent level-by-level.
                         for &idx in &root_indices {
-                            let has_children = detected_calls
-                                .iter()
-                                .any(|other| other.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(idx)));
-                            if !has_children || !detected_calls[idx].delivery_return_data.is_empty() {
+                            let has_children = detected_calls.iter().any(|other| {
+                                other.parent_call_index
+                                    == crate::cross_chain::ParentLink::Child(
+                                        crate::cross_chain::AbsoluteCallIndex::new(idx),
+                                    )
+                            });
+                            if !has_children || !detected_calls[idx].delivery_return_data.is_empty()
+                            {
                                 continue; // Leaf or already enriched.
                             }
 
                             // Find this parent's L2→L1 child.
-                            let child_idx = match detected_calls
-                                .iter()
-                                .position(|c| c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(idx)))
-                            {
+                            let child_idx = match detected_calls.iter().position(|c| {
+                                c.parent_call_index
+                                    == crate::cross_chain::ParentLink::Child(
+                                        crate::cross_chain::AbsoluteCallIndex::new(idx),
+                                    )
+                            }) {
                                 Some(ci) => ci,
                                 None => continue,
                             };
@@ -1492,20 +1515,21 @@ pub(super) async fn process_l1_to_l2_calls(
                             // The L1 entries are rebuilt from current detected_calls state.
                             // Inner levels are already correct → their entries have correct
                             // RESULT hashes → scope navigation succeeds for this child.
-                            if let Some((user_trace, _resp)) = super::super::delivery::build_and_run_l1_postbatch_trace(
-                                client,
-                                l1_rpc_url,
-                                rollups_address,
-                                rollup_id,
-                                &builder_key,
-                                detected_calls,
-                                from,
-                                to,
-                                data,
-                                value,
-                                &format!("post-convergence-l1-level-{idx}"),
-                            )
-                            .await
+                            if let Some((user_trace, _resp)) =
+                                super::super::delivery::build_and_run_l1_postbatch_trace(
+                                    client,
+                                    l1_rpc_url,
+                                    rollups_address,
+                                    rollup_id,
+                                    &builder_key,
+                                    detected_calls,
+                                    from,
+                                    to,
+                                    data,
+                                    value,
+                                    &format!("post-convergence-l1-level-{idx}"),
+                                )
+                                .await
                             {
                                 let child_dest = detected_calls[child_idx].destination;
                                 let child_cd = detected_calls[child_idx].calldata.clone();
@@ -1536,7 +1560,8 @@ pub(super) async fn process_l1_to_l2_calls(
                                 // for the second CounterL1 call).
                                 let current = &detected_calls[child_idx];
                                 if !delivery_data.is_empty()
-                                    && (current.delivery_return_data.len() <= 4 || current.delivery_failed)
+                                    && (current.delivery_return_data.len() <= 4
+                                        || current.delivery_failed)
                                 {
                                     detected_calls[child_idx].delivery_return_data = delivery_data;
                                     detected_calls[child_idx].delivery_failed = false;
@@ -1587,26 +1612,26 @@ pub(super) async fn process_l1_to_l2_calls(
                                         scope: if c.trace_depth <= 1 {
                                             ScopePath::root()
                                         } else {
-                                            ScopePath::from_parts(vec![
-                                                U256::ZERO;
-                                                c.trace_depth
-                                            ])
+                                            ScopePath::from_parts(vec![U256::ZERO; c.trace_depth])
                                         },
                                         discovery_iteration: c.discovery_iteration,
                                         l1_trace_depth: c.trace_depth,
                                         in_reverted_frame: c.in_reverted_frame,
                                     })
                                     .collect();
-                            let analyzed = crate::composer_rpc::entry_builder::analyze_l1_to_l2_continuations(
-                                &l1_detected,
-                                rollup_id,
-                            );
+                            let analyzed =
+                                crate::composer_rpc::entry_builder::analyze_l1_to_l2_continuations(
+                                    &l1_detected,
+                                    rollup_id,
+                                );
                             if analyzed.is_empty() {
                                 continue;
                             }
                             let cont = crate::composer_rpc::entry_builder::build_continuations(
                                 &analyzed,
-                                crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id)),
+                                crate::cross_chain::RollupId::new(alloy_primitives::U256::from(
+                                    rollup_id,
+                                )),
                             );
                             let mut l2_entries = cont.l2_entries;
                             for e in &mut l2_entries {
@@ -1729,9 +1754,12 @@ pub(super) async fn process_l1_to_l2_calls(
                                     "post-convergence: L2 sim result for parent"
                                 );
 
-                                let has_children = detected_calls
-                                    .iter()
-                                    .any(|c| c.parent_call_index == crate::cross_chain::ParentLink::Child(crate::cross_chain::AbsoluteCallIndex::new(idx)));
+                                let has_children = detected_calls.iter().any(|c| {
+                                    c.parent_call_index
+                                        == crate::cross_chain::ParentLink::Child(
+                                            crate::cross_chain::AbsoluteCallIndex::new(idx),
+                                        )
+                                });
                                 let skip_update =
                                     used_fallback && has_children && !is_reentrant_pattern;
 
@@ -2048,7 +2076,9 @@ pub(super) async fn handle_estimate_gas_for_proxy(
         hyper::Response::builder()
             .status(hyper::StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(response_body.to_string())))
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                response_body.to_string(),
+            )))
             .expect("valid response"),
     ))
 }
@@ -2068,10 +2098,13 @@ async fn is_cross_chain_proxy_on_l1(
 ) -> bool {
     // authorizedProxies(address) — typed ABI encoding via sol! macro — NEVER hardcode selectors.
     let calldata = super::super::common::encode_authorized_proxies_calldata(address);
-    let hex_data = match super::super::common::eth_call_view(client, l1_rpc_url, rollups_address, &calldata).await {
-        Some(hex) => hex,
-        None => return false,
-    };
+    let hex_data =
+        match super::super::common::eth_call_view(client, l1_rpc_url, rollups_address, &calldata)
+            .await
+        {
+            Some(hex) => hex,
+            None => return false,
+        };
     super::super::common::parse_address_from_abi_return(&hex_data).is_some()
 }
 
@@ -2151,7 +2184,8 @@ pub(super) fn decode_error_selector_bare(selector: Option<&str>) -> &'static str
 #[cfg(test)]
 pub(super) fn parse_address_from_return(hex_str: &str) -> eyre::Result<Address> {
     let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = super::hex_decode(clean).ok_or_else(|| eyre::eyre!("invalid hex in eth_call return"))?;
+    let bytes =
+        super::hex_decode(clean).ok_or_else(|| eyre::eyre!("invalid hex in eth_call return"))?;
     if bytes.len() < 32 {
         return Err(eyre::eyre!("return data too short for address"));
     }
@@ -2162,7 +2196,8 @@ pub(super) fn parse_address_from_return(hex_str: &str) -> eyre::Result<Address> 
 #[allow(dead_code)]
 pub(super) fn parse_u256_from_return(hex_str: &str) -> eyre::Result<u64> {
     let hex = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = super::hex_decode(hex).ok_or_else(|| eyre::eyre!("invalid hex in eth_call return"))?;
+    let bytes =
+        super::hex_decode(hex).ok_or_else(|| eyre::eyre!("invalid hex in eth_call return"))?;
     if bytes.len() < 32 {
         return Err(eyre::eyre!("return data too short for uint256"));
     }

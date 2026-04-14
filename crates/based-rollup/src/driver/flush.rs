@@ -18,12 +18,12 @@
 //!   and compute a gas price hint that overbids them so the builder's
 //!   postBatch tx is ordered first within the same L1 block.
 
+use super::Driver;
 use super::flush_plan::{Collected, FlushPlan, NoEntries, SendResult};
 use super::pending_queue::TriggerMetadata;
 use super::types::{
     L1ConfirmedAnchor, MAX_BATCH_SIZE, SUBMISSION_COOLDOWN_SECS, TriggerExecutionResult,
 };
-use super::Driver;
 use crate::proposer::{GasPriceHint, PendingBlock};
 use alloy_primitives::{B256, Bytes, U256};
 
@@ -356,8 +356,7 @@ where
         // updates after the submit consumes the plan. Blocks
         // themselves still live inside the plan until either
         // success (dropped) or failure (returned via rollback).
-        let block_l2_numbers: Vec<u64> =
-            blocks.iter().map(|b| b.l2_block_number).collect();
+        let block_l2_numbers: Vec<u64> = blocks.iter().map(|b| b.l2_block_number).collect();
 
         // Clone the full blocks + queue for the post-Ok receipt
         // failure path. That path (receipt timeout or RPC error
@@ -757,7 +756,10 @@ where
         }
     }
 
-    pub(super) async fn send_l2_to_l1_triggers(&mut self, triggers: &[TriggerMetadata]) -> Result<Vec<B256>> {
+    pub(super) async fn send_l2_to_l1_triggers(
+        &mut self,
+        triggers: &[TriggerMetadata],
+    ) -> Result<Vec<B256>> {
         let proposer = self
             .proposer
             .as_ref()

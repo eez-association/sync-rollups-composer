@@ -68,7 +68,9 @@ pub trait SimulationClient: Send + Sync {
     fn get_block_context(
         &self,
         chain: ChainTarget,
-    ) -> impl std::future::Future<Output = Result<(u64, alloy_primitives::B256, alloy_primitives::B256)>> + Send;
+    ) -> impl std::future::Future<
+        Output = Result<(u64, alloy_primitives::B256, alloy_primitives::B256)>,
+    > + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,16 +133,12 @@ impl SimulationClient for HttpSimClient {
             .json()
             .await?;
 
-        rpc_resp.into_result()
+        rpc_resp
+            .into_result()
             .map_err(|e| eyre::eyre!("debug_traceCallMany RPC error: {e}"))
     }
 
-    async fn eth_call_view(
-        &self,
-        chain: ChainTarget,
-        to: Address,
-        data: &str,
-    ) -> Option<String> {
+    async fn eth_call_view(&self, chain: ChainTarget, to: Address, data: &str) -> Option<String> {
         let url = self.url(chain);
         let req = serde_json::json!({
             "jsonrpc": "2.0",
@@ -186,8 +184,7 @@ impl SimulationClient for HttpSimClient {
             .get("number")
             .and_then(|v| v.as_str())
             .ok_or_else(|| eyre::eyre!("get_block_context: missing block number"))?;
-        let number =
-            u64::from_str_radix(number_hex.trim_start_matches("0x"), 16)?;
+        let number = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16)?;
 
         let hash_str = block
             .get("hash")
@@ -221,8 +218,10 @@ pub struct InMemorySimClient {
     /// Canned responses for `eth_call_view`, keyed by `(chain, to, data)`.
     call_responses: std::collections::HashMap<(ChainTarget, Address, String), String>,
     /// Canned block context per chain: `(number, hash, parent_hash)`.
-    block_contexts:
-        std::collections::HashMap<ChainTarget, (u64, alloy_primitives::B256, alloy_primitives::B256)>,
+    block_contexts: std::collections::HashMap<
+        ChainTarget,
+        (u64, alloy_primitives::B256, alloy_primitives::B256),
+    >,
     /// Global counter for round-robin `trace_call_many` indexing.
     trace_call_count: std::sync::atomic::AtomicUsize,
 }
@@ -251,7 +250,10 @@ impl InMemorySimClient {
     /// Multiple calls append to an ordered list; responses are returned
     /// round-robin.
     pub fn with_trace_response(mut self, chain: ChainTarget, response: Value) -> Self {
-        self.trace_responses.entry(chain).or_default().push(response);
+        self.trace_responses
+            .entry(chain)
+            .or_default()
+            .push(response);
         self
     }
 
@@ -302,12 +304,7 @@ impl SimulationClient for InMemorySimClient {
         Ok(responses[idx % responses.len()].clone())
     }
 
-    async fn eth_call_view(
-        &self,
-        chain: ChainTarget,
-        to: Address,
-        data: &str,
-    ) -> Option<String> {
+    async fn eth_call_view(&self, chain: ChainTarget, to: Address, data: &str) -> Option<String> {
         self.call_responses
             .get(&(chain, to, data.to_string()))
             .cloned()
@@ -331,14 +328,12 @@ impl SimulationClient for InMemorySimClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{b256, Address};
+    use alloy_primitives::{Address, b256};
 
     #[tokio::test]
     async fn in_memory_sim_client_roundtrip() {
-        let hash =
-            b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
-        let parent =
-            b256!("0x2222222222222222222222222222222222222222222222222222222222222222");
+        let hash = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
+        let parent = b256!("0x2222222222222222222222222222222222222222222222222222222222222222");
         let to = Address::ZERO;
 
         let trace_val = serde_json::json!([{"type": "CALL", "from": "0x00", "to": "0x01"}]);
@@ -420,9 +415,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_sim_client_trace_missing_chain() {
         let client = InMemorySimClient::new();
-        let err = client
-            .trace_call_many(ChainTarget::L1, &[], None)
-            .await;
+        let err = client.trace_call_many(ChainTarget::L1, &[], None).await;
         assert!(err.is_err());
     }
 }

@@ -20,10 +20,7 @@ use super::types::{
 
 /// Check if any **direct** child of `node` calls `executeCrossChainCall` on a
 /// known manager address.
-fn has_execute_cross_chain_call_child(
-    node: &CallTraceNode,
-    manager_addresses: &[Address],
-) -> bool {
+fn has_execute_cross_chain_call_child(node: &CallTraceNode, manager_addresses: &[Address]) -> bool {
     let selector = execute_cross_chain_call_selector();
 
     for child in node.children() {
