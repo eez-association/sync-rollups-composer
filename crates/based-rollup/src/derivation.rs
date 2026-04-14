@@ -671,9 +671,10 @@ impl DerivationPipeline {
                 // snapshot to the driver. The driver handles ALL filtering
                 // generically via trial-execution + ExecutionConsumed events +
                 // prefix counting. No type-specific counting is needed here.
-                let filtering =
-                    if has_unconsumed_entries && !batch_has_revert && (i == 0 || is_last_in_batch)
-                    {
+                let filtering = if has_unconsumed_entries
+                    && !batch_has_revert
+                    && (i == 0 || is_last_in_batch)
+                {
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,
