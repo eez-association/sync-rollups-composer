@@ -322,7 +322,7 @@ echo "Waiting for all 6 txs to settle (deposits + 3 withdrawal triggers)..."
 # Each withdrawal trigger takes ~12s, and mutual exclusion adds latency.
 # Wait for enough blocks to cover all 3 withdrawal triggers + processing.
 L2_BLK_T12=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_T12" 8 180 >/dev/null || true
+wait_for_block_advance "$L2_RPC" "$L2_BLK_T12" 8 60 >/dev/null || true
 wait_for_pending_zero 120 >/dev/null
 
 L2_BAL_T12_AFTER=$(get_balance "$L2_RPC" "$TEST_ADDR")
@@ -438,9 +438,9 @@ WS2=$(cast send --rpc-url "$L2_PROXY" --private-key "$TEST_KEY2" \
 assert "TEST15: Withdrawal user1 L2 tx succeeded (0.3 ETH)" '[ "$WS1" = "1" ]'
 assert "TEST15: Withdrawal user2 L2 tx succeeded (0.5 ETH)" '[ "$WS2" = "1" ]'
 
-echo "Waiting for both withdrawal triggers to complete (up to 180s)..."
+echo "Waiting for both withdrawal triggers to complete (up to 60s)..."
 L2_BLK_T15B=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$L2_BLK_T15B" 10 180 >/dev/null || true
+wait_for_block_advance "$L2_RPC" "$L2_BLK_T15B" 10 60 >/dev/null || true
 wait_for_pending_zero 120 >/dev/null
 
 L1_BAL1_AFTER=$(get_balance "$L1_RPC" "$TEST_ADDR")
@@ -574,7 +574,7 @@ assert "TEST17: Withdrawal L2 tx succeeded" '[ "$T17_WS" = "1" ]'
 # Allow the builder to process: wait up to 5 block advances, then wait for pending to settle.
 echo "Waiting 5 blocks for builder to process withdrawal and trigger..."
 T17_BLK_BEFORE=$(get_block_number "$L2_RPC")
-wait_for_block_advance "$L2_RPC" "$T17_BLK_BEFORE" 5 120 >/dev/null || true
+wait_for_block_advance "$L2_RPC" "$T17_BLK_BEFORE" 5 60 >/dev/null || true
 wait_for_pending_zero 90 >/dev/null
 
 # Snapshot state after processing.
@@ -769,14 +769,14 @@ echo "  Contract withdrawal (0.5 ETH): status=$T18_WS2"
 assert "TEST18: Contract withdrawal L2 tx succeeded" '[ "$T18_WS2" = "1" ]'
 
 # ── Step 6: Wait for processing — this is where the rewind should happen ──
-echo "Step 6: Waiting for L1 triggers and potential rewind (up to 240s)..."
+echo "Step 6: Waiting for L1 triggers and potential rewind (up to 60s)..."
 echo "  Expected: User1 trigger succeeds, contract trigger reverts, builder rewinds."
 
 # Monitor rewind cycles during processing.
 PEAK_REWIND_CYCLES="${T18_REWINDS_BEFORE}"
 L2_BLK_T18B=$(get_block_number "$L2_RPC")
 # Wait generously — rewind + re-derive + re-submit can take multiple L2 block cycles.
-wait_for_block_advance "$L2_RPC" "$L2_BLK_T18B" 15 240 >/dev/null || true
+wait_for_block_advance "$L2_RPC" "$L2_BLK_T18B" 15 60 >/dev/null || true
 monitor_rewinds_for 30
 wait_for_pending_zero 120 >/dev/null
 
