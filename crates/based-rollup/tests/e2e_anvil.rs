@@ -15,8 +15,8 @@ use alloy_sol_types::{SolCall, SolValue, sol};
 use based_rollup::config::RollupConfig;
 use based_rollup::cross_chain::{
     self, CROSS_CHAIN_MANAGER_L2_ADDRESS, CrossChainAction, CrossChainActionType,
-    CrossChainExecutionEntry, ICrossChainManagerL2, build_aggregate_block_entry,
-    encode_block_calldata, encode_post_batch_calldata,
+    CrossChainExecutionEntry, ICrossChainManagerL2, RollupId, ScopePath,
+    build_aggregate_block_entry, encode_block_calldata, encode_post_batch_calldata,
 };
 use based_rollup::derivation::DerivationPipeline;
 use based_rollup::execution_planner::build_entries_from_encoded;
@@ -1148,7 +1148,9 @@ async fn test_proposer_submits_to_l1() {
         l2_block_number: 1,
         pre_state_root: B256::ZERO,
         state_root: dummy_state_root(1),
-        clean_state_root: dummy_state_root(1),
+        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+            dummy_state_root(1),
+        ),
         encoded_transactions: payload.clone(),
         intermediate_roots: vec![],
     };
@@ -1249,7 +1251,9 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 1,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(1),
-            clean_state_root: dummy_state_root(1),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(1),
+            ),
             encoded_transactions: Bytes::from_static(b"batch1"),
             intermediate_roots: vec![],
         },
@@ -1257,7 +1261,9 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 2,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(2),
-            clean_state_root: dummy_state_root(2),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(2),
+            ),
             encoded_transactions: Bytes::from_static(b"batch2"),
             intermediate_roots: vec![],
         },
@@ -1265,7 +1271,9 @@ async fn test_proposer_batch_submit() {
             l2_block_number: 3,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(3),
-            clean_state_root: dummy_state_root(3),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(3),
+            ),
             encoded_transactions: Bytes::from_static(b"batch3"),
             intermediate_roots: vec![],
         },
@@ -2334,7 +2342,9 @@ async fn test_proposer_reads_state_root_after_submissions() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::new(),
             intermediate_roots: vec![],
         })
@@ -2729,7 +2739,9 @@ async fn test_concurrent_proposer_submissions() {
         l2_block_number: 1,
         pre_state_root: B256::ZERO,
         state_root: dummy_state_root(1),
-        clean_state_root: dummy_state_root(1),
+        clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+            dummy_state_root(1),
+        ),
         encoded_transactions: Bytes::from_static(b"race"),
         intermediate_roots: vec![],
     };
@@ -2843,7 +2855,9 @@ async fn test_large_batch_chunking() {
                 l2_block_number: n,
                 pre_state_root: on_chain_root,
                 state_root: dummy_state_root(n),
-                clean_state_root: dummy_state_root(n),
+                clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                    dummy_state_root(n),
+                ),
                 encoded_transactions: Bytes::from(format!("chunk_{n}").into_bytes()),
                 intermediate_roots: vec![],
             })
@@ -3061,7 +3075,9 @@ async fn test_proposer_backfill_from_local_chain() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::from(format!("p1_block_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -3098,7 +3114,9 @@ async fn test_proposer_backfill_from_local_chain() {
             l2_block_number: n,
             pre_state_root: dummy_state_root(3),
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::from(format!("p2_block_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -3670,7 +3688,9 @@ async fn test_proposer_max_batch_size() {
             l2_block_number: n,
             pre_state_root: B256::ZERO,
             state_root: dummy_state_root(n),
-            clean_state_root: dummy_state_root(n),
+            clean_state_root: based_rollup::cross_chain::CleanStateRoot::from_abi_boundary(
+                dummy_state_root(n),
+            ),
             encoded_transactions: Bytes::from(format!("prop_max_{n}").into_bytes()),
             intermediate_roots: vec![],
         })
@@ -4665,7 +4685,7 @@ async fn test_derivation_parses_batch_posted_events() {
     );
     assert_eq!(
         fetched[0].state_deltas[0].rollup_id,
-        U256::from(1u64),
+        RollupId::from_abi_boundary(U256::from(1u64)),
         "state delta rollup_id should match"
     );
 }
@@ -4726,7 +4746,7 @@ async fn test_cross_chain_filter_entries_by_rollup_id() {
     );
     assert_eq!(
         fetched_r1[0].state_deltas[0].rollup_id,
-        U256::from(1u64),
+        RollupId::from_abi_boundary(U256::from(1u64)),
         "state delta should be for rollup 1"
     );
 
@@ -4749,7 +4769,7 @@ async fn test_cross_chain_filter_entries_by_rollup_id() {
     );
     assert_eq!(
         fetched_r2[0].state_deltas[0].rollup_id,
-        U256::from(2u64),
+        RollupId::from_abi_boundary(U256::from(2u64)),
         "state delta should be for rollup 2"
     );
 }
@@ -5149,7 +5169,8 @@ async fn test_cross_chain_load_execution_table_system_call() {
     );
     // First entry is CALL trigger with original action_hash and state_deltas
     assert_eq!(
-        decoded.entries[0].actionHash, entry.action_hash,
+        decoded.entries[0].actionHash,
+        entry.action_hash.as_b256(),
         "CALL entry action_hash should match original"
     );
     assert_eq!(
@@ -5189,14 +5210,14 @@ async fn test_cross_chain_action_hash_matches_solidity() {
     let rust_action_hash = compute_l2tx_action_hash(1, &rlp_tx);
     assert_ne!(
         rust_action_hash,
-        B256::ZERO,
+        based_rollup::cross_chain::ActionHash::from_abi_boundary(B256::ZERO),
         "action hash should be non-zero"
     );
 
     // Build an execution entry with this action hash and a Result next_action
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1u64),
+            rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
             current_state: B256::ZERO, // matches initial state (rollup was just created with ZERO)
             new_state: B256::with_last_byte(0xFF),
             ether_delta: I256::ZERO,
@@ -5204,14 +5225,14 @@ async fn test_cross_chain_action_hash_matches_solidity() {
         action_hash: rust_action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1u64),
+            rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![0xDE, 0xAD], // return data
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     };
 
@@ -5306,7 +5327,7 @@ async fn test_cross_chain_multiple_entries_single_batch() {
         let action_hash = compute_l2tx_action_hash(1, &rlp_datas[i as usize]);
         let entry = CrossChainExecutionEntry {
             state_deltas: vec![CrossChainStateDelta {
-                rollup_id: U256::from(1u64),
+                rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
                 current_state: B256::with_last_byte(i),
                 new_state: B256::with_last_byte(i + 10),
                 ether_delta: I256::ZERO,
@@ -5314,14 +5335,14 @@ async fn test_cross_chain_multiple_entries_single_batch() {
             action_hash,
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Result,
-                rollup_id: U256::from(1u64),
+                rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
                 destination: Address::ZERO,
                 value: U256::ZERO,
                 data: vec![i],
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::ZERO,
-                scope: vec![],
+                source_rollup: RollupId::MAINNET,
+                scope: ScopePath::root(),
             },
         };
         entries.push(entry);
@@ -6022,14 +6043,14 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     };
     let result_action = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: U256::from(1u64),
+        rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
         destination: Address::ZERO,
         value: U256::ZERO,
         data: result_data.clone(),
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
-        scope: vec![],
+        source_rollup: RollupId::MAINNET,
+        scope: ScopePath::root(),
     };
     let result_action_hash = keccak256(
         <ICrossChainManagerL2::Action as alloy_sol_types::SolType>::abi_encode(
@@ -6041,21 +6062,21 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     // L2 EVM execution, not L1 consumption, so empty deltas are correct.
     let result_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: result_action_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(result_action_hash),
         next_action: result_action,
     };
 
     // CALL action: triggers executeIncomingCrossChainCall on L2
     let call_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: U256::from(1u64),
+        rollup_id: RollupId::from_abi_boundary(U256::from(1u64)),
         destination: counter_address,
         value: U256::ZERO,
         data: increment_calldata.clone(),
         failed: false,
         source_address,
-        source_rollup: U256::ZERO,
-        scope: vec![],
+        source_rollup: RollupId::MAINNET,
+        scope: ScopePath::root(),
     };
     let call_action_hash = keccak256(
         <ICrossChainManagerL2::Action as alloy_sol_types::SolType>::abi_encode(
@@ -6065,7 +6086,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
     // Same as result_entry: state_deltas populated by builder, not at creation time.
     let call_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
-        action_hash: call_action_hash,
+        action_hash: based_rollup::cross_chain::ActionHash::from_abi_boundary(call_action_hash),
         next_action: call_action,
     };
 
@@ -6899,5 +6920,123 @@ async fn test_partial_consumption_rewind_recovery_consistency() {
     assert_eq!(
         derived_2[0].state_root, state_2,
         "derived block 2 state root matches"
+    );
+}
+
+/// Regression test for issue #29: Multi-block batch §4f filtering.
+///
+/// When flush_to_l1 batches 2 blocks together, the entry-bearing block
+/// (loadExecutionTable + triggers) is always the LAST block. The old code
+/// assigned filtering only to `i == 0`, so the last block in a 2-block
+/// batch got `filtering = None` — causing an infinite rewind loop when
+/// entries were unconsumed on L1.
+///
+/// This test submits a 2-block batch with unconsumed deferred entries and
+/// verifies that BOTH block 1 (i=0) and block 2 (i=1, last) receive
+/// filtering metadata and entries.
+#[tokio::test]
+async fn test_multiblock_batch_unconsumed_entry_filtering_applies_to_all_blocks() {
+    let port = 19305u16;
+    let rpc_url = format!("http://127.0.0.1:{port}");
+    let _anvil = start_anvil(port).await;
+
+    let (rollups_address, deployment_block) = deploy_rollups(&rpc_url).await;
+
+    // State root chain: Y (clean) → X (speculative, if entry consumed)
+    let y = B256::with_last_byte(0x50); // clean state root
+    let x = B256::with_last_byte(0x51); // speculative state root
+
+    // Build a deferred cross-chain entry with state delta Y → X
+    let rlp_data = vec![0xc0, 0x09, 0x0a];
+    let deferred_entries = build_entries_from_encoded(1, y, x, &rlp_data);
+    assert_eq!(deferred_entries.len(), 1);
+
+    // Build an immediate entry (genesis → Y) for the batch
+    let immediate = build_aggregate_block_entry(B256::ZERO, y, 1);
+
+    let mut all_entries = vec![immediate];
+    all_entries.extend(deferred_entries.clone());
+
+    // 2-block batch: block 1 + block 2 — mirrors testnet batch [954, 955]
+    let call_data = encode_block_calldata(
+        &[1, 2],
+        &[
+            Bytes::from_static(b"block1_empty"),
+            Bytes::from_static(b"block2_entry"),
+        ],
+    );
+    let calldata = encode_post_batch_calldata(&all_entries, call_data, Bytes::new());
+
+    // Submit postBatch WITHOUT consuming the deferred entry.
+    let prov = provider(&rpc_url);
+    let tx = alloy_rpc_types::TransactionRequest::default()
+        .from(ANVIL_ADDRESS)
+        .to(rollups_address)
+        .input(calldata.into());
+
+    let pending = prov.send_transaction(tx).await.unwrap();
+    let receipt = pending.get_receipt().await.unwrap();
+    assert!(receipt.status(), "postBatch tx should succeed");
+
+    mine_blocks(&rpc_url, 3).await;
+
+    // On-chain state root should be Y (clean) — entry was NOT consumed.
+    let on_chain_root = read_state_root(&rpc_url, rollups_address).await;
+    assert_eq!(
+        on_chain_root, y,
+        "on-chain state root should be Y (clean) when entry is NOT consumed"
+    );
+
+    // Derive blocks from L1
+    let config = test_config_with_crosschain(&rpc_url, rollups_address, deployment_block, 1);
+    let mut pipeline = DerivationPipeline::new(config);
+    let l1_provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
+    let latest_l1 = l1_provider.get_block_number().await.unwrap();
+
+    let derived = pipeline
+        .derive_next_batch_and_commit(latest_l1, &l1_provider)
+        .await
+        .unwrap();
+
+    assert_eq!(derived.len(), 2, "should derive 2 blocks from the batch");
+    assert_eq!(derived[0].l2_block_number, 1);
+    assert_eq!(derived[1].l2_block_number, 2);
+
+    // Key assertion (issue #29): BOTH blocks must have filtering metadata.
+    // Without the fix, derived[1].filtering was None — the entry-bearing
+    // block would replay unconsumed entries, producing the speculative root
+    // instead of the clean root → infinite rewind loop.
+    assert!(
+        derived[1].filtering.is_some(),
+        "block 2 (i=1, last) must have filtering metadata — \
+         this is the entry-bearing block; without this, §4f filtering \
+         never runs and unconsumed entries cause an infinite rewind loop"
+    );
+    assert!(
+        derived[0].filtering.is_some(),
+        "block 1 (i=0) also has filtering — existing behavior"
+    );
+
+    // Last block gets the clean state root Y (not speculative X).
+    assert_eq!(
+        derived[1].state_root, y,
+        "last block state root must be Y (clean) when entries are unconsumed"
+    );
+
+    // Intermediate blocks get B256::ZERO (fullnode recomputes locally).
+    assert_eq!(
+        derived[0].state_root,
+        B256::ZERO,
+        "intermediate block state root should be ZERO"
+    );
+
+    // Both blocks should have empty execution_entries (all unconsumed).
+    assert!(
+        derived[0].execution_entries.is_empty(),
+        "no execution entries for block 1 (all unconsumed)"
+    );
+    assert!(
+        derived[1].execution_entries.is_empty(),
+        "no execution entries for block 2 (all unconsumed)"
     );
 }

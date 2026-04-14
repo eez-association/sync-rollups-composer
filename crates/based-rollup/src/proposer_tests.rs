@@ -19,6 +19,7 @@ impl Proposer {
 }
 
 use super::*;
+use crate::cross_chain::{RollupId, ScopePath};
 
 /// Helper to build a minimal RollupConfig for tests.
 fn test_config() -> RollupConfig {
@@ -53,14 +54,14 @@ fn test_pending_block_struct() {
         l2_block_number: 42,
         pre_state_root: B256::with_last_byte(0xAA),
         state_root: B256::with_last_byte(0xBB),
-        clean_state_root: B256::with_last_byte(0xBB),
+        clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0xBB)),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
     };
     assert_eq!(block.l2_block_number, 42);
     assert_eq!(block.pre_state_root, B256::with_last_byte(0xAA));
     assert_eq!(block.state_root, B256::with_last_byte(0xBB));
-    assert_eq!(block.clean_state_root, B256::with_last_byte(0xBB));
+    assert_eq!(block.clean_state_root.as_b256(), B256::with_last_byte(0xBB));
     assert_eq!(block.encoded_transactions.as_ref(), &[0xc0]);
 }
 
@@ -277,22 +278,22 @@ fn test_post_batch_calldata_encoding() {
 
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(0xCC),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xCC)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     };
 
@@ -317,22 +318,22 @@ fn test_post_batch_calldata_multiple_entries() {
 
     let make_entry = |n: u8| CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(n),
             new_state: B256::with_last_byte(n + 1),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(n),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(n)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     };
 
@@ -355,22 +356,22 @@ fn test_post_batch_calldata_empty_proof_vs_nonempty_proof() {
 
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::ZERO,
             new_state: B256::with_last_byte(0x01),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(0xAA),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAA)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     };
 
@@ -409,22 +410,22 @@ fn test_post_batch_calldata_roundtrip_with_proof() {
 
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(0xCC),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xCC)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     };
 
@@ -500,22 +501,22 @@ fn test_post_batch_calldata_with_negative_ether_delta() {
     let negative_delta = I256::try_from(-7_500_000_000_000_000_000i128).unwrap();
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0xAA),
             new_state: B256::with_last_byte(0xBB),
             ether_delta: negative_delta,
         }],
-        action_hash: B256::with_last_byte(0xDD),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xDD)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Call,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     };
 
@@ -542,22 +543,22 @@ fn test_post_batch_calldata_with_large_scope() {
     let large_scope: Vec<U256> = (0u64..50).map(U256::from).collect();
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::ZERO,
             new_state: B256::with_last_byte(0xFF),
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::with_last_byte(0x01),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0x01)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::L2Tx,
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             destination: Address::with_last_byte(0x42),
             value: U256::from(100),
             data: vec![0xAB, 0xCD],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: large_scope.clone(),
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::from_parts(large_scope.clone()),
         },
     };
 
@@ -580,22 +581,22 @@ fn test_post_batch_calldata_with_failed_action() {
 
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(1),
+            rollup_id: RollupId::new(U256::from(1)),
             current_state: B256::with_last_byte(0x11),
             new_state: B256::with_last_byte(0x22),
             ether_delta: I256::try_from(-1_000_000i128).unwrap(),
         }],
-        action_hash: B256::with_last_byte(0xEE),
+        action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xEE)),
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Revert,
-            rollup_id: U256::from(2),
+            rollup_id: RollupId::new(U256::from(2)),
             destination: Address::with_last_byte(0x77),
             value: U256::ZERO,
             data: vec![0x08, 0xc3, 0x79, 0xa0], // Error(string) selector
             failed: true,
             source_address: Address::with_last_byte(0x88),
-            source_rollup: U256::from(1),
-            scope: vec![U256::from(0), U256::from(1)],
+            source_rollup: RollupId::new(U256::from(1)),
+            scope: ScopePath::from_parts(vec![U256::from(0), U256::from(1)]),
         },
     };
 
@@ -706,22 +707,22 @@ fn test_cross_chain_batch_calldata_gas_with_many_large_entries() {
     let entries: Vec<CrossChainExecutionEntry> = (0..200)
         .map(|i| CrossChainExecutionEntry {
             state_deltas: vec![CrossChainStateDelta {
-                rollup_id: U256::from(1),
+                rollup_id: RollupId::new(U256::from(1)),
                 current_state: B256::with_last_byte(i as u8),
                 new_state: B256::with_last_byte((i + 1) as u8),
                 ether_delta: I256::ZERO,
             }],
-            action_hash: B256::with_last_byte(i as u8),
+            action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(i as u8)),
             next_action: CrossChainAction {
                 action_type: CrossChainActionType::Call,
-                rollup_id: U256::from(1),
+                rollup_id: RollupId::new(U256::from(1)),
                 destination: Address::with_last_byte(i as u8),
                 value: U256::ZERO,
                 data: vec![0xFF; 8192], // 8KB of data
                 failed: false,
                 source_address: Address::ZERO,
-                source_rollup: U256::from(2),
-                scope: vec![],
+                source_rollup: RollupId::new(U256::from(2)),
+                scope: ScopePath::root(),
             },
         })
         .collect();
@@ -779,7 +780,7 @@ fn test_build_block_entries_produces_correct_state_deltas() {
             l2_block_number: 1,
             pre_state_root: B256::with_last_byte(0x00),
             state_root: B256::with_last_byte(0x01),
-            clean_state_root: B256::with_last_byte(0x01),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0x01)),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
         },
@@ -787,7 +788,7 @@ fn test_build_block_entries_produces_correct_state_deltas() {
             l2_block_number: 2,
             pre_state_root: B256::with_last_byte(0x01),
             state_root: B256::with_last_byte(0x02),
-            clean_state_root: B256::with_last_byte(0x02),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0x02)),
             encoded_transactions: Bytes::from(vec![0xc1, 0x80]),
             intermediate_roots: vec![],
         },
@@ -817,7 +818,10 @@ fn test_build_block_entries_produces_correct_state_deltas() {
         entries[0].state_deltas[0].new_state,
         B256::with_last_byte(0x01)
     );
-    assert_eq!(entries[0].state_deltas[0].rollup_id, U256::from(1));
+    assert_eq!(
+        entries[0].state_deltas[0].rollup_id,
+        RollupId::new(U256::from(1))
+    );
 
     // Second entry: state delta 0x01 -> 0x02
     assert_eq!(

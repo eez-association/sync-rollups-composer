@@ -1,0 +1,20 @@
+{
+  "scenario": "bridge",
+  "schema_version": 1,
+  "expected": {
+    "l1_hashes": [
+      "0x6e2621cdd92cd9fdcb863e5434d0e9948ed4c8087a3170816fec563744748a86"
+    ],
+    "l2_hashes": [
+      "0x11d52fac1a4eaa64fbaddc13ad4c5744d9986bc15b80c8ca29340e695d3e1c5e"
+    ],
+    "l2_call_hashes": [
+      "0xe09765b2ca57c44d5e58c60c6877c9b68f7c0ba97a4d4cf5f6a14e8a0d623fcd"
+    ]
+  },
+  "user_tx": {
+    "target": "0x451f5C40D12aE38DddFFdf53A61f6a78d74c657e",
+    "value": "1000000000000000000",
+    "calldata": "0xf402d9f30000000000000000000000000000000000000000000000000000000000000001000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+  }
+}

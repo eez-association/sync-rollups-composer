@@ -1,0 +1,22 @@
+{
+  "scenario": "multi-call-twice",
+  "schema_version": 1,
+  "expected": {
+    "l1_hashes": [
+      "0xbcca9352212a977b73cebad7f27d55bc50f55adc60e0b5d919bbdb25e44575e4",
+      "0xe3a3937a97f93b9ac116e1dd0654c1cc05b69141a77bd709327ccb0bf004ba96"
+    ],
+    "l2_hashes": [
+      "0xad2dad9e8b8b28845f9e9f445672865e4d1ecafffb3aef18a561f4de77b96f39",
+      "0xcd26507105ff235ed6257af5a47457276f8275f1074ded7f7938e1f80a7741ab"
+    ],
+    "l2_call_hashes": [
+      "0x47f3c7ec1ccccaad4f6fdd9ed613dd2702e7fb0d7834067d00c3e2a218028dc5"
+    ]
+  },
+  "user_tx": {
+    "target": "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318",
+    "value": "0",
+    "calldata": "0xede8a03c00000000000000000000000087b591cfe08fabadb375b7bd780815d260e48b44"
+  }
+}

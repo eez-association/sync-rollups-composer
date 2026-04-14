@@ -1,0 +1,21 @@
+{
+  "scenario": "nestedCounterL2",
+  "schema_version": 1,
+  "expected": {
+    "l1_hashes": [
+      "0xddb582e79a2b68b8ea360e3938f99ec198640a1a0d32d2be003f5041d7b54017",
+      "0xfa28a51d02027fb276d8e5d685642272e049ed4bc025ac5fc7ff143bcb66d618",
+      "0x5df10216867e32cf12a60f62c3156f7f154564d086a23325600c18b111efbdb3"
+    ],
+    "l2_hashes": [
+      "0xf4e427e67b67917a06f41cd5a48c87c235a21ccbbb49fc9c8f601c53c2bbece0",
+      "0x3af8d611fca2d751fc1a2c6f19a49030ecef0078659c9497a0feb60d3bd5cb62"
+    ],
+    "l2_call_hashes": []
+  },
+  "user_tx": {
+    "target": "0x3f12D42B7D9a076Ce4B832F20Ce01dd45b570C91",
+    "value": "0",
+    "calldata": "0x2bf21647"
+  }
+}

@@ -31,6 +31,15 @@ jobs:
           components: rustfmt
       - run: cargo +nightly fmt --all --check
 
+  # Invariant #23 gate: no hardcoded Solidity selectors in production Rust.
+  # Runs in parallel with fmt and build — no Rust toolchain needed.
+  no-hardcoded-selectors:
+    name: No Hardcoded Selectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/refactor/check-no-hardcoded-selectors.sh
+
   # Build + Clippy + Unit Tests in ONE job (clippy = full build + lint)
   build-and-lint:
     name: Build, Lint & Unit Tests
@@ -210,7 +219,7 @@ jobs:
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' && inputs.run_docker_e2e
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:

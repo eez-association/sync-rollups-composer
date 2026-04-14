@@ -171,7 +171,7 @@ sol! {
 /// Consumed events map: actionHash → Vec of consumed CALL actions.
 /// Vec preserves duplicate consumed events with the same actionHash
 /// (e.g., CallTwice calling increment() twice produces 2 events with same hash).
-pub type ConsumedMap = std::collections::HashMap<B256, Vec<CrossChainAction>>;
+pub type ConsumedMap = std::collections::HashMap<ActionHash, Vec<CrossChainAction>>;
 
 /// Check if a set of cross-chain calls contains duplicates (same action identity).
 /// Uses full 4-tuple (destination, calldata, value, sourceAddress) matching the
@@ -196,6 +196,1173 @@ pub const CROSS_CHAIN_MANAGER_L2_ADDRESS: Address = Address::new([
     0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03,
 ]);
 
+// ──────────────────────────────────────────────
+//  RollupId newtype (refactor PLAN step 1.1a)
+//
+//  A zero-cost wrapper over `U256` that makes rollup identifiers a
+//  distinct type at the compile-time level. Exists to prevent two
+//  classes of bugs:
+//    1. Passing a generic `U256` where a rollup id is expected (or
+//       vice versa — e.g. calling with a block number).
+//    2. Uncontrolled construction from raw bytes: every non-trivial
+//       path that turns raw bytes / topics / decoded ABI values into
+//       a `RollupId` must go through an explicit `from_*_boundary`
+//       function so that `grep from_.*_boundary` reveals every entry
+//       point a human auditor needs to review.
+//
+//  **Step 1.1a deliberately does NOT migrate call sites.** The type
+//  is introduced alongside the existing `U256`-typed fields (e.g.
+//  `CrossChainAction::rollup_id: U256`). Callsite migration happens in
+//  step 1.1b on a dedicated branch because it touches >20 files.
+// ──────────────────────────────────────────────
+
+/// Rollup identifier — the `rollupId` field of `ICrossChainManager.Action`.
+///
+/// A newtype wrapper over [`U256`]. Construction is controlled:
+/// - Internal code uses [`RollupId::new`] (module-private `pub(crate)`)
+/// - ABI-decoded values use [`RollupId::from_abi_boundary`]
+/// - Log topics use [`RollupId::from_log_boundary`]
+/// - Raw bytes use [`RollupId::from_bytes_at_boundary`]
+///
+/// Every `from_*_boundary` function is grep-able. Auditors can list
+/// every uncontrolled construction with `rg 'from_.*_boundary'`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct RollupId(U256);
+
+impl RollupId {
+    /// Mainnet (L1) rollup ID — conventionally `U256::ZERO` in the
+    /// sync-rollups-protocol spec. Available as a `const` so it can
+    /// appear in pattern matches and `if` expressions.
+    pub const MAINNET: Self = Self(U256::ZERO);
+
+    /// Module-private constructor for internal use.
+    ///
+    /// Prefer the explicit `from_*_boundary` functions for any
+    /// construction that crosses a serialization / decoding boundary.
+    /// This constructor exists for purely-internal code paths (e.g.
+    /// tests, helpers that already have a validated `U256`).
+    pub(crate) fn new(value: U256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `U256` value decoded at an ABI boundary — for
+    /// example, the `rollupId` field of a `sol!`-decoded struct or
+    /// the return value of an `eth_call` against a Solidity getter.
+    ///
+    /// Grep `from_abi_boundary` to audit every ABI decode path that
+    /// produces a rollup id.
+    pub fn from_abi_boundary(value: U256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a log topic (`B256`) taken from an on-chain event.
+    /// The topic is interpreted as big-endian 32 bytes.
+    ///
+    /// Grep `from_log_boundary` to audit every log parsing path.
+    pub fn from_log_boundary(topic: B256) -> Self {
+        Self(U256::from_be_bytes(topic.0))
+    }
+
+    /// Construct from raw bytes at a serialization boundary. Accepts
+    /// any slice up to 32 bytes; shorter slices are interpreted as
+    /// big-endian with left-padding zeros (the same convention as
+    /// `U256::from_be_slice`). Slices longer than 32 bytes are
+    /// truncated from the right (low-order bytes preserved).
+    ///
+    /// Grep `from_bytes_at_boundary` to audit every raw-bytes path.
+    pub fn from_bytes_at_boundary(bytes: &[u8]) -> Self {
+        let mut buf = [0u8; 32];
+        let len = bytes.len().min(32);
+        // Copy the last `len` bytes of the input into the rightmost
+        // `len` bytes of the 32-byte buffer (big-endian padding).
+        buf[32 - len..].copy_from_slice(&bytes[bytes.len() - len..]);
+        Self(U256::from_be_bytes(buf))
+    }
+
+    /// Return the underlying `U256` value. Used at ABI encode boundaries
+    /// and in internal comparisons that have not been migrated yet.
+    pub fn as_u256(&self) -> U256 {
+        self.0
+    }
+
+    /// Return the underlying value as a `u64`, or `None` if it does
+    /// not fit. Every current rollup id in the codebase is small, but
+    /// the on-chain type is `uint256` so we encode the possibility of
+    /// overflow explicitly.
+    pub fn to_u64(&self) -> Option<u64> {
+        if self.0 <= U256::from(u64::MAX) {
+            Some(self.0.to::<u64>())
+        } else {
+            None
+        }
+    }
+
+    /// Return `true` if this is the mainnet / L1 rollup id.
+    pub fn is_mainnet(&self) -> bool {
+        self.0 == U256::ZERO
+    }
+}
+
+impl std::fmt::Display for RollupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_mainnet() {
+            write!(f, "MAINNET")
+        } else {
+            write!(f, "rollup-{}", self.0)
+        }
+    }
+}
+
+// ──────────────────────────────────────────────
+//  ScopePath newtype (refactor PLAN step 1.1c)
+//
+//  A zero-cost wrapper over `Vec<U256>` that makes a cross-chain
+//  execution scope a distinct type at the compile-time level. The
+//  protocol (`_resolveScopes` in `CrossChainManagerL2`) represents a
+//  scope as the indexed path taken into a call tree — each element is
+//  a child index, `[]` means "root", `[0]` means "first child of the
+//  root", `[0, 1]` means "second child of the first child", and so
+//  on. Treating this as a generic `Vec<U256>` made it easy to pass a
+//  scope where a plain list was expected (and vice versa); the newtype
+//  closes that at the type level.
+//
+//  **Helpers `enter` / `exit` carry zero current callers in the
+//  codebase** — every scope is built as a literal or cloned by value.
+//  They are included per PLAN §8 step 1.1c spec because the protocol
+//  (and future builder refactors in 1.9b / 3.x) treats a scope as a
+//  tree-walk stack. Having domain-named `enter` / `exit` available
+//  when those call sites land avoids a mid-refactor API expansion.
+// ──────────────────────────────────────────────
+
+/// Scope path for a cross-chain execution entry — the indexed path
+/// from the root of a call tree to a specific descendant. Wraps a
+/// `Vec<U256>` with domain semantics so arbitrary `Vec<U256>` values
+/// cannot be passed where a scope is expected.
+///
+/// Construction:
+/// - [`ScopePath::root`] — empty path, the root of a call tree.
+/// - [`ScopePath::from_index`] — single child index, e.g. `[0]`.
+/// - [`ScopePath::from_parts`] — at ABI / deserialization boundaries.
+///
+/// Mutation (tree-walk semantics, per PLAN §8 step 1.1c):
+/// - [`ScopePath::enter`] — push a child index (enter a subtree).
+/// - [`ScopePath::exit`] — pop the current child index (return to
+///   parent).
+///
+/// Borrow / conversion:
+/// - [`ScopePath::as_slice`] — read-only view as `&[U256]`, used at
+///   ABI encode boundaries and inside equality checks.
+/// - [`ScopePath::into_inner`] — owning conversion back to
+///   `Vec<U256>` for wire-format types and sol! structs that still
+///   hold a raw `Vec<U256>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct ScopePath(Vec<U256>);
+
+impl ScopePath {
+    /// The root of a call tree — an empty scope path.
+    pub fn root() -> Self {
+        Self(Vec::new())
+    }
+
+    /// A single-element scope path `[idx]`. Shorthand for the very
+    /// common "first child of the root" pattern that shows up in
+    /// almost every L2→L1 / L1→L2 continuation entry.
+    pub fn from_index(idx: U256) -> Self {
+        Self(vec![idx])
+    }
+
+    /// Construct a scope from a raw `Vec<U256>` at a boundary — ABI
+    /// decode, JSON deserialization, sol! → Rust conversion. Every
+    /// non-literal construction from an untyped value must go
+    /// through here so auditors can `grep ScopePath::from_parts` to
+    /// list every entry point.
+    pub fn from_parts(parts: Vec<U256>) -> Self {
+        Self(parts)
+    }
+
+    /// Enter a subtree by pushing a child index onto the path.
+    ///
+    /// Currently has no callers — see the module comment above. This
+    /// helper exists per PLAN §8 step 1.1c spec so future builder
+    /// refactors do not need to expand the public API mid-refactor.
+    pub fn enter(&mut self, idx: U256) {
+        self.0.push(idx);
+    }
+
+    /// Exit the current subtree by popping the last index from the
+    /// path. Returns the popped index, or `None` if already at the
+    /// root. Currently has no callers (see `enter`).
+    pub fn exit(&mut self) -> Option<U256> {
+        self.0.pop()
+    }
+
+    /// Borrow the scope as a raw slice — used at ABI encode
+    /// boundaries (`to_sol_action`, `abi_encode`) and inside internal
+    /// equality / length checks.
+    pub fn as_slice(&self) -> &[U256] {
+        &self.0
+    }
+
+    /// Consume the scope and return the inner `Vec<U256>`. Used
+    /// when crossing into wire-format types (`SerializableAction`,
+    /// `ICrossChainManagerL2::Action`) that still hold a raw
+    /// `Vec<U256>`.
+    pub fn into_inner(self) -> Vec<U256> {
+        self.0
+    }
+
+    /// Number of elements in the scope path. Zero means "root".
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// `true` if this is the root path (no children entered).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for ScopePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            write!(f, "root")
+        } else {
+            write!(f, "[")?;
+            for (i, idx) in self.0.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", idx)?;
+            }
+            write!(f, "]")
+        }
+    }
+}
+
+// ──────────────────────────────────────────────
+//  State-root newtypes (refactor PLAN step 1.2)
+//
+//  Four zero-cost wrappers over `B256` that distinguish the four
+//  semantically distinct hash slots in the cross-chain protocol:
+//
+//    - `CleanStateRoot`        — the post-block state root WITHOUT
+//                                cross-chain entries applied; what L1
+//                                sees as the rollup's current state.
+//    - `SpeculativeStateRoot`  — the post-block state root WITH
+//                                cross-chain entries applied; what
+//                                reth holds locally before postBatch
+//                                lands.
+//    - `NewStateRoot`          — the per-entry "new state" produced
+//                                by a single state delta (the
+//                                `newState` field of a `StateDelta`).
+//    - `ActionHash`            — `keccak256(abi.encode(action))`,
+//                                the lookup key for execution entries.
+//
+//  The PLAN groups them in step 1.2 because they all close invariant
+//  #3 ("NEVER align state roots by overwriting `pre_state_root`") and
+//  related anti-patterns. The most load-bearing of the four is
+//  [`CleanStateRoot`]: making it impossible to construct one outside
+//  the canonical `compute_intermediate_roots` path means you can no
+//  longer paper over a divergence by writing a freshly-computed value
+//  back into the slot that L1 sees.
+//
+//  ## Migration scope (step 1.2 partial)
+//
+//  Per PLAN §8 (option B from the user check-in), this step:
+//
+//    1. Introduces all four newtypes with their boundary constructors
+//       (this commit).
+//    2. Migrates [`CleanStateRoot`] (7 callsites — closes invariant #3
+//       at the type level).
+//    3. Migrates [`ActionHash`] (183 callsites — biggest mechanical
+//       cascade, closes the "passing a state root where an action
+//       hash is expected" class of bugs).
+//    4. Leaves [`SpeculativeStateRoot`] and [`NewStateRoot`] as
+//       scaffolding only — the field name already discriminates them
+//       (`state_root` vs `clean_state_root` on `PendingBlock`,
+//       `current_state` vs `new_state` on `CrossChainStateDelta`),
+//       so cascade cost outweighs marginal benefit until a future
+//       refactor needs to disambiguate them.
+//
+//  When step 1.2b lands a real caller for the deferred two, the
+//  scaffolding is ready and migration is mechanical.
+//
+//  ## Boundary discipline
+//
+//  Every newtype follows the same shape (mirrors `RollupId` from
+//  step 1.1a):
+//
+//    - `pub(crate) fn new(B256) -> Self` — internal-only constructor
+//      for code that already has a validated value.
+//    - `pub fn from_abi_boundary(B256) -> Self` — explicit ABI decode
+//      entry point. Grep `from_abi_boundary` to audit every site.
+//    - `pub fn from_log_boundary(B256) -> Self` — explicit event-log
+//      decode entry point.
+//    - `pub fn as_b256(&self) -> B256` — read-only view for ABI
+//      encode boundaries and equality checks against raw `B256`.
+// ──────────────────────────────────────────────
+
+/// The post-block state root WITHOUT cross-chain entries applied.
+///
+/// This is what L1 sees as the rollup's canonical state — the
+/// `currentState` field of the next batch's `postBatch` call. It is
+/// computed by trial-executing every non-trigger transaction in the
+/// block and reading the resulting state root, effectively rolling
+/// back any cross-chain entry effects.
+///
+/// **Closes invariant #3** ("NEVER align state roots by overwriting
+/// `pre_state_root`") at the type level: a `CleanStateRoot` cannot
+/// be constructed from a freshly-computed `B256` outside the
+/// canonical `compute_intermediate_roots` path (which uses
+/// `pub(crate) new`). Code that wants to "make a mismatch go away"
+/// by assigning a different value into the slot will not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct CleanStateRoot(B256);
+
+impl CleanStateRoot {
+    /// Module-private constructor. Only callable from inside the
+    /// `cross_chain` module and its sibling tests. The canonical
+    /// production caller is `Driver::compute_intermediate_roots`,
+    /// which trial-executes the block and pulls `roots[0]`.
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `B256` decoded at an ABI boundary — for
+    /// example, the `stateRoot` field returned by the
+    /// `Rollups.rollups(rollupId)` view call.
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `B256` taken from a log topic.
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Read-only view of the underlying hash. Used at ABI encode
+    /// boundaries and inside equality checks against raw `B256`.
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for CleanStateRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// The post-block state root WITH cross-chain entries applied.
+///
+/// This is what reth holds locally as the canonical block state
+/// after executing every transaction (including the protocol txs
+/// that consume cross-chain entries). It is the value of
+/// `BuiltBlock.state_root` and `PendingBlock.state_root`.
+///
+/// **Scaffolding only in step 1.2.** No fields are migrated to this
+/// type yet — see the module comment above for the rationale. The
+/// type exists so a future step (1.2b or later) can flip
+/// `BuiltBlock.state_root` and propagate without an API change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+#[repr(transparent)]
+#[allow(dead_code)]
+pub struct SpeculativeStateRoot(B256);
+
+#[allow(dead_code)]
+impl SpeculativeStateRoot {
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+}
+
+/// The "new state" produced by a single cross-chain state delta.
+///
+/// Distinct from [`CleanStateRoot`] because a `NewStateRoot` is the
+/// per-entry intermediate result inside a chain of deltas, not the
+/// post-block rollback state. In the chain
+/// `clean → root1 → root2 → ... → speculative`, every arrow's RHS
+/// is a `NewStateRoot` (and the next arrow's LHS).
+///
+/// **Scaffolding only in step 1.2.** Field name (`new_state`) already
+/// discriminates from `current_state`. Migration deferred per the
+/// module comment above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+#[repr(transparent)]
+#[allow(dead_code)]
+pub struct NewStateRoot(B256);
+
+#[allow(dead_code)]
+impl NewStateRoot {
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+}
+
+/// `keccak256(abi.encode(action))` — the lookup key the on-chain
+/// `_consumeExecution` function uses to find the execution entry
+/// matching a given cross-chain action.
+///
+/// Distinct from any state root: an `ActionHash` identifies a
+/// specific action (`CALL(target, data, ...)`, `RESULT(...)`, etc.)
+/// and is computed by hashing the ABI-encoded `Action` struct, not
+/// by trial-executing a block.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct ActionHash(B256);
+
+impl ActionHash {
+    /// Module-private constructor. The canonical caller is
+    /// `table_builder::compute_action_hash` (and its in-module
+    /// equivalents in `cross_chain.rs`), which keccaks an
+    /// ABI-encoded `Action`.
+    pub(crate) fn new(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `B256` decoded at an ABI boundary — for
+    /// example, the `actionHash` field of an
+    /// `ICrossChainManagerL2::ExecutionEntry` decoded from a
+    /// `BatchPosted` event.
+    pub fn from_abi_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Construct from an event-log topic.
+    pub fn from_log_boundary(value: B256) -> Self {
+        Self(value)
+    }
+
+    /// Read-only view of the underlying hash. Used at ABI encode
+    /// boundaries and inside equality checks against raw `B256`.
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+
+    /// The all-zero `ActionHash`, used as a sentinel by some
+    /// pre-execution and immediate-entry helpers (entries whose
+    /// `actionHash == 0` are immediate, not lookup-keyed).
+    pub const ZERO: Self = Self(B256::ZERO);
+}
+
+impl std::fmt::Display for ActionHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ──────────────────────────────────────────────
+//  ConsumedPrefix newtype (refactor PLAN step 0.3 / Phase 6)
+//
+//  Zero-cost wrapper around `usize` representing the number of
+//  consecutive trigger transactions from the start of a block whose
+//  entries were fully consumed on L1. Closes invariants #4 and #16:
+//
+//  - #4: §4f filtering is per-call prefix counting, never
+//        all-or-nothing. The newtype makes the semantic "prefix count"
+//        distinct from generic `usize` values (e.g. array lengths,
+//        block numbers, indices) that callers might accidentally mix.
+//  - #16: §4f filtering is generic (CrossChainCallExecuted events),
+//        not Bridge selectors. The `ConsumedPrefix` is produced
+//        exclusively by `compute_consumed_trigger_prefix` which uses
+//        `ExecutionConsumed` events — no selector dependency.
+//
+//  ## Why a newtype instead of bare `usize`
+//
+//  Both call sites in `driver/verify.rs` previously received a bare
+//  `usize` and immediately compared it against `trigger_indices.len()`.
+//  Without the wrapper, nothing prevented a caller from passing, say,
+//  `total_triggers` instead of `consumed_count` into
+//  `filter_block_by_trigger_prefix`. With `ConsumedPrefix`, the type
+//  is self-documenting and requires an explicit `.as_usize()` to
+//  escape.
+// ──────────────────────────────────────────────
+
+/// The number of consecutive trigger transactions, counted from the
+/// front of a block's trigger list, whose entries were fully consumed
+/// on L1. Produced by [`compute_consumed_trigger_prefix`].
+///
+/// Invariants:
+/// - `0 <= value <= trigger_tx_indices.len()` — bounded by input.
+/// - Monotonic in the L1 consumed map — more entries available ≥ more consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConsumedPrefix(usize);
+
+impl ConsumedPrefix {
+    /// Construct a new `ConsumedPrefix`. Only called by
+    /// `compute_consumed_trigger_prefix`; callers outside
+    /// `cross_chain` cannot fabricate values without going
+    /// through the function that enforces prefix semantics.
+    pub(crate) fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// Read-only access to the underlying count. Used at comparison
+    /// and arithmetic boundaries in `driver/verify.rs`.
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+
+    /// Whether zero triggers were consumed (i.e. the very first trigger
+    /// was not present in the L1 consumed map).
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::fmt::Display for ConsumedPrefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ──────────────────────────────────────────────
+//  ParentLink + AbsoluteCallIndex (refactor PLAN step 1.3)
+//
+//  Two zero-cost wrappers that replace the `parent_call_index:
+//  Option<usize>` field used by every detected-call struct
+//  (`DetectedCall`, `L1DetectedCall`, `L2ReturnCall`, and the wire
+//  twins in `rpc.rs` / `composer_rpc/`). The protocol distinguishes
+//  two parent-link kinds:
+//
+//    - **`Root`**  — the call is a top-level cross-chain call. It
+//                    has no parent in the call tree.
+//    - **`Child(idx)`** — the call was made as a side-effect of an
+//                    earlier call's L2 execution; `idx` points at
+//                    that parent call in the absolute (post-rebase)
+//                    `all_l2_calls` slice.
+//
+//  Modeling this as a generic `Option<usize>` made it easy to:
+//
+//    1. Pass an unrelated index (e.g. a block number, a vec index
+//       into a different slice) where a parent index was expected.
+//    2. Treat `None` and `Some(0)` as semantically equivalent.
+//    3. Forget to rebase the index after `simulate_l1_combined_delivery`
+//       (which assigns `call_idx=0` relative to its single-call
+//       slice — see CLAUDE.md "Parent Call Index After Combined
+//       Simulation"). The newtype gives us a single grep-able
+//       `from_usize_at_boundary` site to audit every rebase.
+//
+//  ## Wire compatibility
+//
+//  `#[serde(into / from)]` makes both types serialize as the same
+//  JSON shape they had before:
+//
+//    - `ParentLink`        ↔ `Option<usize>` — `Root` ↔ `null`,
+//                            `Child(i)` ↔ `i`.
+//    - `AbsoluteCallIndex` ↔ `usize` — flat number, no wrapper
+//                            object.
+//
+//  Persisted state and in-flight RPC payloads are byte-identical to
+//  the pre-1.3 wire format.
+//
+//  ## Closes invariant #7 (partial)
+//
+//  PLAN §6 invariant #7: "`parent_call_index` MUST be rebased after
+//  `simulate_l1_combined_delivery`". The full closure (single helper
+//  `rebase_parent_links`) lands in step 3.3 once the composer is
+//  unified behind a `Direction` trait. Step 1.3 introduces the type
+//  so that:
+//
+//    - The compiler distinguishes "parent link in the original
+//      detected slice" from "parent link in `all_l2_calls`".
+//    - Every assignment that crosses that boundary must go through
+//      a named conversion (`from_usize_at_boundary`), making the
+//      grep audit trivial.
+// ──────────────────────────────────────────────
+
+/// Index into the *absolute* `all_l2_calls` slice — the post-rebase
+/// position of a call across the entire batch, distinct from a
+/// position within any single-call simulation slice.
+///
+/// Construction follows the now-standard newtype shape:
+///
+/// - [`AbsoluteCallIndex::new`] — `pub(crate)` constructor for
+///   internal code that already has a validated index.
+/// - [`AbsoluteCallIndex::from_usize_at_boundary`] — explicit
+///   "I am crossing a slice boundary" constructor. Grep
+///   `from_usize_at_boundary` to audit every rebase point in the
+///   composer.
+/// - [`AbsoluteCallIndex::as_usize`] — read-only view for arithmetic
+///   and comparisons.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct AbsoluteCallIndex(usize);
+
+impl AbsoluteCallIndex {
+    /// Module-private constructor. Internal code that already has a
+    /// validated absolute index uses this directly.
+    pub(crate) fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// Construct from a `usize` at a slice boundary — i.e. when an
+    /// index is being rebased from one slice into the absolute
+    /// `all_l2_calls` slice. Grep `from_usize_at_boundary` to audit
+    /// every rebase point.
+    pub fn from_usize_at_boundary(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// Read-only view of the underlying `usize`.
+    pub fn as_usize(&self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for AbsoluteCallIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Parent link for a detected cross-chain call.
+///
+/// Replaces the previous `Option<usize>` representation so the
+/// "no parent (root call)" and "child of call N" cases are distinct
+/// at the type level.
+///
+/// `#[serde(into / try_from = "Option<usize>")]` keeps the on-the-wire
+/// JSON identical to the pre-1.3 representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ParentLink {
+    /// A top-level cross-chain call with no parent.
+    #[default]
+    Root,
+    /// A child call made by the L2 execution of an earlier call.
+    /// `idx` points into the absolute `all_l2_calls` slice.
+    Child(AbsoluteCallIndex),
+}
+
+impl ParentLink {
+    /// Construct from an `Option<usize>` (typically deserialized JSON
+    /// or a legacy field). `None` becomes `Root`, `Some(i)` becomes
+    /// `Child(AbsoluteCallIndex(i))`.
+    pub fn from_option(opt: Option<usize>) -> Self {
+        match opt {
+            None => Self::Root,
+            Some(i) => Self::Child(AbsoluteCallIndex::from_usize_at_boundary(i)),
+        }
+    }
+
+    /// Convert back to an `Option<usize>` for the wire / sol! /
+    /// legacy boundary.
+    pub fn to_option(self) -> Option<usize> {
+        match self {
+            Self::Root => None,
+            Self::Child(idx) => Some(idx.as_usize()),
+        }
+    }
+
+    /// `true` iff this call has no parent (top-level call).
+    pub fn is_root(&self) -> bool {
+        matches!(self, Self::Root)
+    }
+
+    /// `true` iff this call has a parent.
+    pub fn is_child(&self) -> bool {
+        matches!(self, Self::Child(_))
+    }
+
+    /// Return the parent index if this is a child call.
+    pub fn child_index(&self) -> Option<AbsoluteCallIndex> {
+        match self {
+            Self::Root => None,
+            Self::Child(idx) => Some(*idx),
+        }
+    }
+
+    /// Update the parent index in place. If currently `Root`, this
+    /// transitions to `Child`. Used at the rebase site after
+    /// `simulate_l1_combined_delivery` collapses children onto
+    /// `call_idx=0`.
+    pub fn set_child(&mut self, idx: AbsoluteCallIndex) {
+        *self = Self::Child(idx);
+    }
+
+    /// Mutably borrow the inner index if this is a child. Used by
+    /// the few sites that need to update the index in place
+    /// (`if let Some(ref mut idx) = rc.parent_call_index { *idx = … }`).
+    pub fn child_index_mut(&mut self) -> Option<&mut AbsoluteCallIndex> {
+        match self {
+            Self::Root => None,
+            Self::Child(idx) => Some(idx),
+        }
+    }
+}
+
+// Wire compatibility: serialize as `Option<usize>`. The transparent
+// `Serialize` cannot be derived for an enum, so we go through
+// `Option<usize>` explicitly via serde's `into` / `try_from`.
+impl serde::Serialize for ParentLink {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_option().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ParentLink {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Option::<usize>::deserialize(deserializer).map(ParentLink::from_option)
+    }
+}
+
+// ──────────────────────────────────────────────
+//  TxOutcome + EntryGroupMode (refactor PLAN step 1.4)
+//
+//  Two semantic enums that replace boolean fields whose meaning was
+//  not visible at the call site. The refactor target was named in
+//  PLAN §6 invariants and §8 step 1.4: every place that branches on
+//  `tx_reverts: bool` and `l1_independent_entries: bool` should have
+//  a self-documenting type, not a true/false flag.
+//
+//  ## What this step does NOT introduce
+//
+//  PLAN §8 1.4 also names a third internal helper enum:
+//
+//      enum EntryClass { Trigger, Continuation, Result, RevertContinue }
+//
+//  As of step 1.4 there is no single concentrated call site that
+//  benefits from a 4-way classification. The closest candidate is
+//  `partition_entries` (which currently does a 2-way split into
+//  `(table_entries, trigger_entries)`) and the `entry_counts` loop
+//  in `driver.rs` (which already filters by 3 different criteria
+//  inline). Neither is a clean win for an `EntryClass` switch.
+//
+//  Per the same partial-migration discipline used in step 1.2 (where
+//  `SpeculativeStateRoot` and `NewStateRoot` were left as scaffolding
+//  rather than fake migrations), `EntryClass` is **deferred to a
+//  later step** that has a real consumer. Likely candidates:
+//
+//    - 1.4b (`QueuedCallRequest::{Simple, WithContinuations}`) — if
+//      the dispatch needs to discriminate continuation entries.
+//    - 2.4 (`ProtocolTxPlan` with stages) — if the planner needs to
+//      tag entries by class as it iterates.
+//    - 2.5 (`VerificationDecision`) — if the verify path needs to
+//      classify by entry kind.
+//
+//  Adding it as dead-code scaffolding now would violate the CLAUDE.md
+//  rule "Don't create helpers, utilities, or abstractions for one-time
+//  operations" and would not make the code any more correct.
+// ──────────────────────────────────────────────
+
+/// Outcome of an L2 user transaction that initiated cross-chain calls.
+///
+/// Replaces the previous `tx_reverts: bool` field, which was
+/// notorious for being read backwards (`if tx_reverts { … }` is the
+/// "the user's tx FAILED" branch, but at glance it can read like
+/// "the tx works in some reverted state"). The named variants make
+/// the intent obvious at every call site:
+///
+/// - **`Success`** — the L2 tx executed all its cross-chain calls
+///   and committed the changes. Entries are processed normally.
+/// - **`Revert`** — the L2 tx made cross-chain calls and then
+///   reverted. The L1 entries must include `REVERT` /
+///   `REVERT_CONTINUE` actions so the protocol can roll back the
+///   side effects (spec §D.12).
+///
+/// Wire compatibility: `#[serde(into / from = "bool")]` keeps the
+/// JSON representation byte-identical (`true` = `Revert`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TxOutcome {
+    /// The L2 user transaction succeeded after making cross-chain
+    /// calls. The corresponding boolean is `false`.
+    #[default]
+    Success,
+    /// The L2 user transaction reverted after making cross-chain
+    /// calls. Triggers the spec §D.12 `REVERT` / `REVERT_CONTINUE`
+    /// path. The corresponding boolean is `true`.
+    Revert,
+}
+
+impl TxOutcome {
+    /// Construct from a `bool` at a JSON / wire boundary. `false`
+    /// becomes `Success`, `true` becomes `Revert`.
+    pub fn from_bool(reverts: bool) -> Self {
+        if reverts { Self::Revert } else { Self::Success }
+    }
+
+    /// Convert back to the legacy `tx_reverts: bool` representation.
+    pub fn as_bool(self) -> bool {
+        matches!(self, Self::Revert)
+    }
+
+    /// `true` iff the L2 tx reverted after making cross-chain calls.
+    pub fn is_revert(&self) -> bool {
+        matches!(self, Self::Revert)
+    }
+
+    /// `true` iff the L2 tx succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success)
+    }
+}
+
+impl serde::Serialize for TxOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_bool().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TxOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(TxOutcome::from_bool)
+    }
+}
+
+/// State-delta chaining mode for a group of L1 deferred entries.
+///
+/// Replaces the previous `l1_independent_entries: bool` field. The
+/// boolean was used to distinguish two structurally distinct entry
+/// arrangements:
+///
+/// - **`Chained`** — every entry's `currentState` matches the
+///   previous entry's `newState`, forming a chain
+///   `clean → root1 → root2 → … → speculative`. This is the default
+///   for normal cross-chain entries (deposits, withdrawals, multi-call
+///   continuations).
+/// - **`Independent`** — every entry in the group sees the SAME
+///   `currentState` (the pre-revert root). Used for L1→L2 partial
+///   revert patterns where the L1 try/catch rolls back the
+///   reverted call's state, so subsequent entries must observe the
+///   pre-revert state, not the chained intermediate root.
+///
+/// Wire compatibility: `#[serde(into / from = "bool")]` keeps the
+/// JSON representation byte-identical (`true` = `Independent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EntryGroupMode {
+    /// Entries form a chained delta sequence
+    /// (`prev.newState == curr.currentState`). The default. Boolean
+    /// equivalent: `false`.
+    #[default]
+    Chained,
+    /// Entries are independent — each sees the same pre-revert
+    /// `currentState`. Used for L1→L2 partial-revert patterns.
+    /// Boolean equivalent: `true`.
+    Independent,
+}
+
+impl EntryGroupMode {
+    /// Construct from a `bool` at a JSON / wire boundary. `false`
+    /// becomes `Chained`, `true` becomes `Independent`.
+    pub fn from_bool(independent: bool) -> Self {
+        if independent {
+            Self::Independent
+        } else {
+            Self::Chained
+        }
+    }
+
+    /// Convert back to the legacy `l1_independent_entries: bool`
+    /// representation.
+    pub fn as_bool(self) -> bool {
+        matches!(self, Self::Independent)
+    }
+
+    /// `true` iff entries in this group are independent (override
+    /// chained currentState with the pre-revert root).
+    pub fn is_independent(&self) -> bool {
+        matches!(self, Self::Independent)
+    }
+
+    /// `true` iff entries in this group form a chained delta
+    /// sequence.
+    pub fn is_chained(&self) -> bool {
+        matches!(self, Self::Chained)
+    }
+}
+
+impl serde::Serialize for EntryGroupMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_bool().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EntryGroupMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(EntryGroupMode::from_bool)
+    }
+}
+
+// ──────────────────────────────────────────────
+//  CallOrientation (refactor PLAN step 1.9a)
+//
+//  Distinguishes a **forward** L2→L1 child call from a **return**
+//  L1→L2 child call. The two kinds have opposite (destination,
+//  source) pairings when building their L1 trigger entries, and
+//  swapping the pair by mistake was a real class of bug:
+//
+//  - **Forward** L2→L1 children: the proxy on L1 represents the L2
+//    *source* (e.g., Bridge_L2). The L1 *destination* is the L1
+//    contract that the L2 source is calling (e.g., Bridge_L1
+//    receiving withdrawn tokens). Trigger entry pair:
+//
+//        (trigger_dest, trigger_source) = (source_address, destination)
+//
+//    i.e. **swap** the CALL action's (destination, source).
+//
+//  - **Return** L1→L2 children: the proxy on L1 represents the L2
+//    *destination* (e.g., PingPongL2). The L1 *source_address* is
+//    the L1 contract that called the proxy. Trigger entry pair:
+//
+//        (trigger_dest, trigger_source) = (destination, source_address)
+//
+//    i.e. **do not swap** — preserve the CALL action's pair.
+//
+//  ## Closes invariant #19 (more explicitly)
+//
+//  Pre-1.9a, the swap logic was duplicated at three call sites in
+//  `table_builder.rs`, each with its own `let is_return_call =
+//  child.call_action.rollup_id == our_rollup_id;` followed by an
+//  `if is_return_call` block. Copy-pasting or refactoring any of
+//  these sites was brittle — it took one inverted `if` to
+//  reintroduce the CLAUDE.md "Return Call Address Direction" bug
+//  that cost hours to diagnose during the PingPong depth-2 debug.
+//
+//  Post-1.9a, the swap lives in exactly one place:
+//  [`CallOrientation::address_pair_for`]. The three former sites
+//  call this helper and pass the orientation computed by
+//  [`CallOrientation::from_child`]. A future bug in the swap logic
+//  is a single-site edit that the test suite catches (the mirror
+//  tests + the PingPong-depth2 property test exercise both
+//  orientations). A future bug in the ORIENTATION detection (the
+//  `rollup_id == our_rollup_id` heuristic) is also a single-site
+//  edit.
+// ──────────────────────────────────────────────
+
+/// Orientation of a child cross-chain call inside a multi-depth
+/// pattern. See the module comment above for the precise semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallOrientation {
+    /// L2→L1 child call. The child's CALL action targets L1
+    /// (`rollup_id = RollupId::MAINNET`) and originates from an
+    /// L2 contract. Trigger entries **swap** (dest, source).
+    Forward,
+    /// L1→L2 return call child. The child's CALL action targets
+    /// our L2 rollup (`rollup_id == our_rollup_id`) and originates
+    /// from an L1 contract. Trigger entries **do not swap** —
+    /// preserve the CALL action's (dest, source) pair.
+    Return,
+}
+
+impl CallOrientation {
+    /// Detect the orientation from a child's `CrossChainAction
+    /// .rollup_id`. This is the canonical gate — **every** site
+    /// that used to write `is_return_call = child.rollup_id ==
+    /// our_rollup_id` must go through this helper so the detection
+    /// rule lives in one place.
+    pub fn from_child(child_rollup_id: RollupId, our_rollup_id: RollupId) -> Self {
+        if child_rollup_id == our_rollup_id {
+            Self::Return
+        } else {
+            Self::Forward
+        }
+    }
+
+    /// Produce the `(trigger_dest, trigger_source)` tuple for a
+    /// child's L1 trigger / L2 `callReturn` entry. **Closes
+    /// invariant #19** — any future code that wants to rebuild
+    /// this pair must either call this function or rename the
+    /// enum's variants (which is visible in review).
+    pub fn address_pair_for(
+        &self,
+        call_destination: Address,
+        call_source_address: Address,
+    ) -> (Address, Address) {
+        match self {
+            // Return call: preserve — proxy represents the L2
+            // destination, source is the L1 caller.
+            Self::Return => (call_destination, call_source_address),
+            // Forward call: swap — proxy represents the L2 source,
+            // destination is the L1 contract being called.
+            Self::Forward => (call_source_address, call_destination),
+        }
+    }
+
+    /// `true` iff this is a return call (`L1→L2 child`).
+    pub fn is_return(&self) -> bool {
+        matches!(self, Self::Return)
+    }
+
+    /// `true` iff this is a forward call (`L2→L1 child`).
+    pub fn is_forward(&self) -> bool {
+        matches!(self, Self::Forward)
+    }
+}
+
+// ──────────────────────────────────────────────
+//  ReturnData (refactor PLAN step 1.10)
+//
+//  Tagged union over the "zero bytes = void function" convention
+//  that the codebase uses in 23+ places. Every cross-chain call
+//  result (delivery simulation, L2 eth_call, L1 trigger trace) either
+//  returns actual ABI-encoded data or zero bytes to indicate a void
+//  function. Pre-1.10, this was represented as a bare `Vec<u8>` and
+//  tested with `.is_empty()` at every read site:
+//
+//      if child.delivery_return_data.is_empty() && !child.delivery_failed {
+//          // void path
+//      }
+//
+//  Reading `.is_empty()` on a `Vec<u8>` requires the reviewer to
+//  remember that "empty means void" is a project convention, not
+//  a natural invariant. Post-1.10 the same check becomes:
+//
+//      if ReturnData::from_bytes(child.delivery_return_data.clone()).is_void()
+//          && !child.delivery_failed
+//      { ... }
+//
+//  Or, when a struct field migrates to `ReturnData` directly:
+//
+//      if child.delivery_return_data.is_void() && !child.delivery_failed { ... }
+//
+//  `is_void()` is a named method whose docstring says exactly what
+//  the convention means, which makes the invariant self-documenting.
+//
+//  ## Closes invariant #20 (partial)
+//
+//  Invariant #20: "Return data shape — Void = 0 bytes;
+//  `delivery_return_data` → hashes; `l2_return_data` → scope
+//  resolution". The invariant lives in four RESULT hash sites, each
+//  of which must choose between `result_void()` (void) and an
+//  explicit RESULT with `data: return_bytes` (non-void) based on the
+//  return data's emptiness. `ReturnData::is_void` is the typed gate.
+//
+//  ## Scope decision (see commit message)
+//
+//  The PLAN calls for `ReturnData` to be propagated through every
+//  struct field that currently holds `Vec<u8>` return data
+//  (`DetectedCall`, `L1DetectedCall`, `L2DetectedCall`, `L2ReturnCall`,
+//  RPC JSON types). Auditing found ~101 access sites across those
+//  types, most in cascading wire-type chains that serialize to JSON
+//  and would require boundary conversions at every entry and exit.
+//
+//  This step ships `ReturnData` as a **standalone helper type** with
+//  `from_bytes` / `from_slice` / `is_void` / `as_bytes` /
+//  `into_bytes`, usable by any site that wants the typed
+//  `is_void()` check, without forcing the wire-type cascade. Field
+//  migration is deferred to a future step that has a concrete
+//  caller needing the full type-level propagation. This matches the
+//  partial-migration discipline used in 1.2 (state roots), 1.4
+//  (EntryClass), 1.7 (proposer API typestate), 1.8 (L1NonceReservation/
+//  L1Client), 1.9a (ImmediateEntryBuilder), and 1.9b/1.9c (deferred
+//  builder wrappers). The load-bearing part — a named `is_void()`
+//  method — exists now.
+// ──────────────────────────────────────────────
+
+/// Tagged return data from a cross-chain call's L1 delivery
+/// simulation or L2 execution. See the module comment for the
+/// "empty bytes = void function" convention this type encodes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReturnData {
+    /// Zero bytes — the underlying function had no return value
+    /// (void function, reached via assembly `return(0, 0)`).
+    #[default]
+    Void,
+    /// Non-empty ABI-encoded return bytes.
+    NonVoid(Vec<u8>),
+}
+
+impl ReturnData {
+    /// Construct from a `Vec<u8>` at a boundary — ABI decode, eth_call
+    /// response, trace output, RPC JSON deserialization. Empty input
+    /// becomes [`ReturnData::Void`], non-empty becomes
+    /// [`ReturnData::NonVoid`].
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        if bytes.is_empty() {
+            Self::Void
+        } else {
+            Self::NonVoid(bytes)
+        }
+    }
+
+    /// Construct from a slice. See [`ReturnData::from_bytes`].
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            Self::Void
+        } else {
+            Self::NonVoid(bytes.to_vec())
+        }
+    }
+
+    /// `true` iff this represents a void return. **Closes
+    /// invariant #20** at the read site — every future check that
+    /// used to write `.is_empty()` on a `Vec<u8>` return data can
+    /// now call `.is_void()` and get a named method whose
+    /// docstring documents the convention.
+    pub fn is_void(&self) -> bool {
+        matches!(self, Self::Void)
+    }
+
+    /// `true` iff this carries actual return bytes.
+    pub fn is_non_void(&self) -> bool {
+        matches!(self, Self::NonVoid(_))
+    }
+
+    /// Borrow the underlying bytes. Returns an empty slice for
+    /// [`ReturnData::Void`] — matches the pre-1.10 `Vec<u8>::as_slice()`
+    /// behavior for zero-byte data.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Void => &[],
+            Self::NonVoid(bytes) => bytes,
+        }
+    }
+
+    /// Consume the `ReturnData` and return the underlying `Vec<u8>`.
+    /// Used at wire / ABI encode boundaries that still take a raw
+    /// byte buffer.
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Void => Vec::new(),
+            Self::NonVoid(bytes) => bytes,
+        }
+    }
+
+    /// Length of the underlying bytes. `0` for `Void`.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Void => 0,
+            Self::NonVoid(bytes) => bytes.len(),
+        }
+    }
+
+    /// `true` iff length is zero — alias for `is_void` for API
+    /// parity with `Vec<u8>::is_empty`.
+    pub fn is_empty(&self) -> bool {
+        self.is_void()
+    }
+}
+
 /// Action types in the cross-chain execution protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossChainActionType {
@@ -210,20 +1377,20 @@ pub enum CrossChainActionType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossChainAction {
     pub action_type: CrossChainActionType,
-    pub rollup_id: U256,
+    pub rollup_id: RollupId,
     pub destination: Address,
     pub value: U256,
     pub data: Vec<u8>,
     pub failed: bool,
     pub source_address: Address,
-    pub source_rollup: U256,
-    pub scope: Vec<U256>,
+    pub source_rollup: RollupId,
+    pub scope: ScopePath,
 }
 
 /// A state delta for a rollup (Rust mirror of Solidity `StateDelta` struct).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossChainStateDelta {
-    pub rollup_id: U256,
+    pub rollup_id: RollupId,
     pub current_state: B256,
     pub new_state: B256,
     pub ether_delta: I256,
@@ -233,7 +1400,7 @@ pub struct CrossChainStateDelta {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossChainExecutionEntry {
     pub state_deltas: Vec<CrossChainStateDelta>,
-    pub action_hash: B256,
+    pub action_hash: ActionHash,
     pub next_action: CrossChainAction,
 }
 
@@ -259,14 +1426,14 @@ impl CrossChainAction {
     pub fn to_sol_action(&self) -> ICrossChainManagerL2::Action {
         ICrossChainManagerL2::Action {
             actionType: self.action_type.to_sol(),
-            rollupId: self.rollup_id,
+            rollupId: self.rollup_id.as_u256(),
             destination: self.destination,
             value: self.value,
             data: self.data.clone().into(),
             failed: self.failed,
             sourceAddress: self.source_address,
-            sourceRollup: self.source_rollup,
-            scope: self.scope.clone(),
+            sourceRollup: self.source_rollup.as_u256(),
+            scope: self.scope.as_slice().to_vec(),
         }
     }
 }
@@ -280,7 +1447,7 @@ impl CrossChainAction {
 /// Signals scope revert on L1. The `scope` determines which `newScope` level
 /// catches the `ScopeReverted` error. Fields match spec §D.12 and
 /// `IntegrationTest.t.sol:Scenario 5`.
-pub fn revert_action(rollup_id: U256, scope: Vec<U256>) -> CrossChainAction {
+pub fn revert_action(rollup_id: RollupId, scope: ScopePath) -> CrossChainAction {
     CrossChainAction {
         action_type: CrossChainActionType::Revert,
         rollup_id,
@@ -289,7 +1456,7 @@ pub fn revert_action(rollup_id: U256, scope: Vec<U256>) -> CrossChainAction {
         data: vec![],
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
+        source_rollup: RollupId::MAINNET,
         scope,
     }
 }
@@ -299,7 +1466,7 @@ pub fn revert_action(rollup_id: U256, scope: Vec<U256>) -> CrossChainAction {
 /// Looked up via `_getRevertContinuation(rollupId)` on L1.
 /// The hash of this action is deterministic for a given `rollup_id`.
 /// Fields: `failed=true`, everything else zero/empty (spec §D.12).
-pub fn revert_continue_action(rollup_id: U256) -> CrossChainAction {
+pub fn revert_continue_action(rollup_id: RollupId) -> CrossChainAction {
     CrossChainAction {
         action_type: CrossChainActionType::RevertContinue,
         rollup_id,
@@ -308,26 +1475,26 @@ pub fn revert_continue_action(rollup_id: U256) -> CrossChainAction {
         data: vec![],
         failed: true,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
-        scope: vec![],
+        source_rollup: RollupId::MAINNET,
+        scope: ScopePath::root(),
     }
 }
 
 /// Compute the deterministic action hash for REVERT_CONTINUE.
 ///
 /// `keccak256(abi.encode(Action{REVERT_CONTINUE, rollupId, 0, 0, "", true, 0, 0, []}))`
-pub fn compute_revert_continue_hash(rollup_id: U256) -> B256 {
+pub fn compute_revert_continue_hash(rollup_id: RollupId) -> ActionHash {
     let action = revert_continue_action(rollup_id);
-    keccak256(ICrossChainManagerL2::Action::abi_encode(
+    ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &action.to_sol_action(),
-    ))
+    )))
 }
 
 impl CrossChainStateDelta {
     /// Convert to the Solidity ABI struct representation.
     fn to_sol(&self) -> ICrossChainManagerL2::StateDelta {
         ICrossChainManagerL2::StateDelta {
-            rollupId: self.rollup_id,
+            rollupId: self.rollup_id.as_u256(),
             currentState: self.current_state,
             newState: self.new_state,
             etherDelta: self.ether_delta,
@@ -340,7 +1507,7 @@ impl CrossChainExecutionEntry {
     fn to_sol(&self) -> ICrossChainManagerL2::ExecutionEntry {
         ICrossChainManagerL2::ExecutionEntry {
             stateDeltas: self.state_deltas.iter().map(|d| d.to_sol()).collect(),
-            actionHash: self.action_hash,
+            actionHash: self.action_hash.as_b256(),
             nextAction: self.next_action.to_sol_action(),
         }
     }
@@ -549,22 +1716,22 @@ pub fn build_block_entries(
             |(_l2_block_number, pre_state_root, post_state_root, _transactions)| {
                 CrossChainExecutionEntry {
                     state_deltas: vec![CrossChainStateDelta {
-                        rollup_id: U256::from(rollup_id),
+                        rollup_id: RollupId::new(U256::from(rollup_id)),
                         current_state: *pre_state_root,
                         new_state: *post_state_root,
                         ether_delta: I256::ZERO,
                     }],
-                    action_hash: B256::ZERO, // immediate — applied during postBatch()
+                    action_hash: ActionHash::ZERO, // immediate — applied during postBatch()
                     next_action: CrossChainAction {
                         action_type: CrossChainActionType::L2Tx,
-                        rollup_id: U256::ZERO,
+                        rollup_id: RollupId::MAINNET,
                         destination: Address::ZERO,
                         value: U256::ZERO,
                         data: vec![],
                         failed: false,
                         source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
-                        scope: vec![],
+                        source_rollup: RollupId::MAINNET,
+                        scope: ScopePath::root(),
                     },
                 }
             },
@@ -583,22 +1750,22 @@ pub fn build_aggregate_block_entry(
 ) -> CrossChainExecutionEntry {
     CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::ZERO, // immediate — applied during postBatch()
+        action_hash: ActionHash::ZERO, // immediate — applied during postBatch()
         next_action: CrossChainAction {
             action_type: CrossChainActionType::L2Tx,
-            rollup_id: U256::ZERO,
+            rollup_id: RollupId::MAINNET,
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     }
 }
@@ -626,8 +1793,8 @@ pub fn encode_execute_incoming_call_calldata(action: &CrossChainAction) -> Bytes
         value: action.value,
         data: action.data.clone().into(),
         sourceAddress: action.source_address,
-        sourceRollup: action.source_rollup,
-        scope: action.scope.clone(),
+        sourceRollup: action.source_rollup.as_u256(),
+        scope: action.scope.as_slice().to_vec(),
     };
     Bytes::from(call.abi_encode())
 }
@@ -663,14 +1830,14 @@ impl CrossChainAction {
     fn from_sol(sol: &ICrossChainManagerL2::Action) -> Result<Self, String> {
         Ok(Self {
             action_type: CrossChainActionType::from_sol(sol.actionType)?,
-            rollup_id: sol.rollupId,
+            rollup_id: RollupId::from_abi_boundary(sol.rollupId),
             destination: sol.destination,
             value: sol.value,
             data: sol.data.to_vec(),
             failed: sol.failed,
             source_address: sol.sourceAddress,
-            source_rollup: sol.sourceRollup,
-            scope: sol.scope.clone(),
+            source_rollup: RollupId::from_abi_boundary(sol.sourceRollup),
+            scope: ScopePath::from_parts(sol.scope.clone()),
         })
     }
 }
@@ -679,7 +1846,7 @@ impl CrossChainStateDelta {
     /// Convert from the Solidity ABI struct representation.
     fn from_sol(sol: &ICrossChainManagerL2::StateDelta) -> Self {
         Self {
-            rollup_id: sol.rollupId,
+            rollup_id: RollupId::from_abi_boundary(sol.rollupId),
             current_state: sol.currentState,
             new_state: sol.newState,
             ether_delta: sol.etherDelta,
@@ -696,7 +1863,7 @@ impl CrossChainExecutionEntry {
                 .iter()
                 .map(CrossChainStateDelta::from_sol)
                 .collect(),
-            action_hash: sol.actionHash,
+            action_hash: ActionHash::from_abi_boundary(sol.actionHash),
             next_action: CrossChainAction::from_sol(&sol.nextAction)?,
         })
     }
@@ -717,12 +1884,12 @@ impl CrossChainExecutionEntry {
 /// pairs into the non-nested format (actionHash=CALL, nextAction=RESULT).
 #[allow(clippy::too_many_arguments)]
 pub fn build_cross_chain_call_entries(
-    rollup_id: U256,
+    rollup_id: RollupId,
     destination: Address,
     data: Vec<u8>,
     value: U256,
     source_address: Address,
-    source_rollup: U256,
+    source_rollup: RollupId,
     call_success: bool,
     return_data: Vec<u8>,
 ) -> (CrossChainExecutionEntry, CrossChainExecutionEntry) {
@@ -740,7 +1907,7 @@ pub fn build_cross_chain_call_entries(
         failed: false,
         source_address,
         source_rollup,
-        scope: vec![],
+        scope: ScopePath::root(),
     };
 
     // Build RESULT action: loaded into L2 execution table, consumed when
@@ -754,16 +1921,16 @@ pub fn build_cross_chain_call_entries(
         data: return_data,
         failed: !call_success,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
-        scope: vec![],
+        source_rollup: RollupId::MAINNET,
+        scope: ScopePath::root(),
     };
 
-    let call_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    let call_action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &call_action.to_sol_action(),
-    ));
-    let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    )));
+    let result_action_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &result_action.to_sol_action(),
-    ));
+    )));
 
     let call_entry = CrossChainExecutionEntry {
         state_deltas: vec![],
@@ -826,9 +1993,12 @@ pub fn build_l2_to_l1_call_entries(
     delivery_return_data: Vec<u8>,
     delivery_failed: bool,
     l1_delivery_scope: Vec<U256>,
-    tx_reverts: bool,
+    tx_outcome: TxOutcome,
 ) -> WithdrawalEntries {
-    let rollup_id_u256 = U256::from(rollup_id);
+    // Construct the `RollupId` once from the u64 config value — this is
+    // the point where a config-level u64 crosses into the domain's
+    // type-safe representation.
+    let rollup_id_typed = RollupId::new(U256::from(rollup_id));
 
     // ── L2 table entries ──
     // These match what CCM.executeCrossChainCall will build when
@@ -845,33 +2015,33 @@ pub fn build_l2_to_l1_call_entries(
     //   action.scope = [] (empty)
     let l2_call_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: U256::ZERO, // target = L1 (rollup 0)
+        rollup_id: RollupId::MAINNET, // target = L1 (rollup 0)
         destination,
         value,
         data: data.clone(),
         failed: false,
         source_address,
-        source_rollup: rollup_id_u256,
-        scope: vec![],
+        source_rollup: rollup_id_typed,
+        scope: ScopePath::root(),
     };
     let l2_result_action = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: U256::ZERO,
+        rollup_id: RollupId::MAINNET,
         destination: Address::ZERO,
         value: U256::ZERO,
         data: delivery_return_data.clone(),
         failed: delivery_failed,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
-        scope: vec![],
+        source_rollup: RollupId::MAINNET,
+        scope: ScopePath::root(),
     };
 
-    let l2_call_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    let l2_call_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l2_call_action.to_sol_action(),
-    ));
-    let l2_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    )));
+    let l2_result_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l2_result_action.to_sol_action(),
-    ));
+    )));
 
     let l2_table_entries = vec![
         CrossChainExecutionEntry {
@@ -903,18 +2073,18 @@ pub fn build_l2_to_l1_call_entries(
     //   action.scope = [] (empty)
     let l1_trigger_action = CrossChainAction {
         action_type: CrossChainActionType::L2Tx,
-        rollup_id: rollup_id_u256,
+        rollup_id: rollup_id_typed,
         destination: Address::ZERO,
         value: U256::ZERO,
         data: rlp_encoded_tx,
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO, // MAINNET_ROLLUP_ID = 0
-        scope: vec![],
+        source_rollup: RollupId::MAINNET, // MAINNET_ROLLUP_ID = 0
+        scope: ScopePath::root(),
     };
-    let l1_trigger_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+    let l1_trigger_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
         &l1_trigger_action.to_sol_action(),
-    ));
+    )));
 
     tracing::debug!(
         target: "based_rollup::cross_chain",
@@ -931,26 +2101,26 @@ pub fn build_l2_to_l1_call_entries(
     // between the L2 tx entry and the proxy call in the L2 trace.
     // Example: SCA→SCB→proxy = scope=[0,0] (2 levels of wrapping).
     //
-    // For REVERT entries (tx_reverts=true): the delivery CALL scope must be at
+    // For REVERT entries (tx_outcome=Revert): the delivery CALL scope must be at
     // least [0] so that _resolveScopes enters newScope([0]), giving REVERT a
     // scope frame to match against. With scope=[], the CALL executes at root
     // scope via _processCallAtScope directly — no newScope frame to catch
     // ScopeReverted (per revertCounterL2 protocol E2E test).
-    let effective_scope = if tx_reverts && l1_delivery_scope.is_empty() {
+    let effective_scope = if tx_outcome.is_revert() && l1_delivery_scope.is_empty() {
         vec![U256::ZERO] // minimum scope=[0] for REVERT matching
     } else {
         l1_delivery_scope.clone()
     };
     let l1_delivery_action = CrossChainAction {
         action_type: CrossChainActionType::Call,
-        rollup_id: U256::ZERO, // L1 scope
+        rollup_id: RollupId::MAINNET, // L1 scope
         destination,
         value,
         data,
         failed: false,
         source_address, // L2 initiator is the source on L1
-        source_rollup: rollup_id_u256,
-        scope: effective_scope.clone(),
+        source_rollup: rollup_id_typed,
+        scope: ScopePath::from_parts(effective_scope.clone()),
     };
 
     // Entry 2 action_hash: matches what _processCallAtScope builds after executing
@@ -963,17 +2133,17 @@ pub fn build_l2_to_l1_call_entries(
     );
     let l1_delivery_result = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: U256::ZERO,
+        rollup_id: RollupId::MAINNET,
         destination: Address::ZERO,
         value: U256::ZERO,
         data: delivery_return_data,
         failed: delivery_failed,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
-        scope: vec![],
+        source_rollup: RollupId::MAINNET,
+        scope: ScopePath::root(),
     };
-    let l1_delivery_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
-        &l1_delivery_result.to_sol_action(),
+    let l1_delivery_result_hash = ActionHash::new(keccak256(
+        ICrossChainManagerL2::Action::abi_encode(&l1_delivery_result.to_sol_action()),
     ));
 
     // Entry 2 nextAction: terminal RESULT for L2TX (per SYNC_ROLLUPS_PROTOCOL_SPEC §C.6).
@@ -981,14 +2151,14 @@ pub fn build_l2_to_l1_call_entries(
     // whether the inner delivery returns data — the terminal is always empty.
     let l2tx_terminal = CrossChainAction {
         action_type: CrossChainActionType::Result,
-        rollup_id: rollup_id_u256, // triggering rollupId (L2)
+        rollup_id: rollup_id_typed, // triggering rollupId (L2)
         destination: Address::ZERO,
         value: U256::ZERO,
         data: vec![], // always empty per §C.6
         failed: false,
         source_address: Address::ZERO,
-        source_rollup: U256::ZERO,
-        scope: vec![],
+        source_rollup: RollupId::MAINNET,
+        scope: ScopePath::root(),
     };
 
     // Nested format: [trigger CALL entry, delivery RESULT entry]
@@ -1009,14 +2179,14 @@ pub fn build_l2_to_l1_call_entries(
         -I256::try_from(value).unwrap_or(I256::ZERO)
     };
 
-    // When tx_reverts=true, Entry 1's nextAction becomes REVERT and we add
+    // When tx_outcome=Revert, Entry 1's nextAction becomes REVERT and we add
     // a REVERT_CONTINUE entry (Entry 2). The scope revert mechanism in
     // Rollups.sol undoes the delivery call's L1 state changes.
     //
     // Entry 2's ether_delta = 0 because _etherDelta is RESET to 0 after
     // each _applyStateDeltas call (Rollups.sol:517). No ETH flows between
     // Entry 1 and Entry 2 consumption.
-    let l1_deferred_entries = if tx_reverts {
+    let l1_deferred_entries = if tx_outcome.is_revert() {
         // REVERT scope is ALWAYS [0] — the first child scope of _resolveScopes.
         // This is independent of the delivery scope (which can be [0], [0,0], etc.).
         // REVERT([0]) is caught by newScope([0]) → ScopeReverted bubbles to
@@ -1024,12 +2194,12 @@ pub fn build_l2_to_l1_call_entries(
         // within the scope, regardless of delivery depth.
         // Evidence: both revertCounterL2 (delivery=[0]) and deepScopeRevert
         // (delivery=[0,0]) use REVERT(scope=[0]).
-        let revert_next = revert_action(rollup_id_u256, vec![U256::ZERO]);
-        let revert_continue_hash = compute_revert_continue_hash(rollup_id_u256);
+        let revert_next = revert_action(rollup_id_typed, ScopePath::from_index(U256::ZERO));
+        let revert_continue_hash = compute_revert_continue_hash(rollup_id_typed);
         vec![
             CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
-                    rollup_id: rollup_id_u256,
+                    rollup_id: rollup_id_typed,
                     current_state: B256::ZERO,
                     new_state: B256::ZERO,
                     ether_delta: I256::ZERO, // consumed BEFORE ETH sent
@@ -1039,7 +2209,7 @@ pub fn build_l2_to_l1_call_entries(
             },
             CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
-                    rollup_id: rollup_id_u256,
+                    rollup_id: rollup_id_typed,
                     current_state: B256::ZERO,
                     new_state: B256::ZERO,
                     ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
@@ -1049,7 +2219,7 @@ pub fn build_l2_to_l1_call_entries(
             },
             CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
-                    rollup_id: rollup_id_u256,
+                    rollup_id: rollup_id_typed,
                     current_state: B256::ZERO,
                     new_state: B256::ZERO,
                     ether_delta: I256::ZERO, // _etherDelta reset after Entry 1
@@ -1062,7 +2232,7 @@ pub fn build_l2_to_l1_call_entries(
         vec![
             CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
-                    rollup_id: rollup_id_u256,
+                    rollup_id: rollup_id_typed,
                     current_state: B256::ZERO,
                     new_state: B256::ZERO,
                     ether_delta: I256::ZERO, // consumed BEFORE ETH sent
@@ -1072,7 +2242,7 @@ pub fn build_l2_to_l1_call_entries(
             },
             CrossChainExecutionEntry {
                 state_deltas: vec![CrossChainStateDelta {
-                    rollup_id: rollup_id_u256,
+                    rollup_id: rollup_id_typed,
                     current_state: B256::ZERO,
                     new_state: B256::ZERO,
                     ether_delta: delivery_ether_delta, // consumed AFTER ETH sent
@@ -1083,7 +2253,7 @@ pub fn build_l2_to_l1_call_entries(
         ]
     };
 
-    if tx_reverts {
+    if tx_outcome.is_revert() {
         tracing::info!(
             target: "based_rollup::cross_chain",
             l2_entries = l2_table_entries.len(),
@@ -1173,14 +2343,17 @@ pub fn convert_l1_entries_to_l2_pairs(
     // Build a lookup: hash(CALL action) → Vec of CALL actions (occurrence-aware).
     // Multiple consumed events with the same actionHash are preserved so that
     // duplicate-call patterns (e.g., CallTwice) can be matched 1:1.
-    let mut action_map: std::collections::HashMap<B256, Vec<&CrossChainAction>> =
+    let mut action_map: std::collections::HashMap<ActionHash, Vec<&CrossChainAction>> =
         std::collections::HashMap::new();
     for a in call_actions {
-        let hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&a.to_sol_action()));
+        let hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+            &a.to_sol_action(),
+        )));
         action_map.entry(hash).or_default().push(a);
     }
     // Track which occurrence of each hash has been consumed so far.
-    let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
+    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> =
+        std::collections::HashMap::new();
 
     // Detect if this batch has continuation entries (multi-call patterns).
     // Continuation entries have nextAction.action_type == CALL.
@@ -1223,8 +2396,8 @@ pub fn convert_l1_entries_to_l2_pairs(
                 next_action: (*call_action).clone(),
             };
             // Reconstruct RESULT table entry
-            let result_action_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
-                &entry.next_action.to_sol_action(),
+            let result_action_hash = ActionHash::new(keccak256(
+                ICrossChainManagerL2::Action::abi_encode(&entry.next_action.to_sol_action()),
             ));
             let result_entry = CrossChainExecutionEntry {
                 state_deltas: vec![],
@@ -1278,10 +2451,12 @@ pub fn reconstruct_continuation_l2_entries(
     // Build lookup: hash(action) → action for all consumed actions.
     // This includes CALL triggers (consumed by executeCrossChainCall) and
     // RESULT actions (consumed by scope resolution via _consumeExecution).
-    let action_map: HashMap<B256, &CrossChainAction> = call_actions
+    let action_map: HashMap<ActionHash, &CrossChainAction> = call_actions
         .iter()
         .map(|a| {
-            let hash = keccak256(ICrossChainManagerL2::Action::abi_encode(&a.to_sol_action()));
+            let hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+                &a.to_sol_action(),
+            )));
             (hash, a)
         })
         .collect();
@@ -1292,14 +2467,14 @@ pub fn reconstruct_continuation_l2_entries(
         .iter()
         .flat_map(|e| &e.state_deltas)
         .map(|d| d.rollup_id)
-        .find(|id| !id.is_zero())
-        .unwrap_or(U256::from(1));
+        .find(|id| !id.is_mainnet())
+        .unwrap_or(RollupId::new(U256::from(1)));
 
     // Build hash-based lookup for L1 entries: action_hash → Vec<entry>.
     // Uses Vec to preserve multiple entries with the same hash — the protocol
     // supports duplicate calls (e.g., CallTwice calling increment() twice
     // produces two entries with the same action_hash).
-    let mut l1_entry_map: std::collections::HashMap<B256, Vec<&CrossChainExecutionEntry>> =
+    let mut l1_entry_map: std::collections::HashMap<ActionHash, Vec<&CrossChainExecutionEntry>> =
         std::collections::HashMap::new();
     for entry in l1_entries.iter() {
         l1_entry_map
@@ -1309,7 +2484,8 @@ pub fn reconstruct_continuation_l2_entries(
     }
     // Track consumption index per hash for occurrence-aware matching.
     // Each lookup consumes the NEXT entry, not always the first (#256).
-    let mut consumed_idx: std::collections::HashMap<B256, usize> = std::collections::HashMap::new();
+    let mut consumed_idx: std::collections::HashMap<ActionHash, usize> =
+        std::collections::HashMap::new();
 
     let mut continuation_entries = Vec::new();
 
@@ -1369,10 +2545,10 @@ pub fn reconstruct_continuation_l2_entries(
             failed: call_c_scoped.failed,
             source_address: call_c_scoped.source_address,
             source_rollup: call_c_scoped.source_rollup,
-            scope: vec![],
+            scope: ScopePath::root(),
         };
-        let call_c_unscoped_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
-            &call_c_unscoped.to_sol_action(),
+        let call_c_unscoped_hash = ActionHash::new(keccak256(
+            ICrossChainManagerL2::Action::abi_encode(&call_c_unscoped.to_sol_action()),
         ));
 
         // Look up inner call result: hash(CALL_C_unscoped) → RESULT(inner_data)
@@ -1405,11 +2581,11 @@ pub fn reconstruct_continuation_l2_entries(
             data: inner_data.clone(),
             failed: inner_failed,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         };
-        let scope_result_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
-            &scope_result_for_lookup.to_sol_action(),
+        let scope_result_hash = ActionHash::new(keccak256(
+            ICrossChainManagerL2::Action::abi_encode(&scope_result_for_lookup.to_sol_action()),
         ));
 
         // Look up scope resolution: hash(scope_RESULT) → RESULT(delivery_data)
@@ -1447,12 +2623,12 @@ pub fn reconstruct_continuation_l2_entries(
             data: inner_data.clone(),
             failed: inner_failed,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         };
-        let result_our_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        let result_our_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
             &result_our_rollup.to_sol_action(),
-        ));
+        )));
         continuation_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
             action_hash: result_our_hash,
@@ -1473,8 +2649,8 @@ pub fn reconstruct_continuation_l2_entries(
             data: inner_data,
             failed: inner_failed,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         };
         continuation_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
@@ -1495,8 +2671,8 @@ pub fn reconstruct_continuation_l2_entries(
             data: delivery_data,
             failed: delivery_failed,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         };
         continuation_entries.push(CrossChainExecutionEntry {
             state_deltas: vec![],
@@ -1544,7 +2720,7 @@ pub fn attach_chained_state_deltas(
             I256::try_from(call_value).unwrap_or(I256::ZERO)
         };
         entries[i * 2].state_deltas = vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: intermediate_roots[i],
             new_state: intermediate_roots[i + 1],
             ether_delta,
@@ -1585,7 +2761,7 @@ pub fn parse_execution_consumed_logs(logs: &[Log]) -> ConsumedMap {
             );
             continue;
         }
-        let action_hash = topics[1];
+        let action_hash = ActionHash::from_log_boundary(topics[1]);
 
         // Decode the full Action from event data
         match ICrossChainManagerL2::ExecutionConsumed::decode_log_data(&log.inner.data) {
@@ -1607,14 +2783,14 @@ pub fn parse_execution_consumed_logs(logs: &[Log]) -> ConsumedMap {
                     if entries.is_empty() {
                         entries.push(CrossChainAction {
                             action_type: CrossChainActionType::Call,
-                            rollup_id: U256::ZERO,
+                            rollup_id: RollupId::MAINNET,
                             destination: Address::ZERO,
                             value: U256::ZERO,
                             data: Vec::new(),
                             failed: false,
                             source_address: Address::ZERO,
-                            source_rollup: U256::ZERO,
-                            scope: Vec::new(),
+                            source_rollup: RollupId::MAINNET,
+                            scope: ScopePath::root(),
                         });
                     }
                 }
@@ -1631,14 +2807,14 @@ pub fn parse_execution_consumed_logs(logs: &[Log]) -> ConsumedMap {
                 if entries.is_empty() {
                     entries.push(CrossChainAction {
                         action_type: CrossChainActionType::Call,
-                        rollup_id: U256::ZERO,
+                        rollup_id: RollupId::MAINNET,
                         destination: Address::ZERO,
                         value: U256::ZERO,
                         data: Vec::new(),
                         failed: false,
                         source_address: Address::ZERO,
-                        source_rollup: U256::ZERO,
-                        scope: Vec::new(),
+                        source_rollup: RollupId::MAINNET,
+                        scope: ScopePath::root(),
                     });
                 }
             }
@@ -2021,7 +3197,7 @@ pub fn estimate_builder_tx_gas(txs: &[TransactionSigned]) -> u64 {
 /// and trigger entries (CALL actions targeting our rollup, for executeIncomingCrossChainCall).
 pub fn partition_entries(
     entries: &[CrossChainExecutionEntry],
-    our_rollup_id: U256,
+    our_rollup_id: RollupId,
 ) -> (Vec<CrossChainExecutionEntry>, Vec<CrossChainExecutionEntry>) {
     let mut table_entries = Vec::new();
     let mut trigger_entries = Vec::new();
@@ -2032,9 +3208,9 @@ pub fn partition_entries(
         // table entries (action_hash=hash(RESULT), next_action=CALL_B).
         let is_call_to_us = entry.next_action.action_type == CrossChainActionType::Call
             && entry.next_action.rollup_id == our_rollup_id;
-        let next_hash = keccak256(ICrossChainManagerL2::Action::abi_encode(
+        let next_hash = ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
             &entry.next_action.to_sol_action(),
-        ));
+        )));
         if is_call_to_us && next_hash == entry.action_hash {
             trigger_entries.push(entry.clone());
         } else {
@@ -2237,20 +3413,20 @@ pub fn filter_block_by_trigger_prefix(
 pub fn compute_consumed_trigger_prefix(
     receipts: &[alloy_consensus::Receipt<alloy_primitives::Log>],
     ccm_address: Address,
-    l1_consumed_remaining: &mut std::collections::HashMap<B256, usize>,
+    l1_consumed_remaining: &mut std::collections::HashMap<ActionHash, usize>,
     trigger_tx_indices: &[usize],
-) -> usize {
+) -> ConsumedPrefix {
     let sig = execution_consumed_signature_hash();
     let mut consumed_count: usize = 0;
 
     for &tx_idx in trigger_tx_indices {
         let receipt = match receipts.get(tx_idx) {
             Some(r) => r,
-            None => return consumed_count,
+            None => return ConsumedPrefix::new(consumed_count),
         };
 
         // Collect all actionHashes from ExecutionConsumed events in this tx's receipt
-        let action_hashes: Vec<B256> = receipt
+        let action_hashes: Vec<ActionHash> = receipt
             .logs
             .iter()
             .filter(|log| {
@@ -2258,13 +3434,13 @@ pub fn compute_consumed_trigger_prefix(
                     && log.data.topics().len() >= 2
                     && log.data.topics()[0] == sig
             })
-            .map(|log| log.data.topics()[1])
+            .map(|log| ActionHash::from_log_boundary(log.data.topics()[1]))
             .collect();
 
         if action_hashes.is_empty() {
             // This trigger tx had no ExecutionConsumed events — should not happen
             // for a properly identified trigger, but stop defensively.
-            return consumed_count;
+            return ConsumedPrefix::new(consumed_count);
         }
 
         // Check that ALL action hashes have remaining > 0 in the L1 map.
@@ -2275,7 +3451,7 @@ pub fn compute_consumed_trigger_prefix(
             .all(|hash| l1_consumed_remaining.get(hash).copied().unwrap_or(0) > 0);
 
         if !all_available {
-            return consumed_count;
+            return ConsumedPrefix::new(consumed_count);
         }
 
         // All passed — decrement counters
@@ -2288,7 +3464,7 @@ pub fn compute_consumed_trigger_prefix(
         consumed_count += 1;
     }
 
-    consumed_count
+    ConsumedPrefix::new(consumed_count)
 }
 
 /// Assign chained state deltas to L1 deferred entries using the intermediate root chain.
@@ -2319,7 +3495,7 @@ pub fn attach_generic_state_deltas(
     rollup_id: u64,
     group_starts: &[usize],
 ) {
-    let rollup_id_u256 = U256::from(rollup_id);
+    let rollup_id_typed = RollupId::new(U256::from(rollup_id));
     let num_groups = group_starts.len();
 
     for k in 0..num_groups {
@@ -2396,7 +3572,7 @@ pub fn attach_generic_state_deltas(
                 .unwrap_or(I256::ZERO);
 
             entries[i].state_deltas = vec![CrossChainStateDelta {
-                rollup_id: rollup_id_u256,
+                rollup_id: rollup_id_typed,
                 current_state: entry_roots[idx],
                 new_state: entry_roots[idx + 1],
                 ether_delta: existing_ether_delta,

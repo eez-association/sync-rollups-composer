@@ -1,0 +1,19 @@
+{
+  "scenario": "counterL2",
+  "schema_version": 1,
+  "expected": {
+    "l1_hashes": [
+      "0x22c3a4d640b95780e8d63a9ee0f116e66279e5c5d7a8fff3156bb2e2bf7add7f",
+      "0x0519a93465cf12dff17ac1d80825654acafda1eea358afe5620cdff6fa67d9ef"
+    ],
+    "l2_hashes": [
+      "0x4ec7a0226b9db135aa91295cf531ddeb503ea679c01368c91accde5827051b7b"
+    ],
+    "l2_call_hashes": []
+  },
+  "user_tx": {
+    "target": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+    "value": "0",
+    "calldata": "0x2bf21647"
+  }
+}

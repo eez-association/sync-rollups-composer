@@ -6,8 +6,8 @@
 
 use crate::config::RollupConfig;
 use crate::cross_chain::{
-    CrossChainAction, CrossChainActionType, CrossChainExecutionEntry, CrossChainStateDelta,
-    ICrossChainManagerL2,
+    ActionHash, CrossChainAction, CrossChainActionType, CrossChainExecutionEntry,
+    CrossChainStateDelta, ICrossChainManagerL2, RollupId, ScopePath,
 };
 use crate::evm_config::RollupEvmConfig;
 use crate::rpc::{SimulationResult, entry_to_serializable};
@@ -132,7 +132,7 @@ where
     // Build the execution entry
     let entry = CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(config.rollup_id),
+            rollup_id: RollupId::new(U256::from(config.rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
@@ -140,14 +140,14 @@ where
         action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(config.rollup_id),
+            rollup_id: RollupId::new(U256::from(config.rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: return_data.to_vec(),
             failed: !success,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     };
 
@@ -157,7 +157,7 @@ where
         return_data: Bytes::from(entry.next_action.data.clone()),
         pre_state_root,
         post_state_root,
-        action_hash,
+        action_hash: action_hash.as_b256(),
         execution_entry: entry_to_serializable(&entry),
     })
 }
@@ -165,7 +165,7 @@ where
 /// Compute the action hash for an L2TX action wrapping the given RLP-encoded transaction.
 ///
 /// Matches Solidity: `keccak256(abi.encode(Action({ actionType: L2TX, data: rlpTx, ... })))`
-pub fn compute_l2tx_action_hash(rollup_id: u64, rlp_tx: &[u8]) -> B256 {
+pub fn compute_l2tx_action_hash(rollup_id: u64, rlp_tx: &[u8]) -> ActionHash {
     let sol_action = ICrossChainManagerL2::Action {
         actionType: ICrossChainManagerL2::ActionType::L2TX,
         rollupId: U256::from(rollup_id),
@@ -178,7 +178,9 @@ pub fn compute_l2tx_action_hash(rollup_id: u64, rlp_tx: &[u8]) -> B256 {
         scope: vec![],
     };
 
-    keccak256(ICrossChainManagerL2::Action::abi_encode(&sol_action))
+    ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
+        &sol_action,
+    )))
 }
 
 /// Simulate a simple contract call against current L2 state and return
@@ -276,7 +278,7 @@ pub fn build_entries_for_block(
 
     vec![CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
@@ -284,14 +286,14 @@ pub fn build_entries_for_block(
         action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     }]
 }
@@ -315,7 +317,7 @@ pub fn build_entries_from_encoded(
 
     vec![CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
@@ -323,14 +325,14 @@ pub fn build_entries_from_encoded(
         action_hash,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     }]
 }
@@ -357,22 +359,22 @@ pub fn build_state_only_entry(
     // (see postBatch line 217: `if (entries[i].actionHash == bytes32(0))`)
     vec![CrossChainExecutionEntry {
         state_deltas: vec![CrossChainStateDelta {
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             current_state: pre_state_root,
             new_state: post_state_root,
             ether_delta: I256::ZERO,
         }],
-        action_hash: B256::ZERO,
+        action_hash: ActionHash::ZERO,
         next_action: CrossChainAction {
             action_type: CrossChainActionType::Result,
-            rollup_id: U256::from(rollup_id),
+            rollup_id: RollupId::new(U256::from(rollup_id)),
             destination: Address::ZERO,
             value: U256::ZERO,
             data: vec![],
             failed: false,
             source_address: Address::ZERO,
-            source_rollup: U256::ZERO,
-            scope: vec![],
+            source_rollup: RollupId::MAINNET,
+            scope: ScopePath::root(),
         },
     }]
 }
