@@ -6901,3 +6901,139 @@ async fn test_partial_consumption_rewind_recovery_consistency() {
         "derived block 2 state root matches"
     );
 }
+
+/// Regression test for issue #29: multi-block batch with unconsumed deferred entries.
+///
+/// When a 2-block batch is submitted to L1 with deferred entries and the
+/// corresponding trigger tx is NOT included (entries not consumed), derivation
+/// must flag BOTH blocks for §4f filtering — not just the first block (i==0).
+///
+/// The bug: `derivation.rs` only assigns `filtering = Some(...)` when `i == 0`,
+/// so the second block in the batch passes through unfiltered, producing the
+/// speculative state root instead of the clean root. This causes a permanent
+/// pre_state_root mismatch → infinite rewind loop.
+///
+/// This test reproduces the exact scenario from the testnet failure:
+///   - Block 1: simple block (no protocol txs) — first in batch
+///   - Block 2: entry-bearing block (protocol txs) — second in batch
+///   - Entries are NOT consumed on L1
+///   - Derivation must produce `filtering != None` for block 2
+#[tokio::test]
+async fn test_multiblock_batch_unconsumed_entry_filtering_applies_to_all_blocks() {
+    let port = 19305u16;
+    let rpc_url = format!("http://127.0.0.1:{port}");
+    let _anvil = start_anvil(port).await;
+
+    let (rollups_address, deployment_block) = deploy_rollups(&rpc_url).await;
+
+    // State roots:
+    //   genesis (0x00) → Y (clean root after both blocks, WITH loadTable)
+    //   Y → X (speculative root, after trigger execution)
+    let y = B256::with_last_byte(0x50); // clean root
+    let x = B256::with_last_byte(0x51); // speculative root
+
+    // Build a deferred cross-chain entry with state delta Y → X
+    let rlp_data = vec![0xc0, 0x09, 0x0a];
+    let deferred_entries = build_entries_from_encoded(1, y, x, &rlp_data);
+    assert_eq!(deferred_entries.len(), 1);
+
+    // Build an immediate entry: genesis → Y (clean root = state with loadTable, no triggers)
+    let immediate = build_aggregate_block_entry(B256::ZERO, y, 1);
+
+    // Combine: immediate entry first, then deferred
+    let mut all_entries = vec![immediate];
+    all_entries.extend(deferred_entries.clone());
+
+    // KEY: 2-block batch — block 1 (simple) and block 2 (entry-bearing)
+    // This is the pattern that triggers the bug: entries are assigned to i==0
+    // but the protocol txs are in block 2 (i==1).
+    let call_data = encode_block_calldata(
+        &[1, 2],
+        &[
+            Bytes::from_static(b"block1_simple"),
+            Bytes::from_static(b"block2_with_entries"),
+        ],
+    );
+    let calldata = encode_post_batch_calldata(&all_entries, call_data, Bytes::new());
+
+    // Submit postBatch WITHOUT consuming the deferred entry.
+    let prov = provider(&rpc_url);
+    let tx = alloy_rpc_types::TransactionRequest::default()
+        .from(ANVIL_ADDRESS)
+        .to(rollups_address)
+        .input(calldata.into());
+
+    let pending = prov.send_transaction(tx).await.unwrap();
+    let receipt = pending.get_receipt().await.unwrap();
+    assert!(receipt.status(), "postBatch tx should succeed");
+
+    mine_blocks(&rpc_url, 3).await;
+
+    // Verify on-chain state root is Y (clean), not X (speculative)
+    let on_chain_root = read_state_root(&rpc_url, rollups_address).await;
+    assert_eq!(
+        on_chain_root, y,
+        "on-chain state root should be Y (clean) when entry is NOT consumed"
+    );
+
+    // Derive blocks from L1
+    let config = test_config_with_crosschain(&rpc_url, rollups_address, deployment_block, 1);
+    let mut pipeline = DerivationPipeline::new(config);
+    let l1_provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
+    let latest_l1 = l1_provider.get_block_number().await.unwrap();
+
+    let derived = pipeline
+        .derive_next_batch_and_commit(latest_l1, &l1_provider)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        derived.len(),
+        2,
+        "should derive 2 blocks (multi-block batch)"
+    );
+    assert_eq!(derived[0].l2_block_number, 1);
+    assert_eq!(derived[1].l2_block_number, 2);
+
+    // CRITICAL ASSERTION: Both blocks must have filtering enabled when
+    // unconsumed entries exist. The bug is that only block 1 (i==0) gets
+    // filtering, while block 2 (i==1) gets None.
+    assert!(
+        derived[1].filtering.is_some(),
+        "block 2 (second in batch, i==1) MUST have filtering enabled when \
+         unconsumed entries exist — this is the bug: derivation.rs only \
+         assigns filtering when i==0, leaving the entry-bearing second block \
+         unfiltered. Without this, the driver replays block 2 with protocol \
+         txs that produce the speculative root instead of the clean root."
+    );
+
+    // Also verify block 1 has filtering (existing behavior, should pass)
+    assert!(
+        derived[0].filtering.is_some(),
+        "block 1 (first in batch, i==0) should also have filtering"
+    );
+
+    // State root: only the LAST block in the batch gets the effective state root;
+    // intermediate blocks get B256::ZERO (fullnode recomputes locally).
+    // Block 2 (last in batch) must have the clean root Y, not speculative X.
+    assert_eq!(
+        derived[0].state_root,
+        B256::ZERO,
+        "block 1 (intermediate) gets B256::ZERO — fullnode recomputes locally"
+    );
+    assert_eq!(
+        derived[1].state_root, y,
+        "block 2 (last in batch) state root must be clean root Y — \
+         not the speculative root X — because entries were not consumed"
+    );
+
+    // Verify no execution entries were derived (all entries unconsumed)
+    assert!(
+        derived[0].execution_entries.is_empty(),
+        "block 1 should have no execution entries (unconsumed)"
+    );
+    assert!(
+        derived[1].execution_entries.is_empty(),
+        "block 2 should have no execution entries (unconsumed)"
+    );
+}
