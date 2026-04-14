@@ -6922,3 +6922,121 @@ async fn test_partial_consumption_rewind_recovery_consistency() {
         "derived block 2 state root matches"
     );
 }
+
+/// Regression test for issue #29: Multi-block batch §4f filtering.
+///
+/// When flush_to_l1 batches 2 blocks together, the entry-bearing block
+/// (loadExecutionTable + triggers) is always the LAST block. The old code
+/// assigned filtering only to `i == 0`, so the last block in a 2-block
+/// batch got `filtering = None` — causing an infinite rewind loop when
+/// entries were unconsumed on L1.
+///
+/// This test submits a 2-block batch with unconsumed deferred entries and
+/// verifies that BOTH block 1 (i=0) and block 2 (i=1, last) receive
+/// filtering metadata and entries.
+#[tokio::test]
+async fn test_multiblock_batch_unconsumed_entry_filtering_applies_to_all_blocks() {
+    let port = 19305u16;
+    let rpc_url = format!("http://127.0.0.1:{port}");
+    let _anvil = start_anvil(port).await;
+
+    let (rollups_address, deployment_block) = deploy_rollups(&rpc_url).await;
+
+    // State root chain: Y (clean) → X (speculative, if entry consumed)
+    let y = B256::with_last_byte(0x50); // clean state root
+    let x = B256::with_last_byte(0x51); // speculative state root
+
+    // Build a deferred cross-chain entry with state delta Y → X
+    let rlp_data = vec![0xc0, 0x09, 0x0a];
+    let deferred_entries = build_entries_from_encoded(1, y, x, &rlp_data);
+    assert_eq!(deferred_entries.len(), 1);
+
+    // Build an immediate entry (genesis → Y) for the batch
+    let immediate = build_aggregate_block_entry(B256::ZERO, y, 1);
+
+    let mut all_entries = vec![immediate];
+    all_entries.extend(deferred_entries.clone());
+
+    // 2-block batch: block 1 + block 2 — mirrors testnet batch [954, 955]
+    let call_data = encode_block_calldata(
+        &[1, 2],
+        &[
+            Bytes::from_static(b"block1_empty"),
+            Bytes::from_static(b"block2_entry"),
+        ],
+    );
+    let calldata = encode_post_batch_calldata(&all_entries, call_data, Bytes::new());
+
+    // Submit postBatch WITHOUT consuming the deferred entry.
+    let prov = provider(&rpc_url);
+    let tx = alloy_rpc_types::TransactionRequest::default()
+        .from(ANVIL_ADDRESS)
+        .to(rollups_address)
+        .input(calldata.into());
+
+    let pending = prov.send_transaction(tx).await.unwrap();
+    let receipt = pending.get_receipt().await.unwrap();
+    assert!(receipt.status(), "postBatch tx should succeed");
+
+    mine_blocks(&rpc_url, 3).await;
+
+    // On-chain state root should be Y (clean) — entry was NOT consumed.
+    let on_chain_root = read_state_root(&rpc_url, rollups_address).await;
+    assert_eq!(
+        on_chain_root, y,
+        "on-chain state root should be Y (clean) when entry is NOT consumed"
+    );
+
+    // Derive blocks from L1
+    let config = test_config_with_crosschain(&rpc_url, rollups_address, deployment_block, 1);
+    let mut pipeline = DerivationPipeline::new(config);
+    let l1_provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
+    let latest_l1 = l1_provider.get_block_number().await.unwrap();
+
+    let derived = pipeline
+        .derive_next_batch_and_commit(latest_l1, &l1_provider)
+        .await
+        .unwrap();
+
+    assert_eq!(derived.len(), 2, "should derive 2 blocks from the batch");
+    assert_eq!(derived[0].l2_block_number, 1);
+    assert_eq!(derived[1].l2_block_number, 2);
+
+    // Key assertion (issue #29): BOTH blocks must have filtering metadata.
+    // Without the fix, derived[1].filtering was None — the entry-bearing
+    // block would replay unconsumed entries, producing the speculative root
+    // instead of the clean root → infinite rewind loop.
+    assert!(
+        derived[1].filtering.is_some(),
+        "block 2 (i=1, last) must have filtering metadata — \
+         this is the entry-bearing block; without this, §4f filtering \
+         never runs and unconsumed entries cause an infinite rewind loop"
+    );
+    assert!(
+        derived[0].filtering.is_some(),
+        "block 1 (i=0) also has filtering — existing behavior"
+    );
+
+    // Last block gets the clean state root Y (not speculative X).
+    assert_eq!(
+        derived[1].state_root, y,
+        "last block state root must be Y (clean) when entries are unconsumed"
+    );
+
+    // Intermediate blocks get B256::ZERO (fullnode recomputes locally).
+    assert_eq!(
+        derived[0].state_root,
+        B256::ZERO,
+        "intermediate block state root should be ZERO"
+    );
+
+    // Both blocks should have empty execution_entries (all unconsumed).
+    assert!(
+        derived[0].execution_entries.is_empty(),
+        "no execution entries for block 1 (all unconsumed)"
+    );
+    assert!(
+        derived[1].execution_entries.is_empty(),
+        "no execution entries for block 2 (all unconsumed)"
+    );
+}

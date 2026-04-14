@@ -654,8 +654,12 @@ impl DerivationPipeline {
                     l1_block_hash: l1_context_hash,
                 };
 
-                // Assign deferred execution entries to the FIRST block in the batch only
-                let execution_entries = if i == 0 {
+                // Assign deferred execution entries to the first AND last block in the
+                // batch. The entry-bearing block (loadExecutionTable + triggers) is
+                // always the last block (flush_to_l1 places it there). Single-block
+                // batches satisfy both conditions. Intermediate blocks get none —
+                // their builder tx nonces assume prior blocks' unfiltered state.
+                let execution_entries = if i == 0 || is_last_in_batch {
                     deferred_entries.clone()
                 } else {
                     vec![]
@@ -667,7 +671,9 @@ impl DerivationPipeline {
                 // snapshot to the driver. The driver handles ALL filtering
                 // generically via trial-execution + ExecutionConsumed events +
                 // prefix counting. No type-specific counting is needed here.
-                let filtering = if has_unconsumed_entries && !batch_has_revert && i == 0 {
+                let filtering =
+                    if has_unconsumed_entries && !batch_has_revert && (i == 0 || is_last_in_batch)
+                    {
                     info!(
                         target: "based_rollup::derivation",
                         l2_block_number,
