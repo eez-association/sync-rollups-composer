@@ -79,6 +79,9 @@ services:
       SHARED_DIR: /shared
       CONTRACTS_DIR: /app/contracts
       GENESIS_JSON: /etc/based-rollup/genesis.json
+      # Builder key — operator-owned, NEVER dev#0. See docs/issue-29.
+      # Sourced from deployments/devnet-eez/.env (git-ignored).
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in deployments/devnet-eez/.env — see .env.example}"
       BOOTSTRAP_ACCOUNTS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC:100,0x90F79bf6EB2c4f870365E785982E1f101E93b906:100,0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc:100,0x976EA74026E726554dB657fA54763abd0C3a0aa9:100"
     depends_on:
       l1:
@@ -190,7 +193,9 @@ services:
       - "11560:9100"   # Health endpoint (dashboard monitoring)
       - "127.0.0.1:11550:8546"   # L2 WebSocket (localhost only)
     environment:
-      BUILDER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      # Builder key — operator-owned, NEVER dev#0. See docs/issue-29.
+      # Sourced from deployments/devnet-eez/.env (git-ignored).
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in deployments/devnet-eez/.env — see .env.example}"
     depends_on:
       deploy:
         condition: service_completed_successfully
