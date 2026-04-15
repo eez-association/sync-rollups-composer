@@ -182,10 +182,22 @@ CCM_ADDR_LOWER=$(echo "${CROSS_CHAIN_MANAGER_ADDRESS#0x}" | tr '[:upper:]' '[:lo
 echo "Injecting CCM pre-mint balance into ${GENESIS_JSON} for address ${CCM_ADDR_LOWER}..."
 cp "$GENESIS_JSON" "${SHARED_DIR}/genesis.json"
 sed -i "/\"alloc\": {/a\\    \"${CCM_ADDR_LOWER}\": { \"balance\": \"0xD3C21BCECCEDA1000000\" }," "${SHARED_DIR}/genesis.json"
+
+# Also pre-fund the builder address on L2 so it can pay gas for the block-1
+# protocol txs that deploy L2Context, CCM, and Bridge_L2 (each is a CREATE
+# from the builder at nonces 0/1/2). Before the dev#0 separation this was
+# covered by shared/genesis.json pre-funding dev#0 (still present, for back-
+# compat) but with a separate builder key we need an additional allocation.
+# Same balance as the baseline dev accounts (0x200000…000 wei).
+BUILDER_ADDR_LOWER=$(echo "${BUILDER_ADDRESS#0x}" | tr '[:upper:]' '[:lower:]')
+echo "Injecting builder pre-mint balance into ${SHARED_DIR}/genesis.json for address ${BUILDER_ADDR_LOWER}..."
+sed -i "/\"alloc\": {/a\\    \"${BUILDER_ADDR_LOWER}\": { \"balance\": \"0x200000000000000000000000000000000000000000000000000000000000000\" }," "${SHARED_DIR}/genesis.json"
+
 GENESIS_JSON="${SHARED_DIR}/genesis.json"
-echo "CCM pre-mint injected. Verifying..."
+echo "Genesis injections complete. Verifying..."
 grep -q "$CCM_ADDR_LOWER" "$GENESIS_JSON" && echo "  OK CCM address found in genesis" || { echo "  FATAL: CCM address not in genesis"; exit 1; }
-grep -q "0xD3C21BCECCEDA1000000" "$GENESIS_JSON" && echo "  OK Pre-mint balance found" || { echo "  FATAL: Pre-mint balance not in genesis"; exit 1; }
+grep -q "0xD3C21BCECCEDA1000000" "$GENESIS_JSON" && echo "  OK CCM pre-mint balance found" || { echo "  FATAL: CCM pre-mint balance not in genesis"; exit 1; }
+grep -q "$BUILDER_ADDR_LOWER" "$GENESIS_JSON" && echo "  OK builder address found in genesis" || { echo "  FATAL: builder address not in genesis"; exit 1; }
 
 GENESIS_STATE_ROOT=$(based-rollup genesis-state-root --chain "$GENESIS_JSON")
 echo "Computed genesis state root: ${GENESIS_STATE_ROOT}"
