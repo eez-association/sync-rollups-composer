@@ -22,9 +22,16 @@ BRIDGE="0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
 BRIDGE_L2="0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
 ROLLUP_ID=1
 
-# Funder = anvil dev#0 (always genesis-funded on this dev chain)
-FUNDER_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-FUNDER="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+# Funder — DO NOT use dev#0 (0xf39F…): that is the builder / deployer key.
+# Using it for deploy txs collides with the builder's own nonces and halts L2.
+# Default to dev#9 (0xa0Ee…), the "L1 funder" role per composer-pr/CLAUDE.md.
+# Override via FUNDER_KEY env var if you need a different account.
+FUNDER_KEY="${FUNDER_KEY:-0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6}"
+FUNDER="$(cast wallet address --private-key "$FUNDER_KEY")"
+if [ "${FUNDER,,}" = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266" ]; then
+    printf '\033[0;31mREFUSING to run with dev#0 (builder key) as FUNDER — this halts L2.\033[0m\n' >&2
+    exit 1
+fi
 
 # Bot operators (arb contract owners)
 BOT1_KEY="0x4fff4c1f39910ff9722e4257a8ae58f92b93b5e31ecad4c74d0628b97ec793d3"
