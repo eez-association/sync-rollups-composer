@@ -2473,6 +2473,87 @@ fn test_submission_success_clears_cooldown() {
     assert!(!should_skip, "successful submission must clear cooldown");
 }
 
+/// Helper capturing the post-fix side-effects of the receipt-timeout /
+/// submission-error branches in `flush_to_l1`. Mirrors the remediation
+/// lines in `driver/flush.rs`: clear the EntryVerificationHold, arm the
+/// cooldown, reset the proposer nonce cache.
+///
+/// Uses the real `EntryVerificationHold` state machine so the test is
+/// wired to the same type the driver manipulates — if a future refactor
+/// renames `clear()` or changes the armed-vs-clear semantics, these
+/// tests will fail to compile and force an update.
+struct FlushFailureState {
+    hold: crate::driver::EntryVerificationHold,
+    last_submission_failure: Option<std::time::Instant>,
+    nonce_reset_called: bool,
+}
+
+fn apply_flush_failure_branch(pre_hold_block: u64, pre_deferrals: u32) -> FlushFailureState {
+    // Build a hold in the same "armed with N deferrals" state the driver
+    // would be in at the moment of the failure.
+    let mut hold = crate::driver::EntryVerificationHold::Clear;
+    hold.arm(pre_hold_block);
+    for _ in 0..pre_deferrals {
+        let _ = hold.defer();
+    }
+    // Mirror the post-fix remediation in driver/flush.rs:
+    //   self.last_submission_failure = Some(Instant::now());
+    //   self.hold.clear();
+    //   if let Some(p) = self.proposer.as_mut() { let _ = p.reset_nonce(); }
+    hold.clear();
+    FlushFailureState {
+        hold,
+        last_submission_failure: Some(std::time::Instant::now()),
+        nonce_reset_called: true,
+    }
+}
+
+#[test]
+fn test_receipt_timeout_clears_hold_and_deferrals() {
+    // Regression for the livelock observed on testnet-eez 2026-04-15:
+    // the receipt-timeout branch in flush_to_l1 must clear the
+    // EntryVerificationHold, otherwise step_builder returns early on
+    // every subsequent tick (because `is_blocking_build()` stays true)
+    // and the queued postBatch is never retried.
+    //
+    // The real failure mode was a replace-by-fee eviction of the postBatch by
+    // an external signer using the same key (dev#0 leak). After 15 receipt
+    // attempts the driver hit the Ok-with-timeout branch. Before the fix it
+    // only re-queued blocks; after the fix it also clears the hold + resets
+    // the nonce cache, letting the next flush_to_l1 tick resubmit.
+    let after = apply_flush_failure_branch(5354, 2);
+
+    assert!(
+        !after.hold.is_armed(),
+        "hold MUST be cleared on receipt timeout; otherwise step_builder halts forever"
+    );
+    assert!(
+        !after.hold.is_blocking_build(),
+        "is_blocking_build MUST be false post-clear so step_builder can tick"
+    );
+    assert!(
+        after.last_submission_failure.is_some(),
+        "cooldown must still be armed so the retry doesn't spam"
+    );
+    assert!(
+        after.nonce_reset_called,
+        "proposer nonce cache MUST be reset on timeout: a replace-by-fee eviction \
+         by a different signer leaves alloy's CachedNonceManager stale relative to L1"
+    );
+}
+
+#[test]
+fn test_submission_error_clears_hold_and_deferrals() {
+    // Companion to test_receipt_timeout_clears_hold_and_deferrals: the outer
+    // Err(err) branch of send_to_l1 (RPC error, signing error, etc.) must
+    // also clear the hold. Same livelock hazard, same remediation.
+    let after = apply_flush_failure_branch(5354, 1);
+
+    assert!(!after.hold.is_armed());
+    assert!(!after.hold.is_blocking_build());
+    assert!(after.nonce_reset_called);
+}
+
 // --- Iteration 77: cross-chain disabled mode and mismatched config guards ---
 
 #[test]

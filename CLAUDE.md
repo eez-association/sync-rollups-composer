@@ -42,8 +42,14 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 
 ### Nonce Management
 - **NEVER use alloy auto-nonce for withdrawal triggers or any multi-tx L1 sequence.** Alloy's CachedNonceManager desynchronizes when gas estimation fails, permanently bricking all L1 submissions. Use `send_l1_tx_with_nonce()` with explicit nonces.
-- **ALWAYS call `reset_nonce()` after any L1 tx failure.** Recreates the provider and clears corrupted cache. Without this: permanent livelock (builder builds but never submits).
+- **ALWAYS call `reset_nonce()` after any L1 tx failure.** Recreates the provider and clears corrupted cache. Without this: permanent livelock (builder builds but never submits). This includes the receipt-timeout path in `flush_to_l1` (driver.rs ~2389) — see "Builder key separation" below.
 - **Nonce gap = invisible death.** Builder keeps building while submissions are stuck in "queued" pool. Diagnose with `cast rpc txpool_inspect --rpc-url localhost:9555`.
+
+### Builder key separation
+- **The builder key MUST be unique per deployment and kept private.** NEVER use dev#0 (the reth `--dev` coinbase `0xac0974…`) as the builder key on any network. Its mnemonic (`test test test test test test test test test test test junk`) is public; any process that knows it can sign txs at the same nonce as the builder, and replace-by-fee will evict the builder's postBatch from the L1 mempool.
+- **Hold-timeout path MUST clear hold + reset nonce.** The `flush_to_l1` receipt-timeout branch (and the outer send_to_l1 error branch) must clear `pending_entry_verification_block`, reset `entry_verify_deferrals`, and call `proposer.reset_nonce()`. Otherwise `step_builder` returns early on every subsequent tick (the hold check is *before* the flush call) and no retry ever fires — the chain wedges permanently. Regression tests: `test_receipt_timeout_clears_hold_and_deferrals`, `test_submission_error_clears_hold_and_deferrals`.
+- **Incident reference**: 2026-04-15 testnet-eez wedged at L2 block 5354 for 30+ minutes. External use of dev#0 submitted legacy-type 10-ETH transfers at the same nonce the builder expected (5359), evicting the postBatch with a 50,000,000× gas-price overbid. The receipt timed out after 15 attempts; before the fix the driver left the hold armed and the chain could not recover.
+- **Each deployment's `.env` holds the per-network `BUILDER_PRIVATE_KEY`.** `.env` files are git-ignored; `.env.example` (and `.env.kurtosis.example` for the kurtosis flavour) are committed. Compose files declare `${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in …/.env — see .env.example}` so a missing key fails fast. `deploy.sh` rejects dev#0 if supplied explicitly.
 
 ### Cross-Chain Entry Safety
 - **NEVER align state roots by overwriting pre_state_root** — NO EXCEPTIONS. If roots don't match, there is a real bug in derivation or filtering. The builder must keep rewinding until the root cause is fixed. Fabricating pre_state_roots produces blocks that fullnodes cannot reproduce.
@@ -317,7 +323,8 @@ HD mnemonic dev keys are allocated by role to prevent nonce collisions. Keys #0-
 
 | Index | Address | Role |
 |-------|---------|------|
-| #0 | 0xf39F… | Deployer / builder key |
+| #0 | 0xf39F… | **L1 contract deployer ONLY** (reth --dev coinbase). NEVER runtime — see "Builder key separation" below. |
+| —  | _operator_ | **Builder** (postBatch signer). Per-network dedicated key in each deployment's `.env` (git-ignored). Funded by deploy.sh from dev#9. |
 | #1 | 0x7099… | tx-sender (funds L2 accounts) |
 | #2 | 0x3C44… | crosschain-health-check test key |
 | #3 | 0x90F7… | bridge-health-check test key |

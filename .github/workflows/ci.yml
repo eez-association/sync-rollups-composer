@@ -220,6 +220,19 @@ jobs:
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' && inputs.run_docker_e2e
     timeout-minutes: 75
+    # Job-level env inherited by every step. BUILDER_PRIVATE_KEY is required by
+    # all deployments/*/docker-compose.yml since the dev#0 livelock fix
+    # (issue #29). For CI we use a dedicated, freshly-generated key — its
+    # purpose is only to spin up an ephemeral devnet that gets torn down at
+    # the end of the run. It is intentionally NOT a GitHub secret because:
+    #   1. CI runs are self-contained (no real funds anywhere)
+    #   2. forks need to be able to run the same workflow without secrets
+    #   3. using a clearly-distinct-from-dev#0 key is what the new compose
+    #      check enforces; that requirement is satisfied by any non-dev#0 key
+    # Production deployments must provide their own BUILDER_PRIVATE_KEY via
+    # the operator's .env file (see docs/issue-29 and the deployment READMEs).
+    env:
+      BUILDER_PRIVATE_KEY: "0x16fbfef4b847d8ac6d769516f574631766453f13bcfb79785601e8816f82f9fe"
     steps:
       - uses: actions/checkout@v4
         with:

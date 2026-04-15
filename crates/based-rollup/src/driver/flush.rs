@@ -665,8 +665,25 @@ where
                             // Uses the pre-submit clone: the FlushPlan already
                             // consumed the authoritative blocks + queue on the
                             // Ok path, so we restore from the clone we kept.
+                            //
+                            // Clear the entry-verify hold so the next step_builder
+                            // cycle can re-enter flush_to_l1 (step_builder returns
+                            // early while the hold is armed, so no retry fires
+                            // otherwise). Reset the proposer's nonce cache because
+                            // the submitted tx may have been evicted by a
+                            // replace-by-fee from a different signer using the
+                            // same key, leaving alloy's cached nonce stale
+                            // relative to L1. See docs/issue-29 for the incident.
                             warn!(target: "based_rollup::driver", %err, "L1 receipt failed — will retry");
                             self.last_submission_failure = Some(std::time::Instant::now());
+                            self.hold.clear();
+                            // Use reset_nonce_unsolicited: send returned a tx_hash
+                            // (no NonceResetRequired token), but we still need to
+                            // drop alloy's cached nonce since the tx may have been
+                            // evicted from the L1 mempool.
+                            if let Some(p) = self.proposer.as_mut() {
+                                let _ = p.reset_nonce_unsolicited();
+                            }
                             for block in blocks_clone_for_receipt_failure.into_iter().rev() {
                                 self.pending_submissions.push_front(block);
                             }
@@ -677,8 +694,19 @@ where
                 }
             }
             Err(err) => {
+                // Submission itself failed. Same hazard as the receipt-timeout
+                // branch above: leaving the hold armed halts step_builder
+                // permanently since there is no on-chain block to verify.
                 warn!(target: "based_rollup::driver", %err, "L1 submission failed — will retry");
                 self.last_submission_failure = Some(std::time::Instant::now());
+                self.hold.clear();
+                // Use reset_nonce_unsolicited: the send returned a tx_hash
+                // (or failed at submit), so we don't have a NonceResetRequired
+                // token, but we still need to drop alloy's cached nonce since
+                // the tx may have been evicted from the L1 mempool.
+                if let Some(p) = self.proposer.as_mut() {
+                    let _ = p.reset_nonce_unsolicited();
+                }
                 // Restore from the rollback package returned by
                 // `SendResult::Failed` — the plan owned the blocks
                 // and queue and gives them back to us here.

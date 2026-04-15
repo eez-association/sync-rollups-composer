@@ -44,10 +44,12 @@ services:
       timeout: 5s
       retries: 30
 
-  # Deploy Rollups + tmpECDSAVerifier contracts to L1 and write config
-  # NOTE: Uses the same well-known anvil private key as the builder service
-  # for local dev convenience. Production deployments should use separate keys
-  # for contract deployment and block building.
+  # Deploy Rollups + tmpECDSAVerifier contracts to L1 and write config.
+  # The deploy container uses the reth --dev coinbase (dev#0) for L1 contract
+  # deployment (unavoidable — it's the only pre-funded key on a --dev L1) but
+  # the BUILDER address it registers with createRollup() is a separate key
+  # supplied by the operator via BUILDER_PRIVATE_KEY in .env. See
+  # docs/issue-29 for the livelock caused by sharing dev#0 at runtime.
   deploy:
     image: ${DEPLOY_IMAGE:-ghcr.io/eez-association/sync-rollup-composer:deploy-latest}
     # Root required to write to the shared volume
@@ -65,6 +67,9 @@ services:
       SHARED_DIR: /shared
       CONTRACTS_DIR: /app/contracts
       GENESIS_JSON: /etc/based-rollup/genesis.json
+      # Builder key — dedicated, operator-owned, NEVER dev#0 (see docs/issue-29).
+      # Sourced from deployments/testnet-eez/.env which is git-ignored.
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in deployments/testnet-eez/.env — see .env.example}"
       # Bootstrap test accounts with 100 ETH each at block 1.
       # #2=crosschain-test, #3=bridge-test, #5=double-deposit-user1, #6=double-deposit-user2
       BOOTSTRAP_ACCOUNTS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC:100,0x90F79bf6EB2c4f870365E785982E1f101E93b906:100,0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc:100,0x976EA74026E726554dB657fA54763abd0C3a0aa9:100"
@@ -163,8 +168,10 @@ services:
       - "127.0.0.1:9550:8546"   # L2 WebSocket (localhost only)
     environment:
       GENESIS: /shared/genesis.json
-      # Well-known anvil default key — LOCAL DEVELOPMENT ONLY
-      BUILDER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      # Builder key — dedicated, operator-owned. MUST NOT be dev#0 (the
+      # publicly-known reth --dev key) — that caused the 2026-04-15 livelock.
+      # Sourced from deployments/testnet-eez/.env (git-ignored).
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in deployments/testnet-eez/.env — see .env.example}"
     depends_on:
       deploy:
         condition: service_completed_successfully

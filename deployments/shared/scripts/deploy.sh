@@ -3,9 +3,16 @@
 # Single deployment script — replaces deploy-inbox.sh and deploy-crosschain.sh.
 # Usage: deploy.sh [L1_RPC_URL]
 #
-# WARNING: The private key below is the well-known anvil default key.
-# It is PUBLIC and MUST NEVER be used on mainnet, testnets, or any chain
-# where real value is at stake. This script is for LOCAL DEVELOPMENT ONLY.
+# DEPLOYER_KEY below is the well-known anvil default key. It is PUBLIC — we use
+# it ONLY for L1 contract deployment on reth --dev (the chain's pre-funded
+# coinbase, unavoidable). It is NEVER used for postBatch or any runtime tx.
+# See docs/issue-29 for the livelock incident that motivated separating keys.
+#
+# BUILDER_PRIVATE_KEY / BUILDER_ADDRESS must be set by the caller (docker-compose
+# passes it from the operator's .env file — NEVER committed). If only the private
+# key is provided we derive the address. Either way, BUILDER_ADDRESS MUST be
+# distinct from DEPLOYER_ADDR on any deployment where the key could leak, or
+# external usage will evict the builder's postBatches from the L1 mempool.
 set -euo pipefail
 
 L1_RPC="${1:-http://l1:8545}"
@@ -14,9 +21,28 @@ DEPLOYER_ADDR=$(cast wallet address --private-key "$DEPLOYER_KEY")
 SHARED_DIR="${SHARED_DIR:-/shared}"
 CONTRACTS_DIR="${CONTRACTS_DIR:-/app/contracts}"
 
-# Builder address (dev account #0) — used to compute deterministic L2 contract addresses.
-# L2Context = CREATE(builder, nonce=0), CCM = CREATE(builder, nonce=1).
-BUILDER_ADDRESS="${BUILDER_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
+# Builder address — used to compute deterministic L2 contract addresses
+# (L2Context = CREATE(builder, nonce=0), CCM = CREATE(builder, nonce=1)).
+# Prefer the operator-supplied BUILDER_ADDRESS; otherwise derive from BUILDER_PRIVATE_KEY.
+if [ -n "${BUILDER_ADDRESS:-}" ]; then
+    : # supplied directly, use it
+elif [ -n "${BUILDER_PRIVATE_KEY:-}" ]; then
+    BUILDER_ADDRESS=$(cast wallet address --private-key "$BUILDER_PRIVATE_KEY")
+else
+    echo "ERROR: neither BUILDER_ADDRESS nor BUILDER_PRIVATE_KEY is set." >&2
+    echo "       Set BUILDER_PRIVATE_KEY in the deployment's .env file (never committed)." >&2
+    echo "       Do NOT reuse the deployer/dev#0 key as the builder key — see docs/issue-29." >&2
+    exit 1
+fi
+# Refuse the dev#0 key literal: it is publicly known (reth --dev default)
+# and was the direct cause of the 2026-04-15 livelock on testnet-eez.
+if [ "$(echo "$BUILDER_ADDRESS" | tr '[:upper:]' '[:lower:]')" = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266" ]; then
+    echo "ERROR: BUILDER_ADDRESS is dev#0 (0xf39Fd6…), which is the publicly-known reth --dev key." >&2
+    echo "       Generate a fresh key: cast wallet new --json" >&2
+    echo "       Then set BUILDER_PRIVATE_KEY in the deployment's .env (never committed)." >&2
+    exit 1
+fi
+echo "Builder address: $BUILDER_ADDRESS"
 
 # If rollup.env already exists, skip deployment (idempotent)
 if [ -f "${SHARED_DIR}/rollup.env" ]; then
@@ -68,6 +94,28 @@ done
 # Wait for all funding txs to complete
 wait
 echo "  All funding txs sent."
+
+# Fund the builder address sequentially AFTER the parallel batch above, with
+# explicit error checking. The parallel loop suppresses stderr (`2>/dev/null`)
+# and ignores exit codes — under reth --dev load a tx can occasionally drop
+# silently. The builder MUST have L1 ETH to submit postBatches; if its funding
+# silently fails, the rollup wedges with no diagnostic. So:
+#   1. Send sequentially with explicit nonce (continues from FUNDER_NONCE+N).
+#   2. Verify the resulting balance is non-zero.
+# Failure here aborts deploy.sh so the operator sees the issue immediately.
+BUILDER_FUND_NONCE=$((FUNDER_NONCE + ${#FUND_ADDRS[@]}))
+echo "Funding builder address $BUILDER_ADDRESS with 1000 ETH from dev#9 (nonce=$BUILDER_FUND_NONCE)..."
+if ! cast send --rpc-url "$L1_RPC" --private-key "$FUNDER_KEY" \
+        "$BUILDER_ADDRESS" --value 1000ether --gas-limit 21000 --nonce "$BUILDER_FUND_NONCE"; then
+    echo "ERROR: failed to fund builder address $BUILDER_ADDRESS from dev#9" >&2
+    exit 1
+fi
+BUILDER_BALANCE=$(cast balance --rpc-url "$L1_RPC" "$BUILDER_ADDRESS")
+if [ "$BUILDER_BALANCE" = "0" ]; then
+    echo "ERROR: builder balance is 0 after funding tx — the tx must have reverted" >&2
+    exit 1
+fi
+echo "  Builder balance on L1: $BUILDER_BALANCE wei"
 
 # Helper to extract bytecode.object from forge JSON artifacts (no python3 in container)
 _bc() { (grep -o '"object":"0x[0-9a-fA-F]*"' "$1" || true) | head -1 | sed 's/"object":"//;s/"//'; }
@@ -134,10 +182,22 @@ CCM_ADDR_LOWER=$(echo "${CROSS_CHAIN_MANAGER_ADDRESS#0x}" | tr '[:upper:]' '[:lo
 echo "Injecting CCM pre-mint balance into ${GENESIS_JSON} for address ${CCM_ADDR_LOWER}..."
 cp "$GENESIS_JSON" "${SHARED_DIR}/genesis.json"
 sed -i "/\"alloc\": {/a\\    \"${CCM_ADDR_LOWER}\": { \"balance\": \"0xD3C21BCECCEDA1000000\" }," "${SHARED_DIR}/genesis.json"
+
+# Also pre-fund the builder address on L2 so it can pay gas for the block-1
+# protocol txs that deploy L2Context, CCM, and Bridge_L2 (each is a CREATE
+# from the builder at nonces 0/1/2). Before the dev#0 separation this was
+# covered by shared/genesis.json pre-funding dev#0 (still present, for back-
+# compat) but with a separate builder key we need an additional allocation.
+# Same balance as the baseline dev accounts (0x200000…000 wei).
+BUILDER_ADDR_LOWER=$(echo "${BUILDER_ADDRESS#0x}" | tr '[:upper:]' '[:lower:]')
+echo "Injecting builder pre-mint balance into ${SHARED_DIR}/genesis.json for address ${BUILDER_ADDR_LOWER}..."
+sed -i "/\"alloc\": {/a\\    \"${BUILDER_ADDR_LOWER}\": { \"balance\": \"0x200000000000000000000000000000000000000000000000000000000000000\" }," "${SHARED_DIR}/genesis.json"
+
 GENESIS_JSON="${SHARED_DIR}/genesis.json"
-echo "CCM pre-mint injected. Verifying..."
+echo "Genesis injections complete. Verifying..."
 grep -q "$CCM_ADDR_LOWER" "$GENESIS_JSON" && echo "  OK CCM address found in genesis" || { echo "  FATAL: CCM address not in genesis"; exit 1; }
-grep -q "0xD3C21BCECCEDA1000000" "$GENESIS_JSON" && echo "  OK Pre-mint balance found" || { echo "  FATAL: Pre-mint balance not in genesis"; exit 1; }
+grep -q "0xD3C21BCECCEDA1000000" "$GENESIS_JSON" && echo "  OK CCM pre-mint balance found" || { echo "  FATAL: CCM pre-mint balance not in genesis"; exit 1; }
+grep -q "$BUILDER_ADDR_LOWER" "$GENESIS_JSON" && echo "  OK builder address found in genesis" || { echo "  FATAL: builder address not in genesis"; exit 1; }
 
 GENESIS_STATE_ROOT=$(based-rollup genesis-state-root --chain "$GENESIS_JSON")
 echo "Computed genesis state root: ${GENESIS_STATE_ROOT}"
@@ -177,7 +237,16 @@ if [ "${MOCK_VERIFIER:-false}" = "true" ]; then
 else
     echo "Using tmpECDSAVerifier (ECDSA signature verification)"
     VERIFIER_BYTECODE=$(_bc "$CONTRACTS_DIR/sync-rollups-protocol/out/tmpECDSAVerifier.sol/tmpECDSAVerifier.json")
-    VERIFIER_CONSTRUCTOR=$(cast abi-encode "f(address,address)" "$DEPLOYER_ADDR" "$DEPLOYER_ADDR")
+    # Constructor signature: constructor(address initialOwner, address initialSigner).
+    # initialSigner MUST be BUILDER_ADDRESS — tmpECDSAVerifier.verify() ecrecovers
+    # the proof over publicInputsHash and checks recovered == signer. Before key
+    # separation (issue #29) both were DEPLOYER_ADDR because the builder used the
+    # same key; the builder now signs with BUILDER_PRIVATE_KEY, so the verifier's
+    # signer must be BUILDER_ADDRESS or every postBatch reverts with
+    # InvalidProof (0x09bde339).
+    # initialOwner stays DEPLOYER_ADDR so the deployer can rotate the signer
+    # later via setSigner(newSigner).
+    VERIFIER_CONSTRUCTOR=$(cast abi-encode "f(address,address)" "$DEPLOYER_ADDR" "$BUILDER_ADDRESS")
     VERIFIER_DEPLOY_DATA="${VERIFIER_BYTECODE}${VERIFIER_CONSTRUCTOR#0x}"
 fi
 if [ -z "$VERIFIER_BYTECODE" ] || [ "$VERIFIER_BYTECODE" = "null" ]; then
@@ -189,10 +258,14 @@ ROLLUPS_CONSTRUCTOR=$(cast abi-encode "f(address,uint256)" "$VERIFIER_ADDRESS" 1
 ROLLUPS_DEPLOY_DATA="${ROLLUPS_BYTECODE}${ROLLUPS_CONSTRUCTOR#0x}"
 
 # --- Build createRollup calldata ---
+# Owner MUST be the builder address — the rollup owner holds admin rights
+# over the rollup (setStateByOwner, setVerificationKey, transferRollupOwnership).
+# With key separation (issue #29) the builder is the operational account that
+# should manage its own rollup; dev#0 is just the one-shot L1 contract deployer.
 CREATE_ROLLUP_CALLDATA=$(cast calldata "createRollup(bytes32,bytes32,address)" \
     "$GENESIS_STATE_ROOT" \
     "0x0000000000000000000000000000000000000000000000000000000000000001" \
-    "$DEPLOYER_ADDR")
+    "$BUILDER_ADDRESS")
 
 # --- Build Bridge.initialize calldata ---
 BRIDGE_INIT_CALLDATA=$(cast calldata "initialize(address,uint256,address)" \
