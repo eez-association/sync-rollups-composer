@@ -237,7 +237,16 @@ if [ "${MOCK_VERIFIER:-false}" = "true" ]; then
 else
     echo "Using tmpECDSAVerifier (ECDSA signature verification)"
     VERIFIER_BYTECODE=$(_bc "$CONTRACTS_DIR/sync-rollups-protocol/out/tmpECDSAVerifier.sol/tmpECDSAVerifier.json")
-    VERIFIER_CONSTRUCTOR=$(cast abi-encode "f(address,address)" "$DEPLOYER_ADDR" "$DEPLOYER_ADDR")
+    # Constructor signature: constructor(address initialOwner, address initialSigner).
+    # initialSigner MUST be BUILDER_ADDRESS — tmpECDSAVerifier.verify() ecrecovers
+    # the proof over publicInputsHash and checks recovered == signer. Before key
+    # separation (issue #29) both were DEPLOYER_ADDR because the builder used the
+    # same key; the builder now signs with BUILDER_PRIVATE_KEY, so the verifier's
+    # signer must be BUILDER_ADDRESS or every postBatch reverts with
+    # InvalidProof (0x09bde339).
+    # initialOwner stays DEPLOYER_ADDR so the deployer can rotate the signer
+    # later via setSigner(newSigner).
+    VERIFIER_CONSTRUCTOR=$(cast abi-encode "f(address,address)" "$DEPLOYER_ADDR" "$BUILDER_ADDRESS")
     VERIFIER_DEPLOY_DATA="${VERIFIER_BYTECODE}${VERIFIER_CONSTRUCTOR#0x}"
 fi
 if [ -z "$VERIFIER_BYTECODE" ] || [ "$VERIFIER_BYTECODE" = "null" ]; then
@@ -249,10 +258,14 @@ ROLLUPS_CONSTRUCTOR=$(cast abi-encode "f(address,uint256)" "$VERIFIER_ADDRESS" 1
 ROLLUPS_DEPLOY_DATA="${ROLLUPS_BYTECODE}${ROLLUPS_CONSTRUCTOR#0x}"
 
 # --- Build createRollup calldata ---
+# Owner MUST be the builder address — the rollup owner holds admin rights
+# over the rollup (setStateByOwner, setVerificationKey, transferRollupOwnership).
+# With key separation (issue #29) the builder is the operational account that
+# should manage its own rollup; dev#0 is just the one-shot L1 contract deployer.
 CREATE_ROLLUP_CALLDATA=$(cast calldata "createRollup(bytes32,bytes32,address)" \
     "$GENESIS_STATE_ROOT" \
     "0x0000000000000000000000000000000000000000000000000000000000000001" \
-    "$DEPLOYER_ADDR")
+    "$BUILDER_ADDRESS")
 
 # --- Build Bridge.initialize calldata ---
 BRIDGE_INIT_CALLDATA=$(cast calldata "initialize(address,uint256,address)" \
