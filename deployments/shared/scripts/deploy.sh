@@ -3,9 +3,16 @@
 # Single deployment script — replaces deploy-inbox.sh and deploy-crosschain.sh.
 # Usage: deploy.sh [L1_RPC_URL]
 #
-# WARNING: The private key below is the well-known anvil default key.
-# It is PUBLIC and MUST NEVER be used on mainnet, testnets, or any chain
-# where real value is at stake. This script is for LOCAL DEVELOPMENT ONLY.
+# DEPLOYER_KEY below is the well-known anvil default key. It is PUBLIC — we use
+# it ONLY for L1 contract deployment on reth --dev (the chain's pre-funded
+# coinbase, unavoidable). It is NEVER used for postBatch or any runtime tx.
+# See docs/issue-29 for the livelock incident that motivated separating keys.
+#
+# BUILDER_PRIVATE_KEY / BUILDER_ADDRESS must be set by the caller (docker-compose
+# passes it from the operator's .env file — NEVER committed). If only the private
+# key is provided we derive the address. Either way, BUILDER_ADDRESS MUST be
+# distinct from DEPLOYER_ADDR on any deployment where the key could leak, or
+# external usage will evict the builder's postBatches from the L1 mempool.
 set -euo pipefail
 
 L1_RPC="${1:-http://l1:8545}"
@@ -14,9 +21,28 @@ DEPLOYER_ADDR=$(cast wallet address --private-key "$DEPLOYER_KEY")
 SHARED_DIR="${SHARED_DIR:-/shared}"
 CONTRACTS_DIR="${CONTRACTS_DIR:-/app/contracts}"
 
-# Builder address (dev account #0) — used to compute deterministic L2 contract addresses.
-# L2Context = CREATE(builder, nonce=0), CCM = CREATE(builder, nonce=1).
-BUILDER_ADDRESS="${BUILDER_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
+# Builder address — used to compute deterministic L2 contract addresses
+# (L2Context = CREATE(builder, nonce=0), CCM = CREATE(builder, nonce=1)).
+# Prefer the operator-supplied BUILDER_ADDRESS; otherwise derive from BUILDER_PRIVATE_KEY.
+if [ -n "${BUILDER_ADDRESS:-}" ]; then
+    : # supplied directly, use it
+elif [ -n "${BUILDER_PRIVATE_KEY:-}" ]; then
+    BUILDER_ADDRESS=$(cast wallet address --private-key "$BUILDER_PRIVATE_KEY")
+else
+    echo "ERROR: neither BUILDER_ADDRESS nor BUILDER_PRIVATE_KEY is set." >&2
+    echo "       Set BUILDER_PRIVATE_KEY in the deployment's .env file (never committed)." >&2
+    echo "       Do NOT reuse the deployer/dev#0 key as the builder key — see docs/issue-29." >&2
+    exit 1
+fi
+# Refuse the dev#0 key literal: it is publicly known (reth --dev default)
+# and was the direct cause of the 2026-04-15 livelock on testnet-eez.
+if [ "$(echo "$BUILDER_ADDRESS" | tr '[:upper:]' '[:lower:]')" = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266" ]; then
+    echo "ERROR: BUILDER_ADDRESS is dev#0 (0xf39Fd6…), which is the publicly-known reth --dev key." >&2
+    echo "       Generate a fresh key: cast wallet new --json" >&2
+    echo "       Then set BUILDER_PRIVATE_KEY in the deployment's .env (never committed)." >&2
+    exit 1
+fi
+echo "Builder address: $BUILDER_ADDRESS"
 
 # If rollup.env already exists, skip deployment (idempotent)
 if [ -f "${SHARED_DIR}/rollup.env" ]; then
@@ -55,6 +81,10 @@ FUND_ADDRS=(
     "0x2546BcD3c84621e976D8185a91A922aE77ECEc30"
     "0x8943545177806ED17B9F23F0a21ee5948eCaa776"
     "0x02484cb50AAC86Eae85610D6f4Bf026f30f6627D"
+    # Builder address — funded from dev#9 (not dev#0) so reth --dev's
+    # public coinbase key is NEVER used for runtime postBatch submissions.
+    # See docs/issue-29 for the livelock caused by sharing dev#0.
+    "$BUILDER_ADDRESS"
 )
 echo "Funding ${#FUND_ADDRS[@]} addresses on L1 with 100 ETH each..."
 # Get starting nonce for funder key
