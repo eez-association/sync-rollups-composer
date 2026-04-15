@@ -81,10 +81,6 @@ FUND_ADDRS=(
     "0x2546BcD3c84621e976D8185a91A922aE77ECEc30"
     "0x8943545177806ED17B9F23F0a21ee5948eCaa776"
     "0x02484cb50AAC86Eae85610D6f4Bf026f30f6627D"
-    # Builder address — funded from dev#9 (not dev#0) so reth --dev's
-    # public coinbase key is NEVER used for runtime postBatch submissions.
-    # See docs/issue-29 for the livelock caused by sharing dev#0.
-    "$BUILDER_ADDRESS"
 )
 echo "Funding ${#FUND_ADDRS[@]} addresses on L1 with 100 ETH each..."
 # Get starting nonce for funder key
@@ -98,6 +94,28 @@ done
 # Wait for all funding txs to complete
 wait
 echo "  All funding txs sent."
+
+# Fund the builder address sequentially AFTER the parallel batch above, with
+# explicit error checking. The parallel loop suppresses stderr (`2>/dev/null`)
+# and ignores exit codes — under reth --dev load a tx can occasionally drop
+# silently. The builder MUST have L1 ETH to submit postBatches; if its funding
+# silently fails, the rollup wedges with no diagnostic. So:
+#   1. Send sequentially with explicit nonce (continues from FUNDER_NONCE+N).
+#   2. Verify the resulting balance is non-zero.
+# Failure here aborts deploy.sh so the operator sees the issue immediately.
+BUILDER_FUND_NONCE=$((FUNDER_NONCE + ${#FUND_ADDRS[@]}))
+echo "Funding builder address $BUILDER_ADDRESS with 1000 ETH from dev#9 (nonce=$BUILDER_FUND_NONCE)..."
+if ! cast send --rpc-url "$L1_RPC" --private-key "$FUNDER_KEY" \
+        "$BUILDER_ADDRESS" --value 1000ether --gas-limit 21000 --nonce "$BUILDER_FUND_NONCE"; then
+    echo "ERROR: failed to fund builder address $BUILDER_ADDRESS from dev#9" >&2
+    exit 1
+fi
+BUILDER_BALANCE=$(cast balance --rpc-url "$L1_RPC" "$BUILDER_ADDRESS")
+if [ "$BUILDER_BALANCE" = "0" ]; then
+    echo "ERROR: builder balance is 0 after funding tx — the tx must have reverted" >&2
+    exit 1
+fi
+echo "  Builder balance on L1: $BUILDER_BALANCE wei"
 
 # Helper to extract bytecode.object from forge JSON artifacts (no python3 in container)
 _bc() { (grep -o '"object":"0x[0-9a-fA-F]*"' "$1" || true) | head -1 | sed 's/"object":"//;s/"//'; }
