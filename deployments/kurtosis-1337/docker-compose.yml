@@ -31,6 +31,9 @@ services:
       SHARED_DIR: /shared
       CONTRACTS_DIR: /app/contracts
       GENESIS_JSON: /etc/based-rollup/genesis.json
+      # Builder key — operator-owned, NEVER dev#0. See docs/issue-29.
+      # Sourced from deployments/kurtosis-1337/.env (git-ignored).
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in deployments/kurtosis-1337/.env — see .env.example}"
       BOOTSTRAP_ACCOUNTS: "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc:10"
 
   builder:
@@ -44,7 +47,8 @@ services:
       - builder-data:/data
     environment:
       L1_RPC_URL: "${KURTOSIS_L1_RPC_URL}"
-      BUILDER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      # Builder key — operator-owned, NEVER dev#0. See docs/issue-29.
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in deployments/kurtosis-1337/.env — see .env.example}"
     ports:
       - "10545:8545"
       - "10548:8547"
