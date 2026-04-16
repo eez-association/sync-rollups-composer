@@ -3998,6 +3998,39 @@ fn test_reorg_safety_gate_halts_at_depth_threshold() {
     );
 }
 
+/// Exercises the depth arithmetic the safety gate uses in `step_builder`:
+/// `depth = l2_head_number - target_l2_block`. At exactly the threshold the
+/// gate MUST trip — we leave no slack room because reth's eviction window is
+/// at `MAX_REORG_DEPTH = 64` and we halt at 48 to keep 16 blocks of margin.
+#[test]
+fn test_safety_gate_halts_builder_at_depth_48() {
+    // Target block + 48 tip = depth exactly 48 → HALT.
+    let target: u64 = 1000;
+    let tip_at_threshold: u64 = target + REORG_SAFETY_THRESHOLD;
+    let depth = tip_at_threshold.saturating_sub(target);
+    assert_eq!(depth, REORG_SAFETY_THRESHOLD);
+    assert!(
+        reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD),
+        "step_builder must halt when tip is exactly REORG_SAFETY_THRESHOLD blocks ahead"
+    );
+
+    // Target block + 47 tip = depth 47 → still allowed (one block of headroom).
+    let tip_below_threshold: u64 = target + (REORG_SAFETY_THRESHOLD - 1);
+    let depth = tip_below_threshold.saturating_sub(target);
+    assert_eq!(depth, REORG_SAFETY_THRESHOLD - 1);
+    assert!(
+        !reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD),
+        "one block below threshold must still allow building"
+    );
+
+    // Sanity: headroom to reth's eviction window.
+    let remaining = MAX_REORG_DEPTH - REORG_SAFETY_THRESHOLD;
+    assert!(
+        remaining >= 16,
+        "safety gate must leave at least 16 blocks of recovery headroom; got {remaining}"
+    );
+}
+
 #[test]
 fn test_reorg_safety_threshold_strictly_less_than_reth_eviction() {
     // The safety threshold MUST be strictly less than reth's
