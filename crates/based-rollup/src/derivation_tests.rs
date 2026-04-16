@@ -87,6 +87,42 @@ fn test_rollback_to_before_all_cursor_entries() {
     assert_eq!(pipeline.cursor_len(), 0);
 }
 
+/// Regression test for the `rewind_to_re_derive` ordering bug: after
+/// rolling back the cursor and then authoritatively setting the
+/// derivation head to the rewind target, the head must equal the
+/// target even when the cursor is empty. This mirrors the sequence in
+/// `driver/rewind.rs:rewind_to_re_derive` after the fix (rollback
+/// first, set second).
+#[test]
+fn test_rewind_sequence_leaves_derivation_head_at_target_when_cursor_empty() {
+    let config = test_config();
+    let mut pipeline = DerivationPipeline::new(config);
+
+    for i in 3371..=3400 {
+        pipeline.cursor.push(DerivedBlockMeta {
+            l2_block_number: i - 1000,
+            l1_block_number: i,
+            l1_block_hash: B256::with_last_byte(i as u8),
+        });
+    }
+    pipeline.last_processed_l1_block = 3400;
+    pipeline.set_last_derived_l2_block(3520);
+
+    let target_l2_block = 3483u64;
+    let rollback_l1_block = 3370u64;
+
+    // Exactly the call order used by `Driver::rewind_to_re_derive`.
+    pipeline.rollback_to(rollback_l1_block);
+    pipeline.set_last_derived_l2_block(target_l2_block);
+
+    assert_eq!(pipeline.cursor_len(), 0);
+    assert_eq!(
+        pipeline.last_derived_l2_block, target_l2_block,
+        "rewind_to_re_derive must leave last_derived_l2_block at the \
+         requested target (not 0 from the empty-cursor fallback)"
+    );
+}
+
 #[test]
 fn test_prune_finalized() {
     let config = test_config();

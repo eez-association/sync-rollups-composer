@@ -898,7 +898,13 @@ impl DerivationPipeline {
         self.last_execution_l1_block = l1_block.min(self.last_execution_l1_block);
         self.builder_execution_l1_block = l1_block.min(self.builder_execution_l1_block);
         let last_valid_l2 = self.cursor.last().map(|m| m.l2_block_number);
-        // Reset L2 tracking for gap-fill to match the rollback point
+        // Reset L2 tracking for gap-fill to match the rollback point.
+        // When the cursor is empty (deep reorg, or size-cap eviction below
+        // the fork point), callers that need to preserve a
+        // deliberately-set `last_derived_l2_block` must set it AFTER
+        // calling this method — see `Driver::rewind_to_re_derive`. Callers
+        // that want the reset-to-genesis semantic (e.g., the L1 reorg path
+        // in driver/mod.rs) rely on this unconditional `unwrap_or(0)`.
         self.last_derived_l2_block = last_valid_l2.unwrap_or(0);
         // Restore last_l1_info from the last retained cursor entry so gap-fill
         // blocks after rollback use the correct L1 context instead of falling
