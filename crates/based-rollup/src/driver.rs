@@ -3622,6 +3622,50 @@ where
         // productive — re-derivation with filtered txs produces the correct root.
         let header_root = local_header.state_root();
         if header_root != derived.state_root {
+            // Issue #36 fast-path: when derivation flagged this block as needing
+            // §4f filtering (unconsumed entries detected on L1), the mismatch is
+            // provably NOT a timing race — it's the speculative/clean divergence
+            // that the deferral loop cannot resolve. Queue a sibling reorg
+            // immediately so `step_sync` can swap the block in one cycle.
+            //
+            // We use deferrals only for mismatches that MIGHT resolve if L1 mines
+            // another block (consumption event lands later). §4f-flagged mismatch
+            // has L1 already carrying the unconsumed signal; waiting won't help.
+            if derived.filtering.is_some() && self.pending_sibling_reorg.is_none() {
+                warn!(
+                    target: "based_rollup::driver",
+                    l2_block = derived.l2_block_number,
+                    %header_root,
+                    l1_state_root = %derived.state_root,
+                    "issue #36: §4f-filtered divergence at verify — queuing sibling \
+                     reorg immediately (skipping deferrals; L1 is already definitive)"
+                );
+                self.pending_sibling_reorg = Some(SiblingReorgRequest {
+                    target_l2_block: derived.l2_block_number,
+                    expected_root: derived.state_root,
+                    depth: u64::from(self.consecutive_rewind_cycles),
+                });
+                let entry_block = derived.l2_block_number;
+                let (rewind_target, rollback_l1_block) =
+                    if let Some(anchor) = self.l1_confirmed_anchor {
+                        let target = entry_block.saturating_sub(1);
+                        (target, anchor.l1_block_number.saturating_sub(1))
+                    } else {
+                        (0, self.config.deployment_l1_block)
+                    };
+                self.clear_internal_state();
+                self.derivation.set_last_derived_l2_block(rewind_target);
+                self.derivation.rollback_to(rollback_l1_block);
+                self.mode = DriverMode::Sync;
+                self.synced
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                // Do NOT bump consecutive_rewind_cycles — sibling reorg is a
+                // productive recovery, not a failed rewind cycle.
+                self.entry_verify_deferrals = 0;
+                self.pending_entry_verification_block = None;
+                return Ok(());
+            }
+
             // Entry-bearing block with pending verification: the consumption event
             // (ExecutionConsumed) may land 1-2 L1 blocks AFTER the postBatch due to
             // hold-then-forward timing. We defer verification a few times to give the
