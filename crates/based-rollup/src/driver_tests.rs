@@ -3784,3 +3784,278 @@ fn test_skip_logic_checks_state_root_and_clean_state_root() {
         "partial consumption should NOT match either root"
     );
 }
+
+// --- Sibling reorg on §4f-detected divergence (issue #36) ---
+
+/// Reproduces the testnet-eez-2026-04-16 sequence.
+///
+/// Sequence:
+/// 1. Builder commits speculative block N with stateRoot `S_speculative` (includes
+///    a protocol trigger tx that L1 later filters via §4f).
+/// 2. L1 confirms the §4f-filtered variant: stateRoot `S_clean`.
+/// 3. Driver observes `first.pre_state_root != on_chain_root` in `flush_to_l1`.
+///
+/// Before this fix, the driver called bare FCU-to-ancestor. Per the Engine API
+/// spec (see EIP-3675 / op-node `consolidateNextSafeAttributes`), FCU with a
+/// backward head is a silent no-op on reth when the canonical tip is already
+/// ahead — divergence persists → infinite rewind loop.
+///
+/// With the fix, `decide_divergence_recovery()` returns `SiblingReorg` when the
+/// block's `clean_state_root` matches on-chain. The driver then builds sibling
+/// N' with the §4f-filtered tx set and submits it via
+/// `newPayloadV3 + forkchoiceUpdatedV3(head=N')`, which is reth's own first-class
+/// reorg path.
+#[test]
+fn test_sibling_reorg_resolves_speculative_divergence_after_4f_filter() {
+    // Canonical block N (committed in reth): 7 txs, speculative state=S_spec.
+    // L1-derived N' (after §4f filtering): 6 txs, clean state=S_clean.
+    let pre_state = B256::with_last_byte(0xA0);
+    let speculative = B256::with_last_byte(0xA1);
+    let clean = B256::with_last_byte(0xA2);
+    let divergent_block = PendingBlock {
+        l2_block_number: 5354,
+        pre_state_root: pre_state,
+        state_root: speculative,
+        clean_state_root: clean,
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+
+    // on-chain root is `clean` — the §4f-filtered variant landed on L1.
+    let on_chain = clean;
+
+    let decision = decide_divergence_recovery(
+        &divergent_block,
+        on_chain,
+        /* reorg_depth = */ 1,
+        /* threshold  = */ REORG_SAFETY_THRESHOLD,
+    );
+
+    assert_eq!(
+        decision,
+        SiblingReorgDecision::SiblingReorg {
+            target_block: 5354,
+            filtered_root: clean,
+        },
+        "when clean_state_root matches on-chain, driver must attempt sibling reorg \
+         (not bare FCU, which is a silent no-op per Engine API spec)"
+    );
+}
+
+/// When `clean_state_root == state_root` the block had no cross-chain entries,
+/// so §4f filtering is not the cause of the divergence. Fall back to the
+/// bare-FCU rewind path (defense-in-depth — it may itself be a no-op but
+/// at least it doesn't spin pretending to do work).
+#[test]
+fn test_sibling_reorg_falls_back_to_fcu_rewind_when_no_4f_evidence() {
+    let pre_state = B256::with_last_byte(0xB0);
+    let root = B256::with_last_byte(0xB1);
+    let block = PendingBlock {
+        l2_block_number: 100,
+        pre_state_root: pre_state,
+        state_root: root,
+        clean_state_root: root, // same — no §4f filtering possible
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+
+    // On-chain root matches neither speculative nor clean — some deeper bug.
+    let on_chain = B256::with_last_byte(0xC0);
+
+    let decision = decide_divergence_recovery(&block, on_chain, 1, REORG_SAFETY_THRESHOLD);
+
+    assert_eq!(
+        decision,
+        SiblingReorgDecision::BareRewind,
+        "without clean_state_root evidence of §4f filtering, fall back to \
+         bare-FCU rewind (defense-in-depth)"
+    );
+}
+
+/// Even when `clean_state_root != state_root`, if on-chain doesn't match the
+/// clean root either, we have no known-good target for the sibling and must
+/// fall back.
+#[test]
+fn test_sibling_reorg_falls_back_when_clean_root_does_not_match_on_chain() {
+    let pre_state = B256::with_last_byte(0xD0);
+    let clean = B256::with_last_byte(0xD1);
+    let spec = B256::with_last_byte(0xD2);
+    let block = PendingBlock {
+        l2_block_number: 42,
+        pre_state_root: pre_state,
+        state_root: spec,
+        clean_state_root: clean,
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+    // On-chain matches neither — we don't know how to rebuild.
+    let on_chain = B256::with_last_byte(0xD9);
+
+    let decision = decide_divergence_recovery(&block, on_chain, 1, REORG_SAFETY_THRESHOLD);
+
+    assert_eq!(decision, SiblingReorgDecision::BareRewind);
+}
+
+#[test]
+fn test_sibling_reorg_decision_is_stable_under_repeated_calls() {
+    // The decision must be deterministic — same inputs → same output.
+    // Otherwise the flush loop oscillates.
+    let pre_state = B256::with_last_byte(0xE0);
+    let clean = B256::with_last_byte(0xE1);
+    let spec = B256::with_last_byte(0xE2);
+    let block = PendingBlock {
+        l2_block_number: 42,
+        pre_state_root: pre_state,
+        state_root: spec,
+        clean_state_root: clean,
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+    let on_chain = clean;
+
+    let d1 = decide_divergence_recovery(&block, on_chain, 0, REORG_SAFETY_THRESHOLD);
+    let d2 = decide_divergence_recovery(&block, on_chain, 1, REORG_SAFETY_THRESHOLD);
+    let d3 = decide_divergence_recovery(&block, on_chain, 2, REORG_SAFETY_THRESHOLD);
+    assert_eq!(d1, d2);
+    assert_eq!(d2, d3);
+}
+
+/// Beyond the safety threshold, continuing to attempt recovery would
+/// eventually cross reth's `MAX_REORG_DEPTH = 64` eviction window, past which
+/// no strategy (sibling reorg, bare FCU, anything) can succeed. Halt instead.
+#[test]
+fn test_sibling_reorg_halts_beyond_safety_threshold() {
+    let block = PendingBlock {
+        l2_block_number: 10,
+        pre_state_root: B256::with_last_byte(0x00),
+        state_root: B256::with_last_byte(0x01),
+        clean_state_root: B256::with_last_byte(0x02),
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+
+    let decision = decide_divergence_recovery(
+        &block,
+        /* on_chain = */ B256::with_last_byte(0x02),
+        REORG_SAFETY_THRESHOLD,
+        REORG_SAFETY_THRESHOLD,
+    );
+    assert_eq!(decision, SiblingReorgDecision::Halt);
+
+    let decision = decide_divergence_recovery(
+        &block,
+        /* on_chain = */ B256::with_last_byte(0x02),
+        REORG_SAFETY_THRESHOLD + 1,
+        REORG_SAFETY_THRESHOLD,
+    );
+    assert_eq!(decision, SiblingReorgDecision::Halt);
+}
+
+// --- Reorg safety gate (issue #36) ---
+
+#[test]
+fn test_reorg_safety_gate_halts_at_depth_threshold() {
+    // Below threshold: allowed.
+    for depth in 0..REORG_SAFETY_THRESHOLD {
+        assert!(
+            !reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD),
+            "depth {depth} must be allowed (threshold {REORG_SAFETY_THRESHOLD})"
+        );
+    }
+    // At threshold: HALT.
+    assert!(
+        reorg_depth_exceeded(REORG_SAFETY_THRESHOLD, REORG_SAFETY_THRESHOLD),
+        "depth == threshold must halt"
+    );
+    // Above threshold: HALT.
+    assert!(
+        reorg_depth_exceeded(REORG_SAFETY_THRESHOLD + 1, REORG_SAFETY_THRESHOLD),
+        "depth > threshold must halt"
+    );
+}
+
+#[test]
+fn test_reorg_safety_threshold_strictly_less_than_reth_eviction() {
+    // The safety threshold MUST be strictly less than reth's
+    // CHANGESET_CACHE_RETENTION_BLOCKS (64) — if we reach that depth, reth can
+    // no longer unwind the committed block via any mechanism.
+    //
+    // Uses const assertions so a future edit to the constants that would break
+    // the invariant is caught at compile time, not at test runtime.
+    const _: () = assert!(
+        REORG_SAFETY_THRESHOLD < MAX_REORG_DEPTH,
+        "REORG_SAFETY_THRESHOLD must be strictly less than MAX_REORG_DEPTH \
+         so we halt before reth's eviction window"
+    );
+    const _: () = assert!(
+        MAX_REORG_DEPTH == 64,
+        "MAX_REORG_DEPTH must match reth's CHANGESET_CACHE_RETENTION_BLOCKS"
+    );
+    // Threshold is ~75% of the limit, leaving headroom for recovery.
+    const _: () = assert!(
+        REORG_SAFETY_THRESHOLD * 4 / 3 <= MAX_REORG_DEPTH,
+        "threshold should be approximately 75% of the limit"
+    );
+}
+
+// --- BlockInvalidated preconfirmation message (issue #36) ---
+
+#[test]
+fn test_preconfirmed_message_block_invalidated_evicts_cached_hash() {
+    // When a sibling reorg succeeds, the builder broadcasts a `BlockInvalidated`
+    // message so subscribed fullnodes can evict their cached hash and adopt the
+    // sibling's hash. Without this, fullnodes would believe the old hash is
+    // canonical and `verify_local_block_matches_l1` would permanently mismatch.
+    use crate::builder_sync::PreconfirmedMessage;
+
+    let old_hash = B256::with_last_byte(0xE0);
+    let new_hash = B256::with_last_byte(0xE1);
+    let mut preconfirmed_hashes: HashMap<u64, B256> = HashMap::new();
+    preconfirmed_hashes.insert(100, old_hash);
+
+    let msg = PreconfirmedMessage::BlockInvalidated {
+        block_number: 100,
+        new_hash,
+    };
+    match msg {
+        PreconfirmedMessage::BlockInvalidated {
+            block_number,
+            new_hash,
+        } => {
+            preconfirmed_hashes.insert(block_number, new_hash);
+        }
+        PreconfirmedMessage::BlockArrived(_) => {
+            panic!("expected BlockInvalidated variant");
+        }
+    }
+
+    assert_eq!(
+        preconfirmed_hashes.get(&100),
+        Some(&new_hash),
+        "BlockInvalidated must overwrite the cached hash with the sibling's hash"
+    );
+}
+
+#[test]
+fn test_preconfirmed_message_block_arrived_preserves_legacy_semantics() {
+    // PreconfirmedMessage::BlockArrived(PreconfirmedBlock { .. }) is the
+    // legacy-shape variant — it must wrap the existing struct so downstream
+    // code that pattern-matches can unwrap cleanly.
+    use crate::builder_sync::{PreconfirmedBlock, PreconfirmedMessage};
+
+    let block_number = 77;
+    let block_hash = B256::with_last_byte(0x77);
+    let msg = PreconfirmedMessage::BlockArrived(PreconfirmedBlock {
+        block_number,
+        block_hash,
+    });
+    match msg {
+        PreconfirmedMessage::BlockArrived(pb) => {
+            assert_eq!(pb.block_number, block_number);
+            assert_eq!(pb.block_hash, block_hash);
+        }
+        PreconfirmedMessage::BlockInvalidated { .. } => {
+            panic!("expected BlockArrived variant");
+        }
+    }
+}

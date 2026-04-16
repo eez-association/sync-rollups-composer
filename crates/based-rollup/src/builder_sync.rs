@@ -16,6 +16,27 @@ pub struct PreconfirmedBlock {
     pub block_hash: B256,
 }
 
+/// Messages flowing from the builder-sync WS subscription into the driver.
+///
+/// Extends the historical `PreconfirmedBlock` channel with out-of-band control
+/// messages. Introduced for issue #36 so that after the builder performs a
+/// sibling reorg (`new_payload(N') + forkchoiceUpdated(head=N')`), subscribed
+/// fullnodes can evict their cached hash for block N and adopt N' without
+/// waiting for the next L1 confirmation cycle.
+///
+/// Today the WebSocket transport only delivers `BlockArrived` (the subscription
+/// is plain `newHeads`). `BlockInvalidated` is produced by the driver itself
+/// via an internal relay — see `Driver::broadcast_sibling_reorg`.
+#[derive(Debug, Clone)]
+pub enum PreconfirmedMessage {
+    /// A new head arrived via the builder's `newHeads` subscription.
+    BlockArrived(PreconfirmedBlock),
+    /// A previously-announced block was invalidated by a sibling reorg.
+    /// Fullnodes should overwrite any cached hash for `block_number` with
+    /// `new_hash`.
+    BlockInvalidated { block_number: u64, new_hash: B256 },
+}
+
 /// Connects to the builder's WebSocket endpoint and streams new blocks.
 ///
 /// On each new block header, records the block number and hash and sends

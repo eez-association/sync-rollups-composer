@@ -313,6 +313,101 @@ const FCU_SYNCING_INITIAL_BACKOFF_MS: u64 = 100;
 /// mainnet's current gas limit. Must match the payload builder's default.
 const DESIRED_GAS_LIMIT: u64 = 60_000_000;
 
+/// Maximum depth that reth's in-memory changeset cache can unwind. After this
+/// many blocks are committed past a divergence point, the execution layer has
+/// permanently evicted the historical state needed to rebuild via sibling
+/// reorg. Matches reth's `CHANGESET_CACHE_RETENTION_BLOCKS`.
+///
+/// Consumed by the safety gate in `step_builder` (added in a follow-up commit);
+/// the attribute silences the intermediate dead-code warning during TDD.
+#[allow(dead_code)]
+pub(crate) const MAX_REORG_DEPTH: u64 = 64;
+
+/// Safety threshold: halt building / pause derivation if the unresolved
+/// divergence depth reaches this value. Chosen as ~75% of `MAX_REORG_DEPTH`
+/// so we always have headroom to recover via sibling reorg before reth's
+/// eviction window closes.
+#[allow(dead_code)]
+pub(crate) const REORG_SAFETY_THRESHOLD: u64 = 48;
+
+/// Decision returned by [`decide_divergence_recovery`] when `flush_to_l1`
+/// observes `first.pre_state_root != on_chain_root`.
+///
+/// The driver uses the returned variant to dispatch between:
+/// - `SiblingReorg`: build N' with the §4f-filtered tx set and submit via
+///   `newPayloadV3 + forkchoiceUpdatedV3(head=N')`. This is reth's own
+///   first-class reorg path (exercised by reth's `test_testsuite_deep_reorg`).
+/// - `BareRewind`: fall back to `rewind_l2_chain` (FCU-to-ancestor). Used
+///   when we have no evidence of §4f filtering (no `clean_state_root` match).
+///   Known to be a silent no-op on committed blocks; defense-in-depth only.
+/// - `Halt`: the unresolved depth exceeds `REORG_SAFETY_THRESHOLD`. Continuing
+///   would carry us past reth's `MAX_REORG_DEPTH` eviction window, past which
+///   recovery is impossible. The driver must halt and surface a structured
+///   error.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SiblingReorgDecision {
+    /// Attempt sibling reorg. The driver builds a sibling block at
+    /// `target_block` with a parent matching `target_block - 1`'s hash and
+    /// submits via the engine API. The expected post-execution root is
+    /// `filtered_root` (equal to `on_chain_root`).
+    SiblingReorg { target_block: u64, filtered_root: B256 },
+    /// No evidence of §4f filtering — fall back to bare FCU rewind. (Typically
+    /// a no-op on committed blocks; present for defense-in-depth.)
+    BareRewind,
+    /// Safety gate tripped. Halt instead of attempting recovery.
+    Halt,
+}
+
+/// Pure-logic decision for how to recover when `flush_to_l1` observes
+/// `first.pre_state_root != on_chain_root`.
+///
+/// Separated from `flush_to_l1` so the dispatch is unit-testable without an
+/// engine mock. The function inspects the divergent block and on-chain root
+/// alone — no I/O, no mutation.
+#[allow(dead_code)]
+pub(crate) fn decide_divergence_recovery(
+    divergent: &crate::proposer::PendingBlock,
+    on_chain_root: B256,
+    reorg_depth: u64,
+    safety_threshold: u64,
+) -> SiblingReorgDecision {
+    // Safety gate FIRST: if we've already walked this far without resolving,
+    // deeper recovery attempts would eventually cross reth's eviction window.
+    if reorg_depth_exceeded(reorg_depth, safety_threshold) {
+        return SiblingReorgDecision::Halt;
+    }
+
+    // Evidence of §4f filtering: the block's `clean_state_root` (computed by
+    // the builder as "state without any cross-chain entry txs") matches what
+    // L1 confirmed. If so, the §4f-filtered tx set (strip unconsumed protocol
+    // txs) reproduces the on-chain root — we can rebuild N' deterministically.
+    //
+    // Require `clean_state_root != state_root` to ensure a real choice exists
+    // (for plain blocks with no cross-chain entries, the two are equal and
+    // sibling reorg would be identical to the current block — pointless).
+    if divergent.clean_state_root == on_chain_root
+        && divergent.clean_state_root != divergent.state_root
+    {
+        return SiblingReorgDecision::SiblingReorg {
+            target_block: divergent.l2_block_number,
+            filtered_root: divergent.clean_state_root,
+        };
+    }
+
+    SiblingReorgDecision::BareRewind
+}
+
+/// Pure-logic safety-gate predicate. Returns `true` when the accumulated
+/// unresolved divergence depth has reached the halt threshold.
+///
+/// The halt must fire STRICTLY BEFORE `MAX_REORG_DEPTH`; crossing that boundary
+/// means reth has evicted the state needed to rebuild.
+#[allow(dead_code)]
+pub(crate) fn reorg_depth_exceeded(depth: u64, threshold: u64) -> bool {
+    depth >= threshold
+}
+
 /// Compute the gas limit for the next block, bounded by the EIP-1559 elasticity divisor (1024).
 /// Mirrors `alloy_eips::eip1559::helpers::calculate_block_gas_limit` exactly — verified by
 /// `test_calc_gas_limit_matches_reth`.
