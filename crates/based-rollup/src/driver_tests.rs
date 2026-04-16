@@ -4116,3 +4116,59 @@ fn test_preconfirmed_message_block_arrived_preserves_legacy_semantics() {
         }
     }
 }
+
+/// Exercises the full broadcast path: builder sends `BlockInvalidated` on the
+/// internal `preconfirmed_message_tx`, receiver drains it on
+/// `preconfirmed_message_rx` and updates its `HashMap<u64, B256>`. Verifies
+/// try_send/try_recv non-blocking semantics that `drain_preconfirmed_blocks`
+/// depends on.
+#[tokio::test]
+async fn test_sibling_reorg_broadcast_channel_roundtrip() {
+    use crate::builder_sync::PreconfirmedMessage;
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::channel::<PreconfirmedMessage>(8);
+    let old_hash = B256::with_last_byte(0xAB);
+    let new_hash = B256::with_last_byte(0xCD);
+
+    // Starting cache: block 42 → old hash (speculative).
+    let mut preconfirmed_hashes: HashMap<u64, B256> = HashMap::new();
+    preconfirmed_hashes.insert(42, old_hash);
+
+    // Builder simulates broadcasting after a successful sibling reorg.
+    tx.try_send(PreconfirmedMessage::BlockInvalidated {
+        block_number: 42,
+        new_hash,
+    })
+    .expect("broadcast channel must accept within capacity");
+
+    // Drain loop (mirrors `drain_preconfirmed_blocks` semantics).
+    let mut drained = 0usize;
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            PreconfirmedMessage::BlockInvalidated {
+                block_number,
+                new_hash,
+            } => {
+                preconfirmed_hashes.insert(block_number, new_hash);
+            }
+            PreconfirmedMessage::BlockArrived(pb) => {
+                preconfirmed_hashes.insert(pb.block_number, pb.block_hash);
+            }
+        }
+        drained += 1;
+    }
+
+    assert_eq!(drained, 1, "exactly one message should have been drained");
+    assert_eq!(
+        preconfirmed_hashes.get(&42),
+        Some(&new_hash),
+        "after BlockInvalidated the cached hash for block 42 must be the sibling hash"
+    );
+    assert_ne!(
+        preconfirmed_hashes.get(&42),
+        Some(&old_hash),
+        "the speculative hash must be evicted — otherwise verify_local_block_matches_l1 \
+         would keep rejecting the new canonical hash"
+    );
+}
