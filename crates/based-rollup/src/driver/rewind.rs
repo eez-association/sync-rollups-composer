@@ -96,8 +96,18 @@ where
     /// no rewind-cycle increment) and does not call this helper.
     pub(super) fn rewind_to_re_derive(&mut self, target_l2_block: u64, rollback_l1_block: u64) {
         self.clear_internal_state();
-        self.derivation.set_last_derived_l2_block(target_l2_block);
+        // Order matters. `rollback_to` sets `last_derived_l2_block` as a
+        // side-effect based on the cursor contents (`last_valid_l2.unwrap_or(0)`).
+        // When the cursor has been evicted below `rollback_l1_block` (size
+        // cap at derivation.rs:801), it resets the derivation head to 0 —
+        // which, combined with an L2 head far ahead of 0, wedges derivation
+        // via `MAX_BLOCK_GAP`. Call `rollback_to` FIRST so its side-effect
+        // runs, THEN authoritatively overwrite with the intended target.
+        // Regression: `test_rewind_sequence_leaves_derivation_head_at_target_when_cursor_empty`.
+        // Root-cause incident: testnet-eez 2026-04-16, 32 min of rewind
+        // cycles followed by a permanent `expected next block 1` wedge.
         self.derivation.rollback_to(rollback_l1_block);
+        self.derivation.set_last_derived_l2_block(target_l2_block);
         self.mode = DriverMode::Sync;
         self.synced
             .store(false, std::sync::atomic::Ordering::Relaxed);
