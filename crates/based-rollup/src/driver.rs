@@ -86,6 +86,17 @@ pub struct Driver<P, Pool> {
     preconfirmed_rx: Option<mpsc::Receiver<PreconfirmedBlock>>,
     /// Preconfirmed block hashes by block number (for L1 verification).
     preconfirmed_hashes: HashMap<u64, B256>,
+    /// Receiver for internal preconfirmation control messages
+    /// (`BlockInvalidated` after sibling reorg, etc.). Drained alongside
+    /// `preconfirmed_rx` in `drain_preconfirmed_blocks`. Separate from the
+    /// WS-backed channel so that `BuilderSync` remains backward-compatible.
+    preconfirmed_message_rx: Option<mpsc::Receiver<crate::builder_sync::PreconfirmedMessage>>,
+    /// Sender paired with `preconfirmed_message_rx`. Held by the driver itself
+    /// and used by `broadcast_sibling_reorg` to publish `BlockInvalidated` on
+    /// successful sibling reorg. Left `None` when sibling reorg is disabled
+    /// (e.g., in tests that construct the driver manually).
+    sibling_reorg_broadcast_tx:
+        Option<mpsc::Sender<crate::builder_sync::PreconfirmedMessage>>,
     /// Blocks built locally but not yet submitted to L1 (builder mode).
     pending_submissions: VecDeque<PendingBlock>,
     /// Timestamp of last L1 submission failure (for cooldown).
@@ -520,6 +531,8 @@ where
             last_checkpointed_l1_block: 0,
             preconfirmed_rx: None,
             preconfirmed_hashes: HashMap::new(),
+            preconfirmed_message_rx: None,
+            sibling_reorg_broadcast_tx: None,
             pending_submissions: VecDeque::new(),
             last_submission_failure: None,
             health_status_tx,
@@ -748,6 +761,15 @@ where
             self.builder_sync_handle = Some(handle);
         }
 
+        // Wire the internal sibling-reorg broadcast channel unconditionally —
+        // the builder is the sole publisher (broadcasts BlockInvalidated after
+        // a successful sibling reorg); both builder and fullnode drivers
+        // subscribe to drain it (so a future WS relay can forward the same
+        // messages to external subscribers without a second wiring path).
+        let (message_tx, message_rx) = mpsc::channel(64);
+        self.sibling_reorg_broadcast_tx = Some(message_tx);
+        self.preconfirmed_message_rx = Some(message_rx);
+
         info!(
             target: "based_rollup::driver",
             mode = ?self.mode,
@@ -969,28 +991,57 @@ where
     /// locally-derived block hash differs from the builder's preconfirmed hash,
     /// the fullnode knows something is wrong before waiting for L1 finality).
     fn drain_preconfirmed_blocks(&mut self) {
-        let Some(rx) = &mut self.preconfirmed_rx else {
-            return;
-        };
-        while let Ok(block) = rx.try_recv() {
-            // Reject preconfirmations too far ahead of current head
-            if block.block_number > self.l2_head_number.saturating_add(1000) {
-                warn!(
+        if let Some(rx) = &mut self.preconfirmed_rx {
+            while let Ok(block) = rx.try_recv() {
+                // Reject preconfirmations too far ahead of current head
+                if block.block_number > self.l2_head_number.saturating_add(1000) {
+                    warn!(
+                        target: "based_rollup::driver",
+                        block_number = block.block_number,
+                        head = self.l2_head_number,
+                        "ignoring preconfirmation far ahead of head"
+                    );
+                    continue;
+                }
+                debug!(
                     target: "based_rollup::driver",
                     block_number = block.block_number,
-                    head = self.l2_head_number,
-                    "ignoring preconfirmation far ahead of head"
+                    block_hash = %block.block_hash,
+                    "received preconfirmed block from builder"
                 );
-                continue;
+                self.preconfirmed_hashes
+                    .insert(block.block_number, block.block_hash);
             }
-            debug!(
-                target: "based_rollup::driver",
-                block_number = block.block_number,
-                block_hash = %block.block_hash,
-                "received preconfirmed block from builder"
-            );
-            self.preconfirmed_hashes
-                .insert(block.block_number, block.block_hash);
+        }
+
+        // Drain internal control messages (issue #36): BlockInvalidated updates
+        // the cached hash for a block that was replaced by a sibling reorg, so
+        // `verify_local_block_matches_l1` doesn't keep rejecting the new hash.
+        if let Some(rx) = &mut self.preconfirmed_message_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    crate::builder_sync::PreconfirmedMessage::BlockArrived(block) => {
+                        // Mirror the WS-path semantics for future external producers.
+                        if block.block_number > self.l2_head_number.saturating_add(1000) {
+                            continue;
+                        }
+                        self.preconfirmed_hashes
+                            .insert(block.block_number, block.block_hash);
+                    }
+                    crate::builder_sync::PreconfirmedMessage::BlockInvalidated {
+                        block_number,
+                        new_hash,
+                    } => {
+                        debug!(
+                            target: "based_rollup::driver",
+                            block_number,
+                            %new_hash,
+                            "BlockInvalidated — adopting sibling hash in preconfirmed cache"
+                        );
+                        self.preconfirmed_hashes.insert(block_number, new_hash);
+                    }
+                }
+            }
         }
 
         // Prune stale entries more than 1000 blocks behind head
@@ -4455,6 +4506,204 @@ where
         self.update_fork_choice(built.hash).await?;
 
         Ok(built)
+    }
+
+    /// Rebuild block `target` as a sibling of the existing canonical block and
+    /// swap it in via reth's first-class `newPayloadV3 + forkchoiceUpdatedV3`
+    /// reorg path.
+    ///
+    /// This exists because `forkchoiceUpdatedV3(head=ancestor)` on plain
+    /// Ethereum engine kind is a silent no-op per the Engine API spec — reth
+    /// refuses to unwind committed canonical blocks. The only way to replace
+    /// a committed block is to present a sibling at the same height with a
+    /// different hash and then issue FCU pointing at the sibling.
+    ///
+    /// Reference: reth's own `test_testsuite_deep_reorg` at
+    /// `crates/e2e-test-utils/tests/e2e-testsuite/main.rs`. The same pattern
+    /// is used by op-node (`consolidateNextSafeAttributes`) and Taiko.
+    ///
+    /// Semantics:
+    /// - Parent is `target - 1` (must exist in reth).
+    /// - `derived_transactions` is the exact tx set that the rebuilt block
+    ///   must contain (already §4f-filtered by the caller).
+    /// - On success the driver's `head_hash`, `l2_head_number`, and
+    ///   `block_hashes` deque are updated to reflect reth's new canonical tip.
+    /// - On success, a `PreconfirmedMessage::BlockInvalidated` broadcast is
+    ///   emitted via `sibling_reorg_broadcast_tx` (when wired) so subscribed
+    ///   fullnodes can evict any cached hash for `target`.
+    ///
+    /// Failure modes:
+    /// - `newPayload` returns INVALID → bail with a structured error. Callers
+    ///   MUST NOT silently accept (doing so reproduces the #36 livelock).
+    /// - FCU returns INVALID → bail; driver state is untouched.
+    /// - FCU returns SYNCING → `fork_choice_updated_with_retry` handles it.
+    ///
+    /// This function does not mutate cross-chain pipeline state
+    /// (`pending_submissions`, `pending_l1_entries`, mode flags, etc.). The
+    /// caller is responsible for that: successful sibling reorg means the
+    /// divergent block was replaced with the §4f-canonical one, so the caller
+    /// typically resets `consecutive_rewind_cycles` / `consecutive_flush_mismatches`,
+    /// pops pending submissions up to `target`, and clears the entry hold.
+    #[allow(dead_code)]
+    async fn rebuild_block_as_sibling(
+        &mut self,
+        target: u64,
+        timestamp: u64,
+        l1_block_hash: B256,
+        l1_block_number: u64,
+        derived_transactions: &Bytes,
+    ) -> Result<BuiltBlock> {
+        if target == 0 {
+            eyre::bail!("cannot rebuild genesis block (target=0) as sibling");
+        }
+        let parent_block_number = target - 1;
+
+        let old_hash = self.head_hash;
+        let old_head = self.l2_head_number;
+
+        let (built, execution_data) = self
+            .build_derived_block(
+                parent_block_number,
+                timestamp,
+                l1_block_hash,
+                l1_block_number,
+                derived_transactions,
+            )
+            .wrap_err_with(|| {
+                format!(
+                    "sibling rebuild: build_derived_block failed for L2 block {target} \
+                     (parent={parent_block_number})"
+                )
+            })?;
+
+        let sibling_hash = built.hash;
+
+        if sibling_hash == old_hash && target == old_head {
+            // Bit-identical payload already canonical — nothing to do.
+            debug!(
+                target: "based_rollup::driver",
+                target,
+                %sibling_hash,
+                "sibling rebuild produced the same hash as current head — no reorg needed"
+            );
+            return Ok(built);
+        }
+
+        info!(
+            target: "based_rollup::driver",
+            target,
+            parent = parent_block_number,
+            %old_hash,
+            sibling_hash = %sibling_hash,
+            tx_count = built.tx_count,
+            "submitting sibling payload to engine (reorg via newPayload+FCU)"
+        );
+
+        let status = self
+            .engine
+            .new_payload(execution_data)
+            .await
+            .wrap_err("sibling rebuild: engine_newPayload call failed")?;
+
+        if !status.is_valid() {
+            eyre::bail!(
+                "sibling rebuild: newPayload rejected target={target} sibling_hash={sibling_hash} \
+                 status={status:?}"
+            );
+        }
+
+        // Build the forkchoice state for the sibling. We rebuild the hash
+        // deque from scratch by walking back from `target - 1` through reth
+        // (those are untouched by the reorg), then append the sibling hash.
+        let mut new_hashes = VecDeque::new();
+        let start = parent_block_number.saturating_sub(FORK_CHOICE_DEPTH as u64);
+        for n in start..=parent_block_number {
+            if let Ok(Some(h)) = self.l2_provider.block_hash(n) {
+                new_hashes.push_back(h);
+            }
+        }
+        new_hashes.push_back(sibling_hash);
+        if new_hashes.len() > FORK_CHOICE_DEPTH {
+            new_hashes.pop_front();
+        }
+
+        let fcs = compute_forkchoice_state(sibling_hash, &new_hashes);
+        let fcu = self
+            .fork_choice_updated_with_retry(fcs, None)
+            .await
+            .wrap_err("sibling rebuild: forkchoiceUpdated failed")?;
+
+        if fcu.is_invalid() {
+            eyre::bail!(
+                "sibling rebuild: forkchoiceUpdated rejected sibling_hash={sibling_hash} \
+                 status={:?}",
+                fcu.payload_status
+            );
+        }
+
+        // Only after reth confirms the reorg do we mutate driver state.
+        self.block_hashes = new_hashes;
+        self.head_hash = sibling_hash;
+        self.l2_head_number = target;
+
+        info!(
+            target: "based_rollup::driver",
+            target,
+            old_head,
+            old_hash = %old_hash,
+            new_hash = %sibling_hash,
+            "sibling reorg completed — reth swapped canonical head"
+        );
+
+        self.broadcast_sibling_reorg(target, sibling_hash);
+
+        Ok(built)
+    }
+
+    /// Broadcast a `PreconfirmedMessage::BlockInvalidated` to any subscribed
+    /// listeners (fullnodes driven by the builder's preconfirmation channel).
+    ///
+    /// Wired up when the internal sibling-reorg broadcast channel is present.
+    /// No-op otherwise — logged at debug.
+    #[allow(dead_code)]
+    fn broadcast_sibling_reorg(&self, block_number: u64, new_hash: B256) {
+        let Some(tx) = &self.sibling_reorg_broadcast_tx else {
+            debug!(
+                target: "based_rollup::driver",
+                block_number,
+                %new_hash,
+                "no sibling-reorg broadcast channel wired — skipping invalidation broadcast"
+            );
+            return;
+        };
+        let msg = crate::builder_sync::PreconfirmedMessage::BlockInvalidated {
+            block_number,
+            new_hash,
+        };
+        match tx.try_send(msg) {
+            Ok(()) => {
+                debug!(
+                    target: "based_rollup::driver",
+                    block_number,
+                    %new_hash,
+                    "broadcast BlockInvalidated after sibling reorg"
+                );
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    target: "based_rollup::driver",
+                    block_number,
+                    "sibling-reorg broadcast channel full — BlockInvalidated dropped"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug!(
+                    target: "based_rollup::driver",
+                    block_number,
+                    "sibling-reorg broadcast channel closed"
+                );
+            }
+        }
     }
 
     /// Send a fork choice update with exponential-backoff retry on SYNCING.
