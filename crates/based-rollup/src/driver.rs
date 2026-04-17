@@ -1108,6 +1108,154 @@ where
         self.mode
     }
 
+    // --- Test-only accessors -------------------------------------------------
+    //
+    // Feature-gated on `test-utils` (see `Cargo.toml`) so these are NEVER
+    // compiled into the production binary. They exist so integration tests in
+    // `driver_tests.rs` / `driver_test_harness.rs` can assert on the Driver's
+    // private recovery state without granting all of `driver_tests.rs` access
+    // to every private field.
+    //
+    // Naming convention: `_for_test` suffix.
+    //
+    // `#[allow(dead_code)]` on the not-currently-used accessors: these are a
+    // stable API surface for future wire-through tests. Callers that need
+    // e.g. `consecutive_rewind_cycles_for_test` shouldn't have to reopen this
+    // impl to add it. Keeping them around pays for itself the first time a
+    // new test needs one.
+
+    /// Test-only: snapshot of `pending_sibling_reorg`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn pending_sibling_reorg_for_test(&self) -> Option<SiblingReorgRequest> {
+        self.pending_sibling_reorg
+    }
+
+    /// Test-only: snapshot of `pending_rewind_target`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn pending_rewind_target_for_test(&self) -> Option<u64> {
+        self.pending_rewind_target
+    }
+
+    /// Test-only: snapshot of `pending_entry_verification_block`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn pending_entry_verification_block_for_test(&self) -> Option<u64> {
+        self.pending_entry_verification_block
+    }
+
+    /// Test-only: snapshot of `entry_verify_deferrals`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn entry_verify_deferrals_for_test(&self) -> u32 {
+        self.entry_verify_deferrals
+    }
+
+    /// Test-only: snapshot of `consecutive_rewind_cycles`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn consecutive_rewind_cycles_for_test(&self) -> u32 {
+        self.consecutive_rewind_cycles
+    }
+
+    /// Test-only: snapshot of `consecutive_flush_mismatches`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn consecutive_flush_mismatches_for_test(&self) -> u32 {
+        self.consecutive_flush_mismatches
+    }
+
+    /// Test-only: install a sibling-reorg request without running a plan. Used
+    /// by wire-through tests to seed the field before calling a production
+    /// method (e.g. `clear_internal_state`).
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_pending_sibling_reorg_for_test(&mut self, req: Option<SiblingReorgRequest>) {
+        self.pending_sibling_reorg = req;
+    }
+
+    /// Test-only: install a pending entry-verification block.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_pending_entry_verification_block_for_test(&mut self, block: Option<u64>) {
+        self.pending_entry_verification_block = block;
+    }
+
+    /// Test-only: install a value for `entry_verify_deferrals`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_entry_verify_deferrals_for_test(&mut self, n: u32) {
+        self.entry_verify_deferrals = n;
+    }
+
+    /// Test-only: install a value for `consecutive_rewind_cycles`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_consecutive_rewind_cycles_for_test(&mut self, n: u32) {
+        self.consecutive_rewind_cycles = n;
+    }
+
+    /// Test-only: install a value for `consecutive_flush_mismatches`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_consecutive_flush_mismatches_for_test(&mut self, n: u32) {
+        self.consecutive_flush_mismatches = n;
+    }
+
+    /// Test-only: snapshot of the `l1_confirmed_anchor` field.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn l1_confirmed_anchor_for_test(&self) -> Option<L1ConfirmedAnchor> {
+        self.l1_confirmed_anchor
+    }
+
+    /// Test-only: install an L1-confirmed anchor (controls the warm/cold-start
+    /// branch in `plan_sibling_reorg_from_verify`).
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_l1_confirmed_anchor_for_test(&mut self, anchor: Option<L1ConfirmedAnchor>) {
+        self.l1_confirmed_anchor = anchor;
+    }
+
+    /// Test-only: direct access to the derivation pipeline for assertions on
+    /// the L1 cursor after `apply_sibling_reorg_plan` rolls back.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn derivation_last_processed_l1_for_test(&self) -> u64 {
+        self.derivation.last_processed_l1_block()
+    }
+
+    /// Test-only: seed the derivation pipeline's L1 cursor. Used by wire-through
+    /// tests to establish the "before" snapshot apply_sibling_reorg_plan
+    /// subsequently rolls back from.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn seed_derivation_cursor_for_test(&mut self, l1_block: u64) {
+        self.derivation.resume_from(l1_block);
+    }
+
+    /// Test-only: invoke the private `clear_internal_state` method directly.
+    /// Exists so the wire-through test can drive the REAL production method
+    /// (not the free `clear_recovery_state` helper it delegates to) and
+    /// assert the complete post-state — including the save/reinstate dance
+    /// callers perform around it.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn clear_internal_state_for_test(&mut self) {
+        self.clear_internal_state();
+    }
+
+    /// Test-only: invoke the private `apply_sibling_reorg_plan` method
+    /// directly. Exists so the wire-through test can drive the REAL method
+    /// (which internally calls `clear_internal_state` + the free
+    /// `apply_sibling_reorg_plan_fields` helper) end-to-end.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn apply_sibling_reorg_plan_for_test(&mut self, plan: SiblingReorgVerifyPlan) {
+        self.apply_sibling_reorg_plan(plan);
+    }
+
     /// Returns the active L1 provider, switching between primary and fallback
     /// based on consecutive failure counts.
     ///
@@ -3802,6 +3950,8 @@ where
         // centralized in `clear_recovery_state` so tests exercise the same
         // production helper production uses. Removing or skipping any one
         // field in the helper breaks `test_clear_recovery_state_wipes_all_fields`.
+        // Removing the CALL itself is caught by
+        // `test_clear_internal_state_via_real_driver_clears_pending_sibling_reorg`.
         clear_recovery_state(
             &mut self.pending_sibling_reorg,
             &mut self.pending_entry_verification_block,
