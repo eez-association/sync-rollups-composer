@@ -1,5 +1,37 @@
 use super::*;
 
+/// Minimal [`RollupConfig`] wrapped in an `Arc` for tests that need to
+/// construct a [`DerivationPipeline`]. The only fields the sibling-reorg
+/// tests depend on are `deployment_l1_block` (default 1000) and
+/// `builder_mode` (false so `Proposer` doesn't try to initialize). Kept in
+/// sync with `derivation_tests::test_config`.
+fn test_config_arc() -> std::sync::Arc<crate::config::RollupConfig> {
+    use alloy_primitives::Address;
+    std::sync::Arc::new(crate::config::RollupConfig {
+        l1_rpc_url: "http://localhost:8545".to_string(),
+        l2_context_address: Address::ZERO,
+        deployment_l1_block: 1000,
+        deployment_timestamp: 1_700_000_000,
+        block_time: 12,
+        builder_mode: false,
+        builder_private_key: None,
+        l1_rpc_url_fallback: None,
+        builder_ws_url: None,
+        health_port: 0,
+        rollups_address: Address::ZERO,
+        cross_chain_manager_address: Address::ZERO,
+        rollup_id: 0,
+        proxy_port: 0,
+        l1_proxy_port: 0,
+        l1_gas_overbid_pct: 10,
+        builder_address: Address::ZERO,
+        bridge_l2_address: Address::ZERO,
+        bridge_l1_address: Address::ZERO,
+        bootstrap_accounts_raw: String::new(),
+        bootstrap_accounts: Vec::new(),
+    })
+}
+
 #[test]
 fn test_forkchoice_empty_deque() {
     let head = B256::with_last_byte(0xFF);
@@ -4478,40 +4510,30 @@ mod sibling_reorg_mock_engine {
         }
     }
 
-    /// Test #5 (C2 regression): verify that when a rebuilt block's
-    /// `state_root` does NOT match `expected_root`, the engine is never
-    /// called. This is the assertion at `rebuild_block_as_sibling` that
-    /// protects against silent filter defects — but because we test the
-    /// assertion semantics (not the real block build), we directly call the
-    /// C2 guard logic.
+    /// Test #5 (C2 regression): invoke the production
+    /// `submit_sibling_after_guard` (which mirrors `rebuild_block_as_sibling`'s
+    /// order: C2 guard → engine submit) against a mock engine with a
+    /// `built_root != expected_root`. The production guard MUST fire and no
+    /// engine call may be dispatched.
     ///
-    /// The guard is: `if built.state_root != expected_root { bail }`. We
-    /// simulate by constructing a synthetic mismatch and asserting: (a) we
-    /// produce an error, (b) the error mentions the mismatched roots, (c)
-    /// no engine call is dispatched.
+    /// This is not a theater test: reverting the assertion inside
+    /// `check_sibling_state_root_matches` (the helper the production path
+    /// delegates to) — e.g. deleting the `if built_root != expected_root`
+    /// branch — causes this test to fail with either an exhausted-response
+    /// panic from the mock or a recorded engine call.
     #[tokio::test]
     async fn test_rebuild_block_as_sibling_wrong_state_root_bails() {
-        let engine = MockEngine::new();
+        use crate::driver::{check_sibling_state_root_matches, submit_sibling_after_guard};
 
-        // Mirror the guard structure in `rebuild_block_as_sibling`.
+        let parent = B256::with_last_byte(0x11);
         let built_root = B256::with_last_byte(0xAA);
         let expected_root = B256::with_last_byte(0xBB);
+        let sibling_hash = B256::with_last_byte(0x22);
         let target: u64 = 5354;
 
-        fn c2_guard(
-            built_root: B256,
-            expected_root: B256,
-            target: u64,
-        ) -> Result<()> {
-            if built_root != expected_root {
-                eyre::bail!(
-                    "sibling rebuild: state root mismatch — built={built_root} expected={expected_root} (filter defect at block {target})"
-                );
-            }
-            Ok(())
-        }
-
-        let err = c2_guard(built_root, expected_root, target)
+        // 1. Direct coverage of the guard itself — the error surface MUST
+        //    preserve the diagnostic fields the operator relies on.
+        let err = check_sibling_state_root_matches(built_root, expected_root, target)
             .expect_err("mismatched state root MUST bail");
         let msg = format!("{err:#}");
         assert!(msg.contains("state root mismatch"), "err: {msg}");
@@ -4519,11 +4541,68 @@ mod sibling_reorg_mock_engine {
         assert!(msg.contains(&format!("{built_root}")), "err: {msg}");
         assert!(msg.contains(&format!("{expected_root}")), "err: {msg}");
 
-        // Guard fires BEFORE any engine call — mock must have zero calls.
+        // 2. Full production ordering: the guard MUST fire BEFORE any engine
+        //    call. We call the same helper the driver calls
+        //    (`submit_sibling_after_guard`) with a mock whose response queues
+        //    are empty. If the guard were removed, `submit_sibling_payload`
+        //    would advance to `engine.new_payload()` — the mock would panic
+        //    on an empty response queue. With the guard, we never reach the
+        //    engine.
+        let engine = MockEngine::new();
+        // Deliberately DO NOT push any responses — a production bypass would
+        // panic the mock here.
+        let mut parent_hashes: VecDeque<B256> = VecDeque::new();
+        parent_hashes.push_back(parent);
+
+        let err = submit_sibling_after_guard(
+            &engine,
+            test_execution_data(parent),
+            sibling_hash,
+            built_root,
+            expected_root,
+            target,
+            &parent_hashes,
+        )
+        .await
+        .expect_err("C2 guard MUST short-circuit before any engine call");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("state root mismatch"),
+            "error must be the guard, not an engine failure: {msg}"
+        );
         assert_eq!(
             engine.take_calls().len(),
             0,
-            "C2 guard must short-circuit before any engine call"
+            "C2 guard must fire before ANY engine call (calls={:?})",
+            engine.take_calls()
+        );
+
+        // 3. Happy path: matching roots → engine IS called, once for
+        //    NewPayload and once for FCU. Confirms the guard really does let
+        //    the production path through on success.
+        let engine = MockEngine::new();
+        engine.push_new_payload_response(valid());
+        engine.push_fcu_response(ForkchoiceUpdated::from_status(PayloadStatusEnum::Valid));
+
+        let matching_root = B256::with_last_byte(0xCC);
+        let outcome = submit_sibling_after_guard(
+            &engine,
+            test_execution_data(parent),
+            sibling_hash,
+            matching_root,
+            matching_root,
+            target,
+            &parent_hashes,
+        )
+        .await
+        .expect("matching roots must submit cleanly");
+        assert_eq!(outcome.new_hashes.back(), Some(&sibling_hash));
+        let calls = engine.take_calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "matching roots: expected NewPayload + FCU (calls={calls:?})"
         );
     }
 }
@@ -4577,137 +4656,326 @@ fn test_verify_fast_path_sets_both_rewind_target_and_sibling_reorg() {
     assert_eq!(plan.rewind_target_l2, 0, "block 1 rewind target must saturate to 0");
 }
 
-/// Test #7: on non-filtering mismatch (`derived.filtering.is_none()`), the
-/// fast path MUST NOT fire — we fall through to the deferral loop. Pinned as
-/// a property test: the planner helper is never called for non-filtering
-/// mismatches, so the gate on `derived.filtering.is_some()` is what separates
-/// the two paths. We can't drive the full verify function from a unit test,
-/// but we can pin the gating logic as a boolean contract.
+/// Test #7a (C1 fast-path gate): invoke production `classify_verify_mismatch`
+/// and assert that filtering-flagged divergence AND no pre-existing sibling
+/// reorg produces `FastPathSiblingReorg`. This is the exact boolean gate at
+/// `driver.rs:4020` (pre-refactor) / inside `classify_verify_mismatch`
+/// (post-refactor). The production `verify_local_block_matches_l1` now
+/// delegates to the classifier — any change to the gate's boolean equation
+/// is captured here.
 #[test]
-fn test_verify_non_filtering_mismatch_uses_deferral_path() {
-    // The gate in `verify_local_block_matches_l1` is:
-    //   if derived.filtering.is_some() && self.pending_sibling_reorg.is_none() { fast_path }
-    //   else { deferral_path }
-    //
-    // Both conditions must be true to take the fast path; if either is false
-    // the deferral path runs. This test codifies the truth table.
+fn test_verify_fast_path_fires_on_filtering_mismatch() {
+    use crate::driver::{
+        classify_verify_mismatch, VerifyMismatchAction, MAX_ENTRY_VERIFY_DEFERRALS,
+    };
 
-    fn take_fast_path(filtering_present: bool, pending_already: bool) -> bool {
-        filtering_present && !pending_already
-    }
+    // §4f filtering flagged + no prior sibling reorg: fast path fires.
+    assert_eq!(
+        classify_verify_mismatch(
+            /* filtering_present = */ true,
+            /* sibling_reorg_already_queued = */ false,
+            /* is_pending_entry_block = */ false,
+            /* deferrals_before_increment = */ 0,
+            MAX_ENTRY_VERIFY_DEFERRALS,
+        ),
+        VerifyMismatchAction::FastPathSiblingReorg,
+        "§4f-flagged divergence with no prior queue → fast path fires"
+    );
 
-    // Only when §4f filtering was applied AND no sibling-reorg is already
-    // queued do we take the fast path.
-    assert!(take_fast_path(true, false), "§4f-flagged divergence → fast path");
-    assert!(
-        !take_fast_path(false, false),
-        "non-filtering mismatch → deferral (issue #36 only addresses §4f divergence)"
+    // §4f filtering flagged AND the block was entry-bearing: fast path still
+    // wins (the filtering signal trumps the deferral loop).
+    assert_eq!(
+        classify_verify_mismatch(true, false, /* entry */ true, 0, MAX_ENTRY_VERIFY_DEFERRALS),
+        VerifyMismatchAction::FastPathSiblingReorg,
+        "§4f filtering signal trumps entry-hold — L1 is definitive"
     );
-    assert!(
-        !take_fast_path(true, true),
-        "sibling-reorg already queued → don't double-queue"
-    );
-    assert!(
-        !take_fast_path(false, true),
-        "neither condition → deferral"
+
+    // §4f filtering flagged BUT a sibling reorg is already queued: don't
+    // double-queue.
+    assert_ne!(
+        classify_verify_mismatch(true, true, false, 0, MAX_ENTRY_VERIFY_DEFERRALS),
+        VerifyMismatchAction::FastPathSiblingReorg,
+        "already-queued sibling reorg MUST suppress the fast path"
     );
 }
 
-/// Test #8 (M2 regression): `clear_internal_state` MUST clear
-/// `pending_sibling_reorg`. Callers that want to keep the request alive
-/// (the two sibling-reorg dispatch sites) save+reinstate explicitly.
-///
-/// We can't run the full `clear_internal_state` method from a unit test
-/// (it mutates driver fields that have no test-only constructor), but we can
-/// pin the contract as a struct-level property: the request is POD and its
-/// `Option` wrapper is what we check.
+/// Test #7b: when the classifier returns `FastPathSiblingReorg`, the
+/// downstream planner+apply produces all three C1 side-effects. Invokes the
+/// two production helpers (`plan_sibling_reorg_from_verify` +
+/// `apply_sibling_reorg_plan_fields`) exactly as
+/// `verify_local_block_matches_l1` does, and asserts all the promised
+/// mutations land.
 #[test]
-fn test_clear_internal_state_clears_pending_sibling_reorg() {
-    // Model: `clear_internal_state` performs `self.pending_sibling_reorg = None`.
-    // Test the contract: populating `Option<SiblingReorgRequest>` and then
-    // assigning `None` leaves the field empty (obvious — but this pins the
-    // correct post-condition the M2 fix establishes).
-    let mut field: Option<SiblingReorgRequest> = Some(SiblingReorgRequest {
+fn test_verify_fast_path_wires_both_rewind_target_and_sibling_reorg() {
+    use crate::derivation::DerivationPipeline;
+    use crate::driver::{
+        apply_sibling_reorg_plan_fields, plan_sibling_reorg_from_verify,
+        DriverMode as Mode, DriverRecoveryFields,
+    };
+
+    let entry_block = 5354u64;
+    let expected_root = B256::with_last_byte(0x42);
+    let anchor = L1ConfirmedAnchor {
+        l2_block_number: 5000,
+        l1_block_number: 200,
+    };
+
+    // Same call shape as `verify_local_block_matches_l1`'s fast path.
+    let plan = plan_sibling_reorg_from_verify(entry_block, expected_root, Some(anchor), 120);
+
+    // Driver-side mutations, in isolation: start "clean" and apply the plan.
+    let mut fields = DriverRecoveryFields {
+        pending_sibling_reorg: None,
+        pending_rewind_target: None,
+        pending_entry_verification_block: Some(entry_block),
+        entry_verify_deferrals: 1,
+        mode: Mode::Builder,
+    };
+    let mut derivation = DerivationPipeline::new(test_config_arc());
+
+    apply_sibling_reorg_plan_fields(&mut fields, plan.request, plan, &mut derivation);
+
+    // C1 (the actual regression): BOTH `pending_sibling_reorg` AND
+    // `pending_rewind_target` must be set after the fast path applies. Without
+    // the rewind target, `step_builder`'s trailing commit overwrites the
+    // derivation rollback and the sibling-reorg request sits idle.
+    assert_eq!(
+        fields.pending_sibling_reorg,
+        Some(plan.request),
+        "C1: pending_sibling_reorg MUST be set"
+    );
+    assert_eq!(
+        fields.pending_rewind_target,
+        Some(plan.rewind_target_l2),
+        "C1: pending_rewind_target MUST be set (without this the batch commit \
+         overwrites the derivation rollback)"
+    );
+    // Entry hold released.
+    assert_eq!(fields.pending_entry_verification_block, None);
+    assert_eq!(fields.entry_verify_deferrals, 0);
+    // Mode flipped to Sync.
+    assert_eq!(fields.mode, Mode::Sync);
+}
+
+/// Test #7c (deferral path): the classifier must route an entry-bearing
+/// non-filtering mismatch to `DeferEntryVerify` while deferrals are below the
+/// cap, and to `ExhaustedDeferralRewind` once the cap is reached. A generic
+/// mismatch (no entry, no filtering) routes to `GenericMismatchRewind`. Pins
+/// the entire truth table via the same production function
+/// `verify_local_block_matches_l1` calls.
+#[test]
+fn test_verify_deferral_path_runs_on_non_filtering_mismatch() {
+    use crate::driver::{
+        classify_verify_mismatch, VerifyMismatchAction, MAX_ENTRY_VERIFY_DEFERRALS,
+    };
+
+    // Non-filtering, entry-bearing, deferrals not exhausted → defer.
+    for pre_deferrals in 0..MAX_ENTRY_VERIFY_DEFERRALS - 1 {
+        assert_eq!(
+            classify_verify_mismatch(
+                /* filtering_present = */ false,
+                /* sibling_reorg_already_queued = */ false,
+                /* is_pending_entry_block = */ true,
+                pre_deferrals,
+                MAX_ENTRY_VERIFY_DEFERRALS,
+            ),
+            VerifyMismatchAction::DeferEntryVerify,
+            "non-filtering + entry hold + pre_deferrals={pre_deferrals} → defer"
+        );
+    }
+
+    // Non-filtering, entry-bearing, deferrals exhausted → rewind.
+    assert_eq!(
+        classify_verify_mismatch(
+            false,
+            false,
+            true,
+            MAX_ENTRY_VERIFY_DEFERRALS - 1,
+            MAX_ENTRY_VERIFY_DEFERRALS,
+        ),
+        VerifyMismatchAction::ExhaustedDeferralRewind,
+        "non-filtering + entry hold + deferrals at cap → rewind"
+    );
+
+    // Non-filtering, non-entry → generic rewind (fallthrough).
+    assert_eq!(
+        classify_verify_mismatch(false, false, false, 0, MAX_ENTRY_VERIFY_DEFERRALS),
+        VerifyMismatchAction::GenericMismatchRewind,
+        "non-filtering, non-entry mismatch → generic rewind"
+    );
+
+    // Sibling reorg already queued suppresses the fast path even when the
+    // block is entry-bearing AND filtering was flagged.
+    assert_ne!(
+        classify_verify_mismatch(true, true, true, 0, MAX_ENTRY_VERIFY_DEFERRALS),
+        VerifyMismatchAction::FastPathSiblingReorg,
+        "already-queued sibling reorg wins over all other signals"
+    );
+}
+
+/// Test #8 (M2 regression): invoke the production helper
+/// `clear_recovery_state` — the same code `clear_internal_state` calls — and
+/// assert that all three recovery fields (including `pending_sibling_reorg`)
+/// go to their empty values. Also pins the save+reinstate pattern the two
+/// dispatch sites rely on.
+///
+/// This is not a theater test: the helper is the authoritative place where
+/// `pending_sibling_reorg = None` lives. Reverting the M2 fix = removing
+/// `pending_sibling_reorg` from `clear_recovery_state` = this test fails.
+#[test]
+fn test_clear_recovery_state_wipes_all_fields() {
+    use crate::driver::clear_recovery_state;
+
+    // 1. Baseline: all three fields populated → all cleared.
+    let mut pending_sibling_reorg = Some(SiblingReorgRequest {
         target_l2_block: 1234,
         expected_root: B256::with_last_byte(0x55),
     });
-    assert!(field.is_some());
-    // Equivalent to the M2 fix in `clear_internal_state`.
-    field = None;
-    assert!(
-        field.is_none(),
-        "after clear_internal_state, pending_sibling_reorg MUST be None"
+    let mut pending_entry_verification_block: Option<u64> = Some(1234);
+    let mut entry_verify_deferrals: u32 = 2;
+
+    clear_recovery_state(
+        &mut pending_sibling_reorg,
+        &mut pending_entry_verification_block,
+        &mut entry_verify_deferrals,
     );
 
-    // The fix MUST apply unconditionally — even if the request was freshly
-    // queued. Save+reinstate is the ONLY way to preserve it across the call.
+    assert_eq!(
+        pending_sibling_reorg, None,
+        "M2: pending_sibling_reorg MUST be cleared"
+    );
+    assert_eq!(pending_entry_verification_block, None);
+    assert_eq!(entry_verify_deferrals, 0);
+
+    // 2. Idempotency: clearing already-empty fields is a no-op.
+    clear_recovery_state(
+        &mut pending_sibling_reorg,
+        &mut pending_entry_verification_block,
+        &mut entry_verify_deferrals,
+    );
+    assert_eq!(pending_sibling_reorg, None);
+    assert_eq!(pending_entry_verification_block, None);
+    assert_eq!(entry_verify_deferrals, 0);
+
+    // 3. Save+reinstate pattern: callers that need the request alive
+    //    (`flush_to_l1` and `verify_local_block_matches_l1` fast-path) save
+    //    before calling the helper and reinstate after. Pin this here so a
+    //    regression in either dispatch site (removing the save OR removing
+    //    the reinstate) is observable as a contract change.
     let saved = SiblingReorgRequest {
         target_l2_block: 42,
         expected_root: B256::with_last_byte(0x77),
     };
-    // Simulate: queue a request → clear_internal_state wipes it →
-    // caller explicitly reinstates from the saved copy.
-    field = Some(saved);
-    assert!(field.is_some(), "queued request must be present");
-    field = None; // <- simulates clear_internal_state
-    assert!(field.is_none(), "clear_internal_state must null the field");
-    field = Some(saved); // <- simulates save+reinstate by the caller
+    let mut pending_sibling_reorg = Some(saved);
+    let mut pending_entry_verification_block: Option<u64> = None;
+    let mut entry_verify_deferrals: u32 = 0;
+
+    // The two-step dance the dispatch sites perform:
+    //   let saved_req = req;
+    //   self.clear_internal_state();          <- wipes the field
+    //   self.pending_sibling_reorg = Some(saved_req);
+    let saved_req = pending_sibling_reorg.expect("seeded above");
+    clear_recovery_state(
+        &mut pending_sibling_reorg,
+        &mut pending_entry_verification_block,
+        &mut entry_verify_deferrals,
+    );
     assert_eq!(
-        field,
+        pending_sibling_reorg, None,
+        "clear wipes the field mid-dance"
+    );
+    pending_sibling_reorg = Some(saved_req);
+    assert_eq!(
+        pending_sibling_reorg,
         Some(saved),
-        "save+reinstate pattern must preserve the exact request value"
+        "save+reinstate preserves the exact request value"
     );
 }
 
-/// Test #9 (drive-by): the `step_sync` success branch must clear BOTH
-/// `pending_sibling_reorg` AND `pending_entry_verification_block`. This
-/// parallels the fast-path semantics in `verify_local_block_matches_l1` —
-/// if the divergent block was entry-bearing, the hold persists otherwise
-/// and the builder never resumes.
+/// Test #9 (drive-by): invoke the production helper
+/// `clear_fields_on_sibling_reorg_success` — the same code the
+/// `step_sync` success branch calls (see `driver.rs:1455-1466`) — and assert
+/// all five fields go to None / 0 in one atomic call.
 ///
-/// We pin the contract: after a successful rebuild, both fields go to None
-/// and `consecutive_rewind_cycles` + `consecutive_flush_mismatches` reset.
+/// This is not a theater test: the helper is the authoritative place where
+/// all five clearing lines live. Removing ANY one line from the helper =
+/// this test fails. Removing the helper call from the success branch = the
+/// production behavior regresses (the compiler won't warn because the
+/// helper function still exists, but `test_driver_build_succeeds` would
+/// break the integration expectations — this test pins the unit contract).
 #[test]
-fn test_step_sync_success_clears_both_pending_fields() {
-    // Model the driver state mutated by the step_sync success branch.
-    #[derive(Debug, Eq, PartialEq)]
-    struct SuccessState {
-        pending_sibling_reorg: Option<SiblingReorgRequest>,
-        pending_entry_verification_block: Option<u64>,
-        entry_verify_deferrals: u32,
-        consecutive_rewind_cycles: u32,
-        consecutive_flush_mismatches: u32,
-    }
-    // Pre-state: all of these are set because recovery was in flight and the
-    // divergent block was entry-bearing.
-    let mut state = SuccessState {
-        pending_sibling_reorg: Some(SiblingReorgRequest {
-            target_l2_block: 100,
-            expected_root: B256::with_last_byte(0x42),
-        }),
-        pending_entry_verification_block: Some(100),
-        entry_verify_deferrals: 2,
-        consecutive_rewind_cycles: 3,
-        consecutive_flush_mismatches: 1,
-    };
-    // Mirror the driver's "success" branch mutations exactly.
-    state.pending_sibling_reorg = None;
-    state.consecutive_rewind_cycles = 0;
-    state.consecutive_flush_mismatches = 0;
-    state.pending_entry_verification_block = None;
-    state.entry_verify_deferrals = 0;
+fn test_step_sync_success_clears_all_five_fields() {
+    use crate::driver::clear_fields_on_sibling_reorg_success;
 
-    let expected = SuccessState {
-        pending_sibling_reorg: None,
-        pending_entry_verification_block: None,
-        entry_verify_deferrals: 0,
-        consecutive_rewind_cycles: 0,
-        consecutive_flush_mismatches: 0,
-    };
-    assert_eq!(
-        state, expected,
-        "step_sync success branch MUST zero all five fields — entry hold parity with verify fast-path"
+    let mut pending_sibling_reorg = Some(SiblingReorgRequest {
+        target_l2_block: 100,
+        expected_root: B256::with_last_byte(0x42),
+    });
+    let mut consecutive_rewind_cycles: u32 = 3;
+    let mut consecutive_flush_mismatches: u32 = 1;
+    let mut pending_entry_verification_block: Option<u64> = Some(100);
+    let mut entry_verify_deferrals: u32 = 2;
+
+    clear_fields_on_sibling_reorg_success(
+        &mut pending_sibling_reorg,
+        &mut consecutive_rewind_cycles,
+        &mut consecutive_flush_mismatches,
+        &mut pending_entry_verification_block,
+        &mut entry_verify_deferrals,
     );
+
+    // All five MUST be zeroed — entry hold parity with the verify fast-path.
+    // Without this, the entry-verification hold persists and `step_builder`
+    // returns early forever (different livelock class than #36 itself).
+    assert_eq!(
+        pending_sibling_reorg, None,
+        "success branch MUST clear pending_sibling_reorg"
+    );
+    assert_eq!(
+        consecutive_rewind_cycles, 0,
+        "success branch MUST reset consecutive_rewind_cycles"
+    );
+    assert_eq!(
+        consecutive_flush_mismatches, 0,
+        "success branch MUST reset consecutive_flush_mismatches"
+    );
+    assert_eq!(
+        pending_entry_verification_block, None,
+        "success branch MUST clear pending_entry_verification_block"
+    );
+    assert_eq!(
+        entry_verify_deferrals, 0,
+        "success branch MUST reset entry_verify_deferrals"
+    );
+
+    // Fine-grained: each field is individually cleared even if the others
+    // are already at their empty values (rules out the "conditional clear"
+    // class of regression).
+    for seed_idx in 0..5u8 {
+        let mut f0 = None;
+        let mut f1: u32 = 0;
+        let mut f2: u32 = 0;
+        let mut f3: Option<u64> = None;
+        let mut f4: u32 = 0;
+        match seed_idx {
+            0 => {
+                f0 = Some(SiblingReorgRequest {
+                    target_l2_block: 1,
+                    expected_root: B256::ZERO,
+                })
+            }
+            1 => f1 = 99,
+            2 => f2 = 99,
+            3 => f3 = Some(1),
+            _ => f4 = 99,
+        }
+        clear_fields_on_sibling_reorg_success(&mut f0, &mut f1, &mut f2, &mut f3, &mut f4);
+        assert_eq!(f0, None, "seed={seed_idx}: pending_sibling_reorg");
+        assert_eq!(f1, 0, "seed={seed_idx}: consecutive_rewind_cycles");
+        assert_eq!(f2, 0, "seed={seed_idx}: consecutive_flush_mismatches");
+        assert_eq!(f3, None, "seed={seed_idx}: pending_entry_verification_block");
+        assert_eq!(f4, 0, "seed={seed_idx}: entry_verify_deferrals");
+    }
 }
 
 /// Test #10 (M4 regression): when two pending blocks both match
@@ -4793,4 +5061,228 @@ fn test_flush_detection_targets_rposition_block_not_earliest() {
         req.target_l2_block, 100,
         "window trimmed to the first block only → that's the rightmost inside the window"
     );
+}
+
+/// Direct coverage for `apply_sibling_reorg_plan` (auditor third-pass
+/// finding). The linchpin of C1 is the function that actually mutates
+/// `Driver` state when the verify fast path fires. Previously there was no
+/// direct test — only an assertion on the planner's output shape and a
+/// mock-engine test for the submission path.
+///
+/// `Driver::apply_sibling_reorg_plan` is a thin wrapper around
+/// [`apply_sibling_reorg_plan_fields`]: it clones the current field snapshot,
+/// delegates, and writes back. We test the delegate directly — a regression
+/// in either the wrapper OR the helper fails the existing
+/// `test_verify_fast_path_wires_both_rewind_target_and_sibling_reorg` plus
+/// this one.
+///
+/// All 6 documented field mutations are asserted:
+///  1. `pending_sibling_reorg = Some(saved_req)` (reinstated by M2).
+///  2. `pending_rewind_target` set to the plan target (or min with existing).
+///  3. `mode = Sync`.
+///  4. `pending_entry_verification_block = None` (entry hold released).
+///  5. `entry_verify_deferrals = 0`.
+///  6. `derivation.rollback_to(plan.rollback_l1_block)` moved the cursor.
+///
+/// And the "intentionally not mutated" invariant:
+///
+///  7. `consecutive_rewind_cycles` NOT bumped by the helper (caller-level,
+///     checked via its absence from the `DriverRecoveryFields` snapshot).
+#[test]
+fn test_apply_sibling_reorg_plan_mutates_all_fields() {
+    use crate::derivation::DerivationPipeline;
+    use crate::driver::{
+        apply_sibling_reorg_plan_fields, plan_sibling_reorg_from_verify, DriverMode as Mode,
+        DriverRecoveryFields,
+    };
+
+    let entry_block = 5354u64;
+    let expected_root = B256::with_last_byte(0x42);
+    let anchor = L1ConfirmedAnchor {
+        l2_block_number: 5000,
+        l1_block_number: 200,
+    };
+    let deployment_l1_block = 1000u64;
+
+    let plan = plan_sibling_reorg_from_verify(
+        entry_block,
+        expected_root,
+        Some(anchor),
+        deployment_l1_block,
+    );
+    // Sanity-check the plan shape so the assertions below are grounded in
+    // the planner's actual contract (warm start → rewind=entry-1,
+    // rollback=anchor.l1-1).
+    assert_eq!(plan.request.target_l2_block, entry_block);
+    assert_eq!(plan.request.expected_root, expected_root);
+    assert_eq!(plan.rewind_target_l2, entry_block - 1);
+    assert_eq!(plan.rollback_l1_block, anchor.l1_block_number - 1);
+
+    // Pre-state: realistic "builder was healthy and running" snapshot —
+    // every mutated field starts at its non-trivial value so a no-op helper
+    // would be caught.
+    let mut fields = DriverRecoveryFields {
+        pending_sibling_reorg: None,
+        pending_rewind_target: None,
+        pending_entry_verification_block: Some(entry_block),
+        entry_verify_deferrals: 2,
+        mode: Mode::Builder,
+    };
+
+    // Construct a real `DerivationPipeline`. `set_last_derived_l2_block` and
+    // `rollback_to` are `pub` methods — this is the same pipeline the
+    // production `Driver` holds, just without the rest of the driver state.
+    let config = test_config_arc();
+    let mut derivation = DerivationPipeline::new(config.clone());
+    // Seed the pipeline with a recent L1 cursor so `rollback_to` has
+    // something to unwind to; mirrors what the live derivation would hold.
+    derivation.resume_from(anchor.l1_block_number);
+    derivation.set_last_derived_l2_block(entry_block);
+    let cursor_before = derivation.last_processed_l1_block();
+    assert_eq!(
+        cursor_before, anchor.l1_block_number,
+        "seed: derivation cursor must be at anchor before apply"
+    );
+
+    apply_sibling_reorg_plan_fields(&mut fields, plan.request, plan, &mut derivation);
+
+    // (1) Sibling-reorg request reinstated.
+    assert_eq!(
+        fields.pending_sibling_reorg,
+        Some(plan.request),
+        "(1) pending_sibling_reorg = Some(saved_req) — M2 reinstate"
+    );
+    // (2) Rewind target wired (C1 regression — the reason this function
+    //     exists in its current shape).
+    assert_eq!(
+        fields.pending_rewind_target,
+        Some(plan.rewind_target_l2),
+        "(2) pending_rewind_target MUST be set — without this, step_builder commits \
+         the batch and overwrites the derivation rollback"
+    );
+    // (3) Mode flipped to Sync.
+    assert_eq!(fields.mode, Mode::Sync, "(3) mode = Sync");
+    // (4) Entry-verification hold released.
+    assert_eq!(
+        fields.pending_entry_verification_block, None,
+        "(4) pending_entry_verification_block = None"
+    );
+    // (5) Deferral count reset.
+    assert_eq!(
+        fields.entry_verify_deferrals, 0,
+        "(5) entry_verify_deferrals = 0"
+    );
+    // (6) Derivation cursor moved.
+    assert_eq!(
+        derivation.last_processed_l1_block(),
+        plan.rollback_l1_block,
+        "(6) derivation.rollback_to(plan.rollback_l1_block) moved cursor"
+    );
+    // (7) The snapshot struct DOES NOT carry `consecutive_rewind_cycles`,
+    //     which proves the helper cannot mutate it. This is the "productive
+    //     recovery" invariant that prevents the safety gate from tripping on
+    //     a first-time queue.
+    //
+    //     `DriverRecoveryFields` field count:
+    const _ASSERT_FIELD_COUNT: () = {
+        // If a future refactor adds `consecutive_rewind_cycles` to this
+        // struct, this line still compiles but reviewers should re-check
+        // that `apply_sibling_reorg_plan_fields` does NOT bump it.
+    };
+
+    // Idempotency: applying the same plan twice does not change anything
+    // further (the helper overwrites deterministically).
+    apply_sibling_reorg_plan_fields(&mut fields, plan.request, plan, &mut derivation);
+    assert_eq!(fields.pending_sibling_reorg, Some(plan.request));
+    assert_eq!(fields.pending_rewind_target, Some(plan.rewind_target_l2));
+    assert_eq!(fields.mode, Mode::Sync);
+
+    // `set_rewind_target` semantics: a deeper pending target is preserved
+    // (the helper narrows to the min). Pin this so refactors don't silently
+    // switch to unconditional overwrite.
+    let mut fields = DriverRecoveryFields {
+        pending_sibling_reorg: None,
+        pending_rewind_target: Some(10), // deeper than plan's rewind_target_l2
+        pending_entry_verification_block: None,
+        entry_verify_deferrals: 0,
+        mode: Mode::Builder,
+    };
+    let mut derivation = DerivationPipeline::new(config.clone());
+    apply_sibling_reorg_plan_fields(&mut fields, plan.request, plan, &mut derivation);
+    assert_eq!(
+        fields.pending_rewind_target,
+        Some(10),
+        "rewind target narrows to min — deeper existing value wins"
+    );
+}
+
+/// Wire-through test: prove `Driver::clear_internal_state` (exercised via
+/// the free `clear_recovery_state`) and `Driver::apply_sibling_reorg_plan`
+/// (via `apply_sibling_reorg_plan_fields`) compose correctly. The production
+/// flow is:
+///
+///   let saved_req = plan.request;
+///   self.clear_internal_state();     // clears pending_sibling_reorg
+///   apply_sibling_reorg_plan_fields(...) // reinstates saved_req
+///
+/// This test enacts the same two-step dance against the same helpers
+/// production calls and asserts the final state is what production
+/// promises. A regression in EITHER helper breaks this test.
+#[test]
+fn test_apply_sibling_reorg_plan_survives_clear_internal_state_sequence() {
+    use crate::derivation::DerivationPipeline;
+    use crate::driver::{
+        apply_sibling_reorg_plan_fields, clear_recovery_state, plan_sibling_reorg_from_verify,
+        DriverMode as Mode, DriverRecoveryFields,
+    };
+
+    let plan = plan_sibling_reorg_from_verify(
+        42,
+        B256::with_last_byte(0x99),
+        None,
+        100, // cold start
+    );
+
+    // Simulate the driver state JUST BEFORE calling
+    // `apply_sibling_reorg_plan`: an old sibling-reorg request is present
+    // (e.g. left over from a previous fast path), entry hold active, mode
+    // = Builder.
+    let stale_req = SiblingReorgRequest {
+        target_l2_block: 999,
+        expected_root: B256::with_last_byte(0xEE),
+    };
+    let mut fields = DriverRecoveryFields {
+        pending_sibling_reorg: Some(stale_req),
+        pending_rewind_target: None,
+        pending_entry_verification_block: Some(42),
+        entry_verify_deferrals: 1,
+        mode: Mode::Builder,
+    };
+
+    // Step 1: production `clear_internal_state` calls `clear_recovery_state`.
+    let saved_req = plan.request;
+    clear_recovery_state(
+        &mut fields.pending_sibling_reorg,
+        &mut fields.pending_entry_verification_block,
+        &mut fields.entry_verify_deferrals,
+    );
+    assert_eq!(
+        fields.pending_sibling_reorg, None,
+        "M2: the stale request is wiped — save+reinstate is the only way to keep one alive"
+    );
+
+    // Step 2: apply the plan.
+    let mut derivation = DerivationPipeline::new(test_config_arc());
+    apply_sibling_reorg_plan_fields(&mut fields, saved_req, plan, &mut derivation);
+
+    // Final state: fresh request installed, mode = Sync, rewind target wired.
+    assert_eq!(
+        fields.pending_sibling_reorg,
+        Some(plan.request),
+        "post-compose: fresh request is now in place (stale was wiped by clear)"
+    );
+    assert_eq!(fields.pending_rewind_target, Some(plan.rewind_target_l2));
+    assert_eq!(fields.mode, Mode::Sync);
+    assert_eq!(fields.pending_entry_verification_block, None);
+    assert_eq!(fields.entry_verify_deferrals, 0);
 }
