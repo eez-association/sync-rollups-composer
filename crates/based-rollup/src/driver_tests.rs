@@ -5286,3 +5286,251 @@ fn test_apply_sibling_reorg_plan_survives_clear_internal_state_sequence() {
     assert_eq!(fields.pending_entry_verification_block, None);
     assert_eq!(fields.entry_verify_deferrals, 0);
 }
+
+// --- Wire-through tests: drive the REAL `Driver` methods through the
+// `DriverTestHarness` instead of the extracted free helpers.
+//
+// These exist so that a regression which removes the call to the helper
+// from the production method (e.g. dropping `clear_recovery_state(...)` out
+// of `Driver::clear_internal_state` while leaving the free helper intact)
+// is observable. The field-level helper tests alone can't see that — they
+// call the helper directly.
+//
+// Harness limitations (documented on `driver_test_harness`):
+//   - `rebuild_block_as_sibling` and `step_sync`'s engine-driven branches
+//     are NOT reachable via the harness (they require a real engine).
+//     Those paths are covered by the mock-engine tests in the
+//     `sibling_reorg_mock_engine` module above + the helper-level test
+//     `test_step_sync_success_clears_all_five_fields`.
+//   - `verify_local_block_matches_l1` is reachable in principle but requires
+//     seeding a sealed header into the in-memory blockchain provider. Not
+//     yet exercised; the `classify_verify_mismatch` + `apply_sibling_reorg_plan`
+//     path is covered at two levels (free fn + real Driver method via the
+//     harness test below).
+
+/// Wire-through for `Driver::clear_internal_state`.
+///
+/// Drives the REAL method via `DriverTestHarness`. Seeds a
+/// `pending_sibling_reorg`, a `pending_entry_verification_block`, and a
+/// non-zero `entry_verify_deferrals`, then invokes the private method via
+/// `clear_internal_state_for_test()` and asserts all three recovery fields
+/// are cleared.
+///
+/// If a future refactor drops the `clear_recovery_state(...)` call from
+/// `Driver::clear_internal_state` (while leaving the free helper intact),
+/// the helper-level `test_clear_recovery_state_wipes_all_fields` still passes
+/// but THIS test fails — which is exactly the C2/M2 regression guard we
+/// need.
+#[test]
+fn test_clear_internal_state_via_real_driver_clears_pending_sibling_reorg() {
+    use crate::driver_test_harness::DriverTestHarness;
+
+    let mut harness = DriverTestHarness::new();
+
+    // Seed: every recovery field at a non-trivial value. If
+    // `clear_internal_state` fails to invoke `clear_recovery_state`, any
+    // one of these staying populated is a detectable regression.
+    let seeded_req = SiblingReorgRequest {
+        target_l2_block: 5354,
+        expected_root: B256::with_last_byte(0x42),
+    };
+    harness
+        .driver
+        .set_pending_sibling_reorg_for_test(Some(seeded_req));
+    harness
+        .driver
+        .set_pending_entry_verification_block_for_test(Some(5354));
+    harness.driver.set_entry_verify_deferrals_for_test(2);
+
+    // Pre-assert the seed took effect (guards against a broken accessor).
+    assert_eq!(
+        harness.driver.pending_sibling_reorg_for_test(),
+        Some(seeded_req),
+        "seed: pending_sibling_reorg must be populated before the call"
+    );
+    assert_eq!(
+        harness.driver.pending_entry_verification_block_for_test(),
+        Some(5354)
+    );
+    assert_eq!(harness.driver.entry_verify_deferrals_for_test(), 2);
+
+    // Drive the REAL production method (not the free helper).
+    harness.driver.clear_internal_state_for_test();
+
+    // Post: every recovery field is cleared. Regression in either
+    // `clear_internal_state`'s body OR in `clear_recovery_state` breaks
+    // this; the helper-level test isolates which layer regressed.
+    harness.assert_recovery_state_cleared();
+}
+
+/// Wire-through for `Driver::apply_sibling_reorg_plan`.
+///
+/// Drives the REAL method via the harness with a pre-computed plan. Asserts
+/// the 5 snapshot fields that the plan applies (request, rewind target,
+/// mode, entry-verification block, deferrals) AND that the derivation
+/// pipeline's L1 cursor has rolled back to `plan.rollback_l1_block`.
+///
+/// If a future refactor drops the `apply_sibling_reorg_plan_fields(...)`
+/// call from `Driver::apply_sibling_reorg_plan` (while leaving the free
+/// helper intact), `test_apply_sibling_reorg_plan_mutates_all_fields` still
+/// passes but THIS test fails — the C1 regression guard.
+///
+/// Also asserts the save/reinstate dance survives `clear_internal_state`
+/// (M2): the stale request gets wiped, the fresh one is installed.
+#[test]
+fn test_apply_sibling_reorg_plan_via_real_driver() {
+    use crate::driver::plan_sibling_reorg_from_verify;
+    use crate::driver_test_harness::DriverTestHarness;
+
+    let mut harness = DriverTestHarness::new();
+
+    // Pre-seed: a STALE sibling-reorg request, to pin the save/reinstate
+    // dance (M2 regression: clear_internal_state wipes this, apply then
+    // reinstates plan.request). Also a pending entry-verification block
+    // and non-zero deferrals so the clear is observable.
+    let stale_req = SiblingReorgRequest {
+        target_l2_block: 999,
+        expected_root: B256::with_last_byte(0xEE),
+    };
+    harness
+        .driver
+        .set_pending_sibling_reorg_for_test(Some(stale_req));
+    harness
+        .driver
+        .set_pending_entry_verification_block_for_test(Some(5354));
+    harness.driver.set_entry_verify_deferrals_for_test(2);
+
+    // Anchor present → warm-start planner branch (rewind_target = entry-1,
+    // rollback_l1 = anchor.l1 - 1). Mirrors the production path in
+    // `verify_local_block_matches_l1::FastPathSiblingReorg`.
+    let anchor = L1ConfirmedAnchor {
+        l2_block_number: 5000,
+        l1_block_number: 200,
+    };
+    harness
+        .driver
+        .set_l1_confirmed_anchor_for_test(Some(anchor));
+    // Seed the derivation cursor to the anchor so `rollback_to` has
+    // something to unwind to; mirrors the live derivation contract.
+    harness.driver.seed_derivation_cursor_for_test(anchor.l1_block_number);
+    assert_eq!(
+        harness.driver.derivation_last_processed_l1_for_test(),
+        anchor.l1_block_number,
+        "seed: derivation cursor must be at anchor before apply"
+    );
+
+    // Build the plan the real verify fast path would build. The harness's
+    // default config uses `deployment_l1_block = 1000`
+    // (see `DriverTestHarness::default_config`).
+    let entry_block = 5354u64;
+    let expected_root = B256::with_last_byte(0x42);
+    let plan = plan_sibling_reorg_from_verify(
+        entry_block,
+        expected_root,
+        Some(anchor),
+        /* deployment_l1_block = */ 1000,
+    );
+    assert_eq!(plan.rewind_target_l2, entry_block - 1);
+    assert_eq!(plan.rollback_l1_block, anchor.l1_block_number - 1);
+
+    // Drive the REAL production method.
+    harness.driver.apply_sibling_reorg_plan_for_test(plan);
+
+    // (1) Fresh request installed — the stale one was wiped by
+    //     clear_internal_state, then plan.request was reinstated.
+    assert_eq!(
+        harness.driver.pending_sibling_reorg_for_test(),
+        Some(plan.request),
+        "M2 save/reinstate: stale request must be wiped, fresh one installed"
+    );
+    // (2) Rewind target wired (C1 regression).
+    assert_eq!(
+        harness.driver.pending_rewind_target_for_test(),
+        Some(plan.rewind_target_l2),
+        "C1: pending_rewind_target MUST be set — without this, step_builder commits \
+         the batch and overwrites the derivation rollback"
+    );
+    // (3) Mode flipped to Sync.
+    assert_eq!(
+        harness.driver.mode(),
+        DriverMode::Sync,
+        "mode must transition to Sync so step_sync picks up the request"
+    );
+    // (4) Entry-verification hold released.
+    assert_eq!(
+        harness.driver.pending_entry_verification_block_for_test(),
+        None,
+        "entry-verification hold must be released (parity with success branch)"
+    );
+    // (5) Deferral count reset.
+    assert_eq!(
+        harness.driver.entry_verify_deferrals_for_test(),
+        0,
+        "entry_verify_deferrals must reset (parity with success branch)"
+    );
+    // (6) Derivation cursor rolled back to plan.rollback_l1_block.
+    assert_eq!(
+        harness.driver.derivation_last_processed_l1_for_test(),
+        plan.rollback_l1_block,
+        "derivation.rollback_to(plan.rollback_l1_block) must move the cursor"
+    );
+    // (7) Intentionally-not-mutated: consecutive_rewind_cycles. The method
+    //     explicitly preserves it because sibling-reorg is productive
+    //     recovery. Without this invariant, the safety gate (issue #36)
+    //     could trip on a first-time queue.
+    assert_eq!(
+        harness.driver.consecutive_rewind_cycles_for_test(),
+        0,
+        "consecutive_rewind_cycles MUST NOT be incremented by the helper \
+         (sibling reorg is productive recovery; bumping it would trip the safety gate)"
+    );
+}
+
+/// Wire-through for `Driver::clear_internal_state` composed with
+/// `Driver::apply_sibling_reorg_plan`. Mirrors the two-step dance the
+/// production path performs (save → clear → apply) end-to-end across the
+/// real `Driver` — not just across the free helpers. Exists because the
+/// helper-level compose test (`test_apply_sibling_reorg_plan_survives_clear_internal_state_sequence`)
+/// only asserts on `DriverRecoveryFields`, not on the real Driver's
+/// `pending_rewind_target` (which the helper can't touch because it lives
+/// behind `set_rewind_target`'s min-op wrapper).
+#[test]
+fn test_clear_then_apply_sibling_reorg_plan_on_real_driver() {
+    use crate::driver::plan_sibling_reorg_from_verify;
+    use crate::driver_test_harness::DriverTestHarness;
+
+    let mut harness = DriverTestHarness::new();
+
+    // Seed a pre-existing (deeper) rewind target so we can observe the
+    // min-op narrowing in `set_rewind_target`.
+    harness
+        .driver
+        .set_pending_sibling_reorg_for_test(Some(SiblingReorgRequest {
+            target_l2_block: 1,
+            expected_root: B256::ZERO,
+        }));
+
+    // Cold-start planner branch: rewind_target = 0,
+    // rollback_l1 = deployment_l1_block. The harness's default config uses
+    // `deployment_l1_block = 1000` (see `DriverTestHarness::default_config`).
+    let plan = plan_sibling_reorg_from_verify(
+        42,
+        B256::with_last_byte(0x99),
+        None,
+        /* deployment_l1_block = */ 1000,
+    );
+
+    harness.driver.apply_sibling_reorg_plan_for_test(plan);
+
+    assert_eq!(
+        harness.driver.pending_sibling_reorg_for_test(),
+        Some(plan.request),
+        "final: plan.request must be installed"
+    );
+    assert_eq!(
+        harness.driver.pending_rewind_target_for_test(),
+        Some(plan.rewind_target_l2),
+        "final: pending_rewind_target must be set to plan.rewind_target_l2"
+    );
+    assert_eq!(harness.driver.mode(), DriverMode::Sync);
+}
