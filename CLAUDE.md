@@ -65,8 +65,16 @@ These rules come from real bugs that took hours to diagnose. Violating them WILL
 - **Hold MUST be set BEFORE send_to_l1, not after.** If set after and tx fails, hold is active with no way to clear it. Setting before means failure triggers rewind which clears hold.
 - **Builder HALTS block production while hold is active (`step_builder` returns early).** Building during hold would accumulate blocks with advancing L1 context that mismatch after rewind, causing double rewind cycles. Hold prevents both block production and postBatch submission.
 - **Withdrawal trigger revert on L1 causes REWIND, not just a log.** If the trigger tx reverts, the block contains unconsumed withdrawal entries; the driver rewinds to strip them. Loops are broken by the `consecutive_rewind_cycles` counter + `MAX_FLUSH_MISMATCHES` threshold.
-- **Deferral exhaustion causes REWIND, not acceptance.** After `MAX_ENTRY_VERIFY_DEFERRALS=3` retries, `verify_local_block_matches_l1` returns `Err` to trigger a rewind. Previously mismatches were accepted; now they force re-derivation from `entry_block - 1` so the entry block itself gets re-derived.
-- **Rewind target is `entry_block.saturating_sub(1)`.** This ensures the block containing the entry is itself re-derived, not skipped.
+- **Deferral exhaustion behavior depends on mismatch class.** For `derived.filtering = Some(_)` (§4f-shaped), deferrals are bypassed entirely and sibling-reorg fires immediately — see Sibling Reorg section. For `derived.filtering = None` (L1 reorg, context mismatch, transient race), `MAX_ENTRY_VERIFY_DEFERRALS=3` still applies and exhaustion triggers bare rewind.
+- **Rewind target is `entry_block.saturating_sub(1)`.** For bare rewinds, this ensures the block containing the entry is itself re-derived, not skipped. The sibling-reorg path rebuilds the entry block in place (via `newPayloadV3` at the same height) rather than rewinding past it.
+
+### Sibling Reorg / Post-Commit Divergence Recovery
+- **NEVER rely on `engine_forkchoiceUpdatedV3(head=ancestor)` to rewind reth's canonical tip.** On Ethereum engine kind this is a silent no-op by Engine API spec (op-node: *"geth cannot wind back a chain without reorging to a new, previously non-canonical, block"*). Use sibling-reorg: `newPayloadV3(N') + forkchoiceUpdatedV3(head=N'.hash)`. Reference: reth's own `test_testsuite_deep_reorg`.
+- **§4f-shaped mismatches trigger sibling-reorg IMMEDIATELY.** No deferrals. Deferring wastes blocks of the 64-block depth budget (reth's `CHANGESET_CACHE_RETENTION_BLOCKS`). The fast-path in `verify_local_block_matches_l1` detects `derived.filtering = Some(_)` + state root mismatch → sets `pending_sibling_reorg` + `pending_rewind_target` atomically via `apply_sibling_reorg_plan`.
+- **NEVER commit a sibling with the wrong root.** `rebuild_block_as_sibling` MUST assert `built.state_root == expected_root` BEFORE calling `engine.new_payload`. If they differ, `apply_deferred_filtering` has a defect — bail loud, don't silently drift.
+- **Hard safety gate at 48-block depth.** `REORG_SAFETY_THRESHOLD = 48` (75% of reth's 64-block limit). When `l2_head_number - target_l2_block >= 48`, `step_builder` halts block production with a structured ERROR. Fail loud before reth's trie changeset eviction window closes.
+- **`clear_internal_state` MUST clear `pending_sibling_reorg`.** On L1 reorg / hard reset, a stale request would commit a sibling against an obsolete `expected_root`. The two legitimate dispatch sites (flush-path, verify-path) save+reinstate the request around the clear.
+- **`BlockInvalidated` is intra-process only today.** `PreconfirmedMessage::BlockInvalidated` is produced by `broadcast_sibling_reorg` and consumed by the driver's own `drain_preconfirmed_blocks`. WS transport to external fullnodes is deferred — consensus-safe because fullnodes' L1 derivation wins on mismatch.
 
 ### Continuation Entry Construction (Flash Loans)
 - **NEVER include a RESULT table entry when `extra_l2_entries` (continuations) are present.** `convert_l1_entries_to_l2_pairs` skips the `result_entry` push when `has_continuations=true`. The driver RPC path (`driver.rs`, `rpc_entries` loop) likewise skips `result_entry` when `extra_l2_entries` is non-empty. Including it causes `ExecutionNotFound` — same `actionHash` but wrong `nextAction` conflicts with Entry 0 from the continuation chain.
@@ -384,6 +392,8 @@ All E2E tests (scripts/e2e/) use dedicated keys (#2, #3, #6-#8, #10-#18). Run se
 - `is_bridge_ether_withdrawal()` / `is_bridge_withdrawal()` in cross_chain.rs — replaced by receipt-based `CrossChainCallExecuted` event scanning via `extract_l2_to_l1_tx_indices()`.
 - Bridge-specific selector fast/medium/slow detection paths in the old proxy — replaced by single generic `trace::walk_trace_tree` path that detects `executeCrossChainCall` child calls on the CCM.
 - `trigger_user` field as a separate concept from `source_address` — `trigger_user` always equaled `source_address`, so the distinction was eliminated (note: `trigger_user` still exists as a parameter name in `l2_to_l1.rs` internal functions but always receives `source_address`).
+- Bare `forkchoiceUpdatedV3(head=ancestor)` as the sole rewind primitive — replaced by sibling-reorg via `newPayloadV3(N')` + `forkchoiceUpdatedV3(head=N'.hash)` for §4f-shaped post-commit divergence (issue #36). Bare FCU rewind retained for L1-reorg / `derived.filtering = None` mismatch classes.
+- `SiblingReorgRequest.depth` field — initialized but dead; `step_builder` computes depth from `l2_head_number - target_l2_block` directly against `REORG_SAFETY_THRESHOLD = 48`.
 
 ## Build & Test
 
@@ -430,4 +440,6 @@ cargo +nightly fmt --all
 
 ## Test Coverage
 
-540 tests across unit, EVM integration, and E2E. Tests in `*_tests.rs` sibling files. The `e2e_anvil` and `evm_executor` integration tests require `anvil` running locally (and compiled contract artifacts in `contracts/sync-rollups-protocol/out/`). No clippy errors, no `unwrap()` in production code.
+662 tests across unit, EVM integration, and E2E. Both the default build and `--features test-utils` compile and pass the full suite. Tests in `*_tests.rs` sibling files. The `e2e_anvil` and `evm_executor` integration tests require `anvil` running locally (and compiled contract artifacts in `contracts/sync-rollups-protocol/out/`). No clippy errors, no `unwrap()` in production code.
+
+`DriverTestHarness` in `src/driver_test_harness.rs` (feature-gated on `test-utils`) is the supported way to construct a `Driver` with a mock engine for unit-testing the sibling-reorg machinery (`rebuild_block_as_sibling`, `apply_sibling_reorg_plan`, `find_rightmost_sibling_reorg_target`, `clear_internal_state` interactions with `pending_sibling_reorg`, etc.) without standing up reth.
