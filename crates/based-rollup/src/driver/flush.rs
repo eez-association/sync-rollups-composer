@@ -22,7 +22,8 @@ use super::Driver;
 use super::flush_plan::{Collected, FlushPlan, NoEntries, SendResult};
 use super::pending_queue::TriggerMetadata;
 use super::types::{
-    L1ConfirmedAnchor, MAX_BATCH_SIZE, SUBMISSION_COOLDOWN_SECS, TriggerExecutionResult,
+    L1ConfirmedAnchor, MAX_BATCH_SIZE, REORG_SAFETY_THRESHOLD, SUBMISSION_COOLDOWN_SECS,
+    TriggerExecutionResult, find_rightmost_sibling_reorg_target,
 };
 use crate::proposer::{GasPriceHint, PendingBlock};
 use alloy_primitives::{B256, Bytes, U256};
@@ -130,6 +131,58 @@ where
                             || b.clean_state_root.as_b256() == root
                             || b.intermediate_roots.contains(&root)
                     }) {
+                        // Issue #36 detection: scan blocks about to be drained
+                        // for the speculative-vs-clean divergence signature. If
+                        // a block's `clean_state_root == on_chain_root` but
+                        // `state_root != root`, reth canonicalized the
+                        // speculative (pre-§4f-filter) version while L1
+                        // confirmed the clean version. Reth cannot unwind
+                        // committed blocks via FCU (silent no-op per Engine
+                        // API spec), so queue a sibling reorg for the
+                        // divergent block — the subsequent re-derivation will
+                        // produce the canonical tx set and `step_sync` will
+                        // swap it in via `rebuild_block_as_sibling`.
+                        //
+                        // Record BEFORE draining so we retain the evidence
+                        // even after the blocks are popped.
+                        //
+                        // M4 (second-pass review): delegate to
+                        // `find_rightmost_sibling_reorg_target`, which scans
+                        // the window in REVERSE so the block at `pos` (the
+                        // rightmost `rposition` match above) is tried first.
+                        // Earlier blocks can coincidentally have
+                        // `clean_state_root == on_chain_root` (e.g. an empty
+                        // block whose clean root matches a later entry
+                        // block's on-chain root); a forward scan would pick
+                        // the first such match and hijack the decision.
+                        if self.pending_sibling_reorg.is_none() {
+                            if let Some(req) = find_rightmost_sibling_reorg_target(
+                                &self.pending_submissions,
+                                root,
+                                u64::from(self.consecutive_rewind_cycles),
+                                REORG_SAFETY_THRESHOLD,
+                                pos + 1,
+                            ) {
+                                let speculative_root = self
+                                    .pending_submissions
+                                    .iter()
+                                    .find(|b| b.l2_block_number == req.target_l2_block)
+                                    .map(|b| b.state_root)
+                                    .unwrap_or_default();
+                                warn!(
+                                    target: "based_rollup::driver",
+                                    target_block = req.target_l2_block,
+                                    %speculative_root,
+                                    clean_root = %req.expected_root,
+                                    on_chain_root = %root,
+                                    "issue #36: speculative/clean divergence detected at drain — \
+                                     queuing sibling reorg (reth canonicalized speculative \
+                                     version; FCU-to-ancestor is a no-op per Engine API spec)"
+                                );
+                                self.pending_sibling_reorg = Some(req);
+                            }
+                        }
+
                         for _ in 0..=pos {
                             self.pending_submissions.pop_front();
                         }
@@ -146,6 +199,64 @@ where
                 return FlushPrecheckResult::Skip;
             }
         };
+
+        // Issue #36 flush-path dispatch: if we queued a sibling reorg (either
+        // just above or in a previous cycle), force Sync mode so derivation
+        // re-runs block `target_l2_block` from L1 calldata with §4f filtering
+        // applied. `step_sync` will detect the re-derivation of a block whose
+        // number is at or below the current head and call
+        // `rebuild_block_as_sibling` to swap it in.
+        //
+        // The request must SURVIVE `clear_internal_state` — the M2 fix wipes
+        // it deliberately, so we stash and reinstate.
+        if let Some(req) = self.pending_sibling_reorg {
+            info!(
+                target: "based_rollup::driver",
+                target = req.target_l2_block,
+                expected_root = %req.expected_root,
+                pending_depth = self
+                    .l2_head_number
+                    .saturating_sub(req.target_l2_block),
+                "switching to Sync mode to re-derive block for sibling reorg"
+            );
+            let (rewind_target, rollback_l1_block) = if let Some(anchor) = self.l1_confirmed_anchor
+            {
+                (
+                    req.target_l2_block
+                        .saturating_sub(1)
+                        .max(anchor.l2_block_number),
+                    anchor.l1_block_number.saturating_sub(1),
+                )
+            } else {
+                (
+                    req.target_l2_block.saturating_sub(1),
+                    self.config.deployment_l1_block,
+                )
+            };
+            // M2: stash the request across `clear_internal_state`.
+            //
+            // Symmetry note (issue #36 third-pass review): unlike the verify
+            // fast path (`apply_sibling_reorg_plan`), this flush-path dispatch
+            // does NOT call `set_rewind_target`. This is intentional: control
+            // returns from `flush_to_l1` here with `mode == Sync`, so the
+            // subsequent `commit_batch` that would overwrite the derivation
+            // rollback never runs (only `step_builder`'s trailing
+            // `commit_batch` was the danger). If a future refactor moves
+            // `commit_batch` or any rollback-invalidating call to run AFTER
+            // this return, the rewind target MUST be set here to match
+            // `apply_sibling_reorg_plan`.
+            let saved_req = req;
+            self.clear_internal_state();
+            self.pending_sibling_reorg = Some(saved_req);
+            self.derivation.set_last_derived_l2_block(rewind_target);
+            self.derivation.rollback_to(rollback_l1_block);
+            self.mode = super::DriverMode::Sync;
+            self.synced
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            // Do NOT bump consecutive_rewind_cycles — sibling reorg is a
+            // single productive recovery, not a rewind cycle.
+            return FlushPrecheckResult::Skip;
+        }
 
         if self.pending_submissions.is_empty() && self.pending_l1.is_empty() {
             return FlushPrecheckResult::Skip;

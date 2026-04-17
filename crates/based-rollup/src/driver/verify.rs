@@ -24,7 +24,10 @@
 
 use super::Driver;
 use super::hold::{DeferralResult, MAX_ENTRY_VERIFY_DEFERRALS};
-use super::types::{DESIRED_GAS_LIMIT, DriverMode, VerificationDecision, calc_gas_limit};
+use super::types::{
+    DESIRED_GAS_LIMIT, DriverMode, VerificationDecision, VerifyMismatchAction, calc_gas_limit,
+    classify_verify_mismatch, plan_sibling_reorg_from_verify,
+};
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, Bytes};
 use eyre::{OptionExt, Result, WrapErr};
@@ -183,66 +186,116 @@ where
         // productive — re-derivation with filtered txs produces the correct root.
         let header_root = local_header.state_root();
         if header_root != derived.state_root {
-            // Entry-bearing block with pending verification: the consumption event
-            // (ExecutionConsumed) may land 1-2 L1 blocks AFTER the postBatch due to
-            // hold-then-forward timing. We defer verification a few times to give the
-            // consumption event time to land on L1.
+            // Dispatch is centralized in `classify_verify_mismatch` (pure fn)
+            // so the branching is testable without instantiating a driver. The
+            // classifier does NOT mutate state — the match arms below carry
+            // the identical side-effects the old inline branching did.
             //
-            // After MAX_ENTRY_VERIFY_DEFERRALS, the entry's bridge tx likely reverted
-            // permanently. `EntryVerificationHold::defer` returns
-            // `DeferralResult::MustRewind` once the counter exhausts, with the target
-            // pre-computed as `entry_block - 1` (invariant #10).
-            if self.hold.is_armed_for(derived.l2_block_number) {
-                match self.hold.defer() {
-                    DeferralResult::Continue { deferrals } => {
-                        warn!(
-                            target: "based_rollup::driver",
-                            l2_block = derived.l2_block_number,
-                            deferrals,
-                            max_deferrals = MAX_ENTRY_VERIFY_DEFERRALS,
-                            %header_root,
-                            l1_state_root = %derived.state_root,
-                            "entry-bearing block state root mismatch — consumption event \
-                             may be in a later L1 block, deferring verification"
-                        );
-                        // Return Err to trigger retry via main loop backoff.
-                        // The exponential backoff (2+4+8=14s for 3 deferrals) gives
-                        // L1 time to mine the user's tx and emit ExecutionConsumed.
-                        return Err(eyre::eyre!(
-                            "entry verification deferred for block {} (attempt {}/{})",
-                            derived.l2_block_number,
-                            deferrals,
-                            MAX_ENTRY_VERIFY_DEFERRALS
-                        ));
+            // Issue #36 fast-path (C1 gate): when derivation flagged this
+            // block as needing §4f filtering, the mismatch is provably NOT a
+            // timing race — it's the speculative/clean divergence that the
+            // deferral loop cannot resolve. Queue a sibling reorg immediately.
+            let is_pending_entry_block = self.hold.is_armed_for(derived.l2_block_number);
+            let action = classify_verify_mismatch(
+                derived.filtering.is_some(),
+                self.pending_sibling_reorg.is_some(),
+                is_pending_entry_block,
+                self.hold.deferrals(),
+                MAX_ENTRY_VERIFY_DEFERRALS,
+            );
+            match action {
+                VerifyMismatchAction::FastPathSiblingReorg => {
+                    warn!(
+                        target: "based_rollup::driver",
+                        l2_block = derived.l2_block_number,
+                        %header_root,
+                        l1_state_root = %derived.state_root,
+                        "issue #36: §4f-filtered divergence at verify — queuing sibling \
+                         reorg immediately (skipping deferrals; L1 is already definitive)"
+                    );
+                    let plan = plan_sibling_reorg_from_verify(
+                        derived.l2_block_number,
+                        derived.state_root,
+                        self.l1_confirmed_anchor,
+                        self.config.deployment_l1_block,
+                    );
+                    self.apply_sibling_reorg_plan(plan);
+                    return Ok(VerificationDecision::SiblingReorgQueued {
+                        target_l2_block: derived.l2_block_number,
+                        expected_root: derived.state_root,
+                    });
+                }
+                VerifyMismatchAction::DeferEntryVerify => {
+                    // Existing hold-defer branch — the classifier identified
+                    // `is_pending_entry_block && deferrals < MAX-1`.
+                    match self.hold.defer() {
+                        DeferralResult::Continue { deferrals } => {
+                            warn!(
+                                target: "based_rollup::driver",
+                                l2_block = derived.l2_block_number,
+                                deferrals,
+                                max_deferrals = MAX_ENTRY_VERIFY_DEFERRALS,
+                                %header_root,
+                                l1_state_root = %derived.state_root,
+                                "entry-bearing block state root mismatch — consumption event \
+                                 may be in a later L1 block, deferring verification"
+                            );
+                            return Err(eyre::eyre!(
+                                "entry verification deferred for block {} (attempt {}/{})",
+                                derived.l2_block_number,
+                                deferrals,
+                                MAX_ENTRY_VERIFY_DEFERRALS
+                            ));
+                        }
+                        DeferralResult::MustRewind {
+                            target: rewind_target,
+                        } => {
+                            // Classifier promised `Continue`; this branch is
+                            // only reached if the hold was mutated between
+                            // the classify call and the `defer` call. Handle
+                            // defensively by rewinding.
+                            let rollback_l1_block = if let Some(anchor) = self.l1_confirmed_anchor {
+                                anchor.l1_block_number.saturating_sub(1)
+                            } else {
+                                self.config.deployment_l1_block
+                            };
+                            self.rewind_to_re_derive(rewind_target, rollback_l1_block);
+                            return Ok(VerificationDecision::MismatchDeferExhausted {
+                                rewind_target,
+                            });
+                        }
+                        DeferralResult::NotArmed => {
+                            // Classifier said `is_pending_entry_block=true`;
+                            // shouldn't happen. Fall through to generic rewind.
+                        }
                     }
-                    DeferralResult::MustRewind {
-                        target: rewind_target,
-                    } => {
-                        // Exhausted deferrals — entry likely not consumed (user's L1 tx
-                        // reverted or partial consumption). Rewind to re-derive the block
-                        // with §4f filtering, which produces the correct nonces for
-                        // subsequent blocks. Without rewind, fullnodes diverge permanently.
-                        warn!(
-                            target: "based_rollup::driver",
-                            l2_block = derived.l2_block_number,
-                            deferrals = MAX_ENTRY_VERIFY_DEFERRALS,
-                            %header_root,
-                            l1_state_root = %derived.state_root,
-                            "entry not consumed after max deferrals — rewinding to rebuild \
-                             with §4f-filtered txs and correct nonces"
-                        );
-                        let rollback_l1_block = if let Some(anchor) = self.l1_confirmed_anchor {
-                            anchor.l1_block_number.saturating_sub(1)
-                        } else {
-                            self.config.deployment_l1_block
-                        };
-                        self.rewind_to_re_derive(rewind_target, rollback_l1_block);
-                        return Ok(VerificationDecision::MismatchDeferExhausted { rewind_target });
-                    }
-                    DeferralResult::NotArmed => {
-                        // Unreachable: we checked `is_armed_for(...)` above.
-                        // Fall through to the generic mismatch handling below.
-                    }
+                }
+                VerifyMismatchAction::ExhaustedDeferralRewind => {
+                    // Exhausted deferrals — entry likely not consumed. Rewind
+                    // to re-derive the block with §4f filtering.
+                    let rewind_target = match self.hold.defer() {
+                        DeferralResult::MustRewind { target } => target,
+                        _ => derived.l2_block_number.saturating_sub(1),
+                    };
+                    warn!(
+                        target: "based_rollup::driver",
+                        l2_block = derived.l2_block_number,
+                        deferrals = MAX_ENTRY_VERIFY_DEFERRALS,
+                        %header_root,
+                        l1_state_root = %derived.state_root,
+                        "entry not consumed after max deferrals — rewinding to rebuild \
+                         with §4f-filtered txs and correct nonces"
+                    );
+                    let rollback_l1_block = if let Some(anchor) = self.l1_confirmed_anchor {
+                        anchor.l1_block_number.saturating_sub(1)
+                    } else {
+                        self.config.deployment_l1_block
+                    };
+                    self.rewind_to_re_derive(rewind_target, rollback_l1_block);
+                    return Ok(VerificationDecision::MismatchDeferExhausted { rewind_target });
+                }
+                VerifyMismatchAction::GenericMismatchRewind => {
+                    // Fall through to the generic rewind below.
                 }
             }
 

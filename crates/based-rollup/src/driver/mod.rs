@@ -3,7 +3,7 @@
 //! Manages transitions between Sync, Builder, and Fullnode modes, drives the
 //! Engine API, and coordinates derivation, block building, and L1 submission.
 
-use crate::builder_sync::{BuilderSync, PreconfirmedBlock};
+use crate::builder_sync::{BuilderSync, PreconfirmedBlock, PreconfirmedMessage};
 use crate::config::RollupConfig;
 use crate::derivation::DerivationPipeline;
 use crate::evm_config::RollupEvmConfig;
@@ -63,6 +63,17 @@ pub struct Driver<P, Pool> {
     preconfirmed_rx: Option<mpsc::Receiver<PreconfirmedBlock>>,
     /// Preconfirmed block hashes by block number (for L1 verification).
     preconfirmed_hashes: HashMap<u64, B256>,
+    /// Receiver for internal preconfirmation control messages
+    /// (`BlockInvalidated` after sibling reorg, etc.). Drained alongside
+    /// `preconfirmed_rx` in `drain_preconfirmed_blocks`. Separate from the
+    /// WS-backed channel so that `BuilderSync` remains backward-compatible.
+    /// See issue #36.
+    preconfirmed_message_rx: Option<mpsc::Receiver<PreconfirmedMessage>>,
+    /// Sender paired with `preconfirmed_message_rx`. Held by the driver itself
+    /// and used by `broadcast_sibling_reorg` to publish `BlockInvalidated` on
+    /// successful sibling reorg. Left `None` when sibling reorg is disabled
+    /// (e.g., in tests that construct the driver manually).
+    sibling_reorg_broadcast_tx: Option<mpsc::Sender<PreconfirmedMessage>>,
     /// Blocks built locally but not yet submitted to L1 (builder mode).
     pending_submissions: VecDeque<PendingBlock>,
     /// Timestamp of last L1 submission failure (for cooldown).
@@ -74,6 +85,14 @@ pub struct Driver<P, Pool> {
     /// If set, the chain should be rewound to this L2 block before the next step.
     /// Set when `verify_local_block_matches_l1` detects a state root or L1 context mismatch.
     pending_rewind_target: Option<u64>,
+    /// If set, a sibling-reorg recovery is in flight targeting this L2 block
+    /// (issue #36). Consumed by `step_sync` which replaces the canonical
+    /// block `target_l2_block` via `rebuild_block_as_sibling` (newPayloadV3 +
+    /// forkchoiceUpdatedV3 on a sibling hash). Gated by the safety-gate in
+    /// `step_builder`: if depth reaches `REORG_SAFETY_THRESHOLD`, block
+    /// production halts to prevent crossing reth's `MAX_REORG_DEPTH` eviction
+    /// window.
+    pending_sibling_reorg: Option<SiblingReorgRequest>,
     /// Entry verification hold — the state machine governing
     /// "builder halts + submissions pause while an entry-bearing
     /// block awaits derivation verification". See
@@ -153,9 +172,32 @@ pub use flush_plan::{
 pub use hold::{DeferralResult, EntryVerificationHold, MAX_ENTRY_VERIFY_DEFERRALS};
 pub use pending_queue::{BlockEntryMix, PendingL1Group, PendingL1SubmissionQueue, TriggerMetadata};
 pub use types::{BuiltBlock, DriverMode};
+// Re-exports of sibling-reorg / recovery helpers (issue #36). Consumed by
+// tests (`driver_tests.rs` via `use super::*`) and by
+// `driver_test_harness.rs`. Production code in this module accesses the same
+// items through their fully-qualified `types::` paths or through the
+// submodules' direct `use super::types::...` imports; consequently rustc
+// flags these re-exports as unused at the lib-only build. Suppress the lint
+// at the re-export site rather than splitting across a `#[cfg(...)]` gate so
+// external tests see a stable API surface regardless of build flags.
+#[allow(unused_imports)]
+pub(crate) use types::{DriverRecoveryFields, L1ConfirmedAnchor};
+#[allow(unused_imports)]
+pub(crate) use types::{
+    EngineClient, MAX_REORG_DEPTH, REORG_SAFETY_THRESHOLD, SiblingReorgDecision,
+    SiblingReorgRequest, SiblingReorgVerifyPlan, SiblingSubmitOutcome, VerifyMismatchAction,
+    apply_sibling_reorg_plan_fields, check_sibling_state_root_matches, classify_verify_mismatch,
+    clear_fields_on_sibling_reorg_success, clear_recovery_state, decide_divergence_recovery,
+    find_rightmost_sibling_reorg_target, plan_sibling_reorg_from_verify, reorg_depth_exceeded,
+    submit_fork_choice_with_retry, submit_sibling_payload,
+};
+
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(unused_imports)]
+pub(crate) use types::submit_sibling_after_guard;
 use types::{
-    CHECKPOINT_INTERVAL, FORK_CHOICE_DEPTH, L1ConfirmedAnchor, MAX_BACKOFF_SECS,
-    MAX_CONSECUTIVE_FAILURES, MIN_L1_CALL_INTERVAL, TxJournalEntry,
+    CHECKPOINT_INTERVAL, FORK_CHOICE_DEPTH, MAX_BACKOFF_SECS, MAX_CONSECUTIVE_FAILURES,
+    MIN_L1_CALL_INTERVAL, TxJournalEntry,
 };
 
 // Test-only re-exports: `driver_tests.rs` uses `use super::*;` and references
@@ -268,11 +310,14 @@ where
             last_checkpointed_l1_block: 0,
             preconfirmed_rx: None,
             preconfirmed_hashes: HashMap::new(),
+            preconfirmed_message_rx: None,
+            sibling_reorg_broadcast_tx: None,
             pending_submissions: VecDeque::new(),
             last_submission_failure: None,
             health_status_tx,
             builder_sync_handle: None,
             pending_rewind_target: None,
+            pending_sibling_reorg: None,
             hold: EntryVerificationHold::Clear,
             last_new_l1_block_time: std::time::Instant::now(),
             last_seen_l1_block: 0,
@@ -298,6 +343,159 @@ where
 
     pub fn mode(&self) -> DriverMode {
         self.mode
+    }
+
+    // --- Test-only accessors (issue #36) -----------------------------------
+    //
+    // Feature-gated on `test-utils` (see `Cargo.toml`) so these are NEVER
+    // compiled into the production binary. They exist so integration tests
+    // in `driver_tests.rs` / `driver_test_harness.rs` can assert on the
+    // Driver's private recovery state without granting all of
+    // `driver_tests.rs` access to every private field.
+    //
+    // Naming convention: `_for_test` suffix.
+    //
+    // `#[allow(dead_code)]` on the not-currently-used accessors: these are a
+    // stable API surface for future wire-through tests. Keeping them around
+    // pays for itself the first time a new test needs one.
+
+    /// Test-only: snapshot of `pending_sibling_reorg`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn pending_sibling_reorg_for_test(&self) -> Option<SiblingReorgRequest> {
+        self.pending_sibling_reorg
+    }
+
+    /// Test-only: snapshot of `pending_rewind_target`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn pending_rewind_target_for_test(&self) -> Option<u64> {
+        self.pending_rewind_target
+    }
+
+    /// Test-only: snapshot of the `hold` (entry-verification) state.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn hold_for_test(&self) -> EntryVerificationHold {
+        self.hold
+    }
+
+    /// Test-only: snapshot of `consecutive_rewind_cycles`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn consecutive_rewind_cycles_for_test(&self) -> u32 {
+        self.consecutive_rewind_cycles
+    }
+
+    /// Test-only: snapshot of `consecutive_flush_mismatches`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn consecutive_flush_mismatches_for_test(&self) -> u32 {
+        self.consecutive_flush_mismatches
+    }
+
+    /// Test-only: snapshot of `head_hash`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn head_hash_for_test(&self) -> B256 {
+        self.head_hash
+    }
+
+    /// Test-only: snapshot of `l2_head_number`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn l2_head_number_for_test(&self) -> u64 {
+        self.l2_head_number
+    }
+
+    /// Test-only: install a sibling-reorg request without running a plan. Used
+    /// by wire-through tests to seed the field before calling a production
+    /// method (e.g. `clear_internal_state`).
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_pending_sibling_reorg_for_test(&mut self, req: Option<SiblingReorgRequest>) {
+        self.pending_sibling_reorg = req;
+    }
+
+    /// Test-only: arm the entry-verification hold for a specific block.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn arm_hold_for_test(&mut self, entry_block: u64) {
+        self.hold.arm(entry_block);
+    }
+
+    /// Test-only: clear the entry-verification hold.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn clear_hold_for_test(&mut self) {
+        self.hold.clear();
+    }
+
+    /// Test-only: install a value for `consecutive_rewind_cycles`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_consecutive_rewind_cycles_for_test(&mut self, n: u32) {
+        self.consecutive_rewind_cycles = n;
+    }
+
+    /// Test-only: install a value for `consecutive_flush_mismatches`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_consecutive_flush_mismatches_for_test(&mut self, n: u32) {
+        self.consecutive_flush_mismatches = n;
+    }
+
+    /// Test-only: snapshot of the `l1_confirmed_anchor` field.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn l1_confirmed_anchor_for_test(&self) -> Option<L1ConfirmedAnchor> {
+        self.l1_confirmed_anchor
+    }
+
+    /// Test-only: install an L1-confirmed anchor (controls the warm/cold-start
+    /// branch in `plan_sibling_reorg_from_verify`).
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_l1_confirmed_anchor_for_test(&mut self, anchor: Option<L1ConfirmedAnchor>) {
+        self.l1_confirmed_anchor = anchor;
+    }
+
+    /// Test-only: direct access to the derivation pipeline for assertions on
+    /// the L1 cursor after `apply_sibling_reorg_plan` rolls back.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn derivation_last_processed_l1_for_test(&self) -> u64 {
+        self.derivation.last_processed_l1_block()
+    }
+
+    /// Test-only: seed the derivation pipeline's L1 cursor. Used by
+    /// wire-through tests to establish the "before" snapshot
+    /// `apply_sibling_reorg_plan` subsequently rolls back from.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn seed_derivation_cursor_for_test(&mut self, l1_block: u64) {
+        self.derivation.resume_from(l1_block);
+    }
+
+    /// Test-only: invoke the private `clear_internal_state` method directly.
+    /// Exists so the wire-through test can drive the REAL production method
+    /// (not the free `clear_recovery_state` helper it delegates to) and
+    /// assert the complete post-state — including the save/reinstate dance
+    /// callers perform around it.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn clear_internal_state_for_test(&mut self) {
+        self.clear_internal_state();
+    }
+
+    /// Test-only: invoke the private `apply_sibling_reorg_plan` method
+    /// directly. Exists so the wire-through test can drive the REAL method
+    /// (which internally calls `clear_internal_state` + the free
+    /// `apply_sibling_reorg_plan_fields` helper) end-to-end.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub(crate) fn apply_sibling_reorg_plan_for_test(&mut self, plan: SiblingReorgVerifyPlan) {
+        self.apply_sibling_reorg_plan(plan);
     }
 
     /// Returns the active L1 provider, switching between primary and fallback
@@ -491,6 +689,16 @@ where
             });
             self.builder_sync_handle = Some(handle);
         }
+
+        // Wire the internal sibling-reorg broadcast channel unconditionally —
+        // the builder is the sole publisher (broadcasts BlockInvalidated after
+        // a successful sibling reorg); both builder and fullnode drivers
+        // subscribe to drain it (so a future WS relay can forward the same
+        // messages to external subscribers without a second wiring path).
+        // See issue #36.
+        let (message_tx, message_rx) = mpsc::channel(64);
+        self.sibling_reorg_broadcast_tx = Some(message_tx);
+        self.preconfirmed_message_rx = Some(message_rx);
 
         info!(
             target: "based_rollup::driver",
@@ -713,34 +921,122 @@ where
     /// locally-derived block hash differs from the builder's preconfirmed hash,
     /// the fullnode knows something is wrong before waiting for L1 finality).
     fn drain_preconfirmed_blocks(&mut self) {
-        let Some(rx) = &mut self.preconfirmed_rx else {
-            return;
-        };
-        while let Ok(block) = rx.try_recv() {
-            // Reject preconfirmations too far ahead of current head
-            if block.block_number > self.l2_head_number.saturating_add(1000) {
-                warn!(
+        if let Some(rx) = &mut self.preconfirmed_rx {
+            while let Ok(block) = rx.try_recv() {
+                // Reject preconfirmations too far ahead of current head
+                if block.block_number > self.l2_head_number.saturating_add(1000) {
+                    warn!(
+                        target: "based_rollup::driver",
+                        block_number = block.block_number,
+                        head = self.l2_head_number,
+                        "ignoring preconfirmation far ahead of head"
+                    );
+                    continue;
+                }
+                debug!(
                     target: "based_rollup::driver",
                     block_number = block.block_number,
-                    head = self.l2_head_number,
-                    "ignoring preconfirmation far ahead of head"
+                    block_hash = %block.block_hash,
+                    "received preconfirmed block from builder"
                 );
-                continue;
+                self.preconfirmed_hashes
+                    .insert(block.block_number, block.block_hash);
             }
-            debug!(
-                target: "based_rollup::driver",
-                block_number = block.block_number,
-                block_hash = %block.block_hash,
-                "received preconfirmed block from builder"
-            );
-            self.preconfirmed_hashes
-                .insert(block.block_number, block.block_hash);
+        }
+
+        // Drain internal control messages (issue #36): BlockInvalidated updates
+        // the cached hash for a block that was replaced by a sibling reorg, so
+        // `verify_local_block_matches_l1` doesn't keep rejecting the new hash.
+        if let Some(rx) = &mut self.preconfirmed_message_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    PreconfirmedMessage::BlockArrived(block) => {
+                        // Mirror the WS-path semantics for future external producers.
+                        if block.block_number > self.l2_head_number.saturating_add(1000) {
+                            continue;
+                        }
+                        self.preconfirmed_hashes
+                            .insert(block.block_number, block.block_hash);
+                    }
+                    PreconfirmedMessage::BlockInvalidated {
+                        block_number,
+                        new_hash,
+                    } => {
+                        // Apply the same +1000 safety cap as `BlockArrived` above
+                        // for defense-in-depth: a malicious or misbehaving
+                        // broadcaster must not be able to poison the cache with
+                        // arbitrary future-block hashes.
+                        if block_number > self.l2_head_number.saturating_add(1000) {
+                            warn!(
+                                target: "based_rollup::driver",
+                                block_number,
+                                head = self.l2_head_number,
+                                %new_hash,
+                                "ignoring BlockInvalidated far ahead of head"
+                            );
+                            continue;
+                        }
+                        debug!(
+                            target: "based_rollup::driver",
+                            block_number,
+                            %new_hash,
+                            "BlockInvalidated — adopting sibling hash in preconfirmed cache"
+                        );
+                        self.preconfirmed_hashes.insert(block_number, new_hash);
+                    }
+                }
+            }
         }
 
         // Prune stale entries more than 1000 blocks behind head
         if self.preconfirmed_hashes.len() > 1000 {
             let cutoff = self.l2_head_number.saturating_sub(1000);
             self.preconfirmed_hashes.retain(|&k, _| k >= cutoff);
+        }
+    }
+
+    /// Broadcast a `PreconfirmedMessage::BlockInvalidated` to any subscribed
+    /// listeners (fullnodes driven by the builder's preconfirmation channel).
+    ///
+    /// Wired up when the internal sibling-reorg broadcast channel is present.
+    /// No-op otherwise — logged at debug.
+    fn broadcast_sibling_reorg(&self, block_number: u64, new_hash: B256) {
+        let Some(tx) = &self.sibling_reorg_broadcast_tx else {
+            debug!(
+                target: "based_rollup::driver",
+                block_number,
+                %new_hash,
+                "no sibling-reorg broadcast channel wired — skipping invalidation broadcast"
+            );
+            return;
+        };
+        let msg = PreconfirmedMessage::BlockInvalidated {
+            block_number,
+            new_hash,
+        };
+        match tx.try_send(msg) {
+            Ok(()) => {
+                debug!(
+                    target: "based_rollup::driver",
+                    block_number,
+                    %new_hash,
+                    "broadcast BlockInvalidated after sibling reorg"
+                );
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    target: "based_rollup::driver",
+                    block_number,
+                    "sibling-reorg broadcast channel full — BlockInvalidated dropped"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug!(
+                    target: "based_rollup::driver",
+                    block_number,
+                    "sibling-reorg broadcast channel closed"
+                );
+            }
         }
     }
 
@@ -825,6 +1121,66 @@ where
         }
 
         for block in &batch.blocks {
+            // Issue #36 sibling reorg: if a pending reorg request targets this
+            // block AND it's already canonical in reth at a different hash,
+            // swap it in via `rebuild_block_as_sibling` (newPayload+FCU on a
+            // sibling hash) — FCU-to-ancestor is a no-op per Engine API spec.
+            //
+            // This branch MUST run BEFORE the "skip blocks already have"
+            // short-circuit below; otherwise the sibling-reorg target is
+            // silently skipped and the request sits idle until the safety
+            // gate trips.
+            if let Some(req) = self.pending_sibling_reorg {
+                if block.l2_block_number == req.target_l2_block
+                    && block.l2_block_number <= self.l2_head_number
+                {
+                    let effective_transactions = self.apply_deferred_filtering(block)?;
+                    match self
+                        .rebuild_block_as_sibling(
+                            block.l2_block_number,
+                            block.l2_timestamp,
+                            block.l1_info.l1_block_hash,
+                            block.l1_info.l1_block_number,
+                            &effective_transactions,
+                            req.expected_root,
+                        )
+                        .await
+                    {
+                        Ok(built) => {
+                            info!(
+                                target: "based_rollup::driver",
+                                l2_block = block.l2_block_number,
+                                new_hash = %built.hash,
+                                expected_root = %req.expected_root,
+                                state_root = %built.state_root,
+                                "issue #36: sibling reorg completed during re-derivation"
+                            );
+                            // Centralized field clear on success: pending
+                            // sibling reorg + cycle counters + entry hold.
+                            // Any regression that drops one of these causes
+                            // a different livelock class (e.g. hold persists
+                            // → `step_builder` returns early forever).
+                            clear_fields_on_sibling_reorg_success(
+                                &mut self.pending_sibling_reorg,
+                                &mut self.consecutive_rewind_cycles,
+                                &mut self.consecutive_flush_mismatches,
+                                &mut self.hold,
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            error!(
+                                target: "based_rollup::driver",
+                                l2_block = block.l2_block_number,
+                                %err,
+                                "sibling reorg rebuild failed — leaving request in place for retry"
+                            );
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+
             // Skip blocks we already have
             if block.l2_block_number <= self.l2_head_number {
                 continue;

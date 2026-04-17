@@ -10,6 +10,8 @@ pub mod consensus;
 pub mod cross_chain;
 pub mod derivation;
 pub mod driver;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod driver_test_harness;
 pub mod entry_queue;
 pub mod evm_config;
 pub mod execution_planner;

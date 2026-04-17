@@ -86,7 +86,17 @@ hex = "0.4"
 eyre.workspace = true
 
 [features]
-test-utils = []
+# Exposes `driver_test_harness` and `_for_test` accessors on `Driver` so
+# sibling crates / external integration tests can construct a Driver with
+# reth's in-memory mocks. Never enabled by the production binary.
+#
+# Propagates `test-utils` to the reth crates whose test helpers
+# (`create_test_provider_factory`, `testing_pool`) the harness depends on.
+test-utils = [
+    "reth-evm/test-utils",
+    "reth-provider/test-utils",
+    "reth-transaction-pool/test-utils",
+]
 
 [dev-dependencies]
 based-rollup = { path = ".", features = ["test-utils"] }
@@ -94,6 +104,7 @@ alloy-eips.workspace = true
 alloy-signer.workspace = true
 reth-evm = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
+reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
 hex = "0.4"
 criterion = "0.5"
