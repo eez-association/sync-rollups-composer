@@ -204,9 +204,9 @@ pub struct BuiltBlock {
 
 /// Last L1-confirmed batch anchor — used for efficient rollback instead of genesis.
 #[derive(Debug, Clone, Copy)]
-struct L1ConfirmedAnchor {
-    l2_block_number: u64,
-    l1_block_number: u64,
+pub(crate) struct L1ConfirmedAnchor {
+    pub(crate) l2_block_number: u64,
+    pub(crate) l1_block_number: u64,
 }
 
 /// Pending sibling-reorg request (issue #36).
@@ -218,17 +218,18 @@ struct L1ConfirmedAnchor {
 /// `expected_root`, the driver calls `rebuild_block_as_sibling` instead of
 /// `build_and_insert_block` (which would fail with `expected sequential block`
 /// because the target is already canonical in reth).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SiblingReorgRequest {
     /// L2 block number to rebuild as sibling.
     pub(crate) target_l2_block: u64,
     /// State root the rebuilt block is expected to produce (equal to the
     /// §4f-filtered root observed on L1).
     pub(crate) expected_root: B256,
-    /// How many consecutive rewind cycles have elapsed without resolution.
-    /// Used by the safety gate in `step_builder` to halt block production
-    /// before crossing reth's eviction window.
-    pub(crate) depth: u64,
+    // Note: a prior design carried a `depth` field initialised from
+    // `consecutive_rewind_cycles`. It was never consulted — `step_builder`
+    // computes the safety-gate depth from `l2_head_number - target_l2_block`,
+    // which is the single source of truth. Removed to reduce API surface (see
+    // issue #36 second-pass review).
 }
 
 /// Trigger metadata for L1 trigger groups. Groups that need L1 trigger txs
@@ -440,6 +441,258 @@ pub(crate) fn decide_divergence_recovery(
 /// means reth has evicted the state needed to rebuild.
 pub(crate) fn reorg_depth_exceeded(depth: u64, threshold: u64) -> bool {
     depth >= threshold
+}
+
+/// Pure detection: scan the first `window_len` entries of `pending` looking
+/// for a block that triggers a sibling-reorg recovery against `on_chain_root`.
+///
+/// ## Direction (M4 — issue #36 second-pass review)
+///
+/// Iterates in REVERSE. `flush_to_l1` already selected the rightmost match via
+/// `rposition` at line ~2117 (the block whose `state_root /
+/// clean_state_root / intermediate_roots` contains `on_chain_root`). The
+/// caller passes `window_len = pos + 1`; we scan `pending[0..window_len]`
+/// from the back, so the block at `pos` — the one `rposition` found — is
+/// tried first. An earlier block that coincidentally has
+/// `clean_state_root == on_chain_root` would otherwise hijack the decision.
+///
+/// Returns the first block's `SiblingReorgRequest` (rightmost within the
+/// window) when `decide_divergence_recovery` returns `SiblingReorg`.
+pub(crate) fn find_rightmost_sibling_reorg_target(
+    pending: &VecDeque<crate::proposer::PendingBlock>,
+    on_chain_root: B256,
+    reorg_depth: u64,
+    safety_threshold: u64,
+    window_len: usize,
+) -> Option<SiblingReorgRequest> {
+    let cap = window_len.min(pending.len());
+    for b in pending.iter().take(cap).rev() {
+        match decide_divergence_recovery(b, on_chain_root, reorg_depth, safety_threshold) {
+            SiblingReorgDecision::SiblingReorg {
+                target_block,
+                filtered_root,
+            } => {
+                return Some(SiblingReorgRequest {
+                    target_l2_block: target_block,
+                    expected_root: filtered_root,
+                });
+            }
+            SiblingReorgDecision::BareRewind | SiblingReorgDecision::Halt => continue,
+        }
+    }
+    None
+}
+
+/// The full state transition that the sibling-reorg fast path in
+/// `verify_local_block_matches_l1` must apply when it detects a §4f-filtered
+/// divergence at an entry-bearing block.
+///
+/// Kept as a pure data struct so tests can assert field-by-field exactly what
+/// the driver is expected to do — in particular that `pending_rewind_target`
+/// is set alongside `pending_sibling_reorg` (C1 regression).
+///
+/// Produced by [`plan_sibling_reorg_from_verify`]; consumed by
+/// [`Driver::apply_sibling_reorg_plan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SiblingReorgVerifyPlan {
+    /// The sibling-reorg request to queue. Target = divergent block; expected
+    /// root = L1-derived state root.
+    pub(crate) request: SiblingReorgRequest,
+    /// L2 block to rewind to (block before the divergent entry block).
+    pub(crate) rewind_target_l2: u64,
+    /// L1 block to roll derivation back to. Either
+    /// `anchor.l1_block_number - 1` (when an L1 anchor exists) or
+    /// `deployment_l1_block` (cold start).
+    pub(crate) rollback_l1_block: u64,
+}
+
+/// Pure planner for the sibling-reorg fast path in
+/// `verify_local_block_matches_l1`.
+///
+/// Separating this computation from the driver's `&mut self` state mutation
+/// lets us unit-test that the fast path sets ALL of `pending_sibling_reorg`,
+/// `pending_rewind_target`, and the L1 rollback cursor — without spinning up
+/// a real reth driver.
+///
+/// Parameters mirror the driver's internal knobs: `entry_block` is the L2
+/// block number where derivation detected the divergence; `expected_root` is
+/// the L1-derived root that the re-built sibling must produce; `anchor` is the
+/// last L1-confirmed batch anchor (if any); `deployment_l1_block` is the L1
+/// block at which the rollup was deployed (used when there's no anchor yet).
+pub(crate) fn plan_sibling_reorg_from_verify(
+    entry_block: u64,
+    expected_root: B256,
+    anchor: Option<L1ConfirmedAnchor>,
+    deployment_l1_block: u64,
+) -> SiblingReorgVerifyPlan {
+    let (rewind_target_l2, rollback_l1_block) = if let Some(anchor) = anchor {
+        (
+            entry_block.saturating_sub(1),
+            anchor.l1_block_number.saturating_sub(1),
+        )
+    } else {
+        (0u64, deployment_l1_block)
+    };
+    SiblingReorgVerifyPlan {
+        request: SiblingReorgRequest {
+            target_l2_block: entry_block,
+            expected_root,
+        },
+        rewind_target_l2,
+        rollback_l1_block,
+    }
+}
+
+/// Narrow abstraction over the Engine API calls used during a sibling reorg.
+///
+/// Exists purely so the sibling-reorg submission path can be unit-tested
+/// against a mock. The real implementation delegates to
+/// `reth_engine_primitives::ConsensusEngineHandle<EthEngineTypes>`; the mock
+/// (in `driver_tests.rs`) records calls in order and returns scripted
+/// responses. The trait surface is intentionally minimal — only the two
+/// methods actually used by `submit_sibling_payload`.
+#[allow(async_fn_in_trait)]
+pub(crate) trait EngineClient {
+    /// Submit a new payload to the engine. Mirrors
+    /// `ConsensusEngineHandle::new_payload`.
+    async fn new_payload(&self, payload: ExecutionData) -> Result<alloy_rpc_types_engine::PayloadStatus>;
+
+    /// Submit a forkchoice update to the engine. Mirrors
+    /// `ConsensusEngineHandle::fork_choice_updated`.
+    async fn fork_choice_updated(
+        &self,
+        state: ForkchoiceState,
+        payload_attrs: Option<PayloadAttributes>,
+        version: EngineApiMessageVersion,
+    ) -> Result<ForkchoiceUpdated>;
+}
+
+impl EngineClient for ConsensusEngineHandle<EthEngineTypes> {
+    async fn new_payload(
+        &self,
+        payload: ExecutionData,
+    ) -> Result<alloy_rpc_types_engine::PayloadStatus> {
+        ConsensusEngineHandle::new_payload(self, payload)
+            .await
+            .map_err(|e| eyre::eyre!("engine new_payload failed: {e}"))
+    }
+
+    async fn fork_choice_updated(
+        &self,
+        state: ForkchoiceState,
+        payload_attrs: Option<PayloadAttributes>,
+        version: EngineApiMessageVersion,
+    ) -> Result<ForkchoiceUpdated> {
+        ConsensusEngineHandle::fork_choice_updated(self, state, payload_attrs, version)
+            .await
+            .map_err(|e| eyre::eyre!("engine fork_choice_updated failed: {e}"))
+    }
+}
+
+/// Outcome of `submit_sibling_payload` — reports what the engine did so the
+/// caller (the sibling-reorg orchestrator) can mutate driver state precisely.
+///
+/// Kept as its own struct so the submission helper is a pure function over the
+/// engine, with no driver field access. Tests exercise it directly against a
+/// mock engine.
+#[derive(Debug, Clone)]
+pub(crate) struct SiblingSubmitOutcome {
+    /// Final forkchoice-state deque after the sibling reorg (head at back).
+    pub(crate) new_hashes: VecDeque<B256>,
+}
+
+/// Submit a pre-built sibling payload to the engine and drive the fork choice
+/// to the new head. Pure over the engine — no driver state mutation.
+///
+/// Failure modes (all mapped to `Err`):
+/// - `new_payload` returns INVALID/SYNCING → bail (INVALID is a genuine build
+///   defect; SYNCING shouldn't happen for a payload we just built against the
+///   current canonical parent, but we treat it as a failure to be safe).
+/// - `fork_choice_updated` returns INVALID → bail.
+/// - `fork_choice_updated` returns SYNCING past retry budget → bail (the
+///   `fork_choice_updated_with_retry` equivalent is inlined here so the
+///   backoff schedule is visible to tests).
+pub(crate) async fn submit_sibling_payload<E: EngineClient>(
+    engine: &E,
+    execution_data: ExecutionData,
+    sibling_hash: B256,
+    existing_parent_hashes: &VecDeque<B256>,
+) -> Result<SiblingSubmitOutcome> {
+    let status = engine
+        .new_payload(execution_data)
+        .await
+        .wrap_err("sibling submit: engine_newPayload call failed")?;
+
+    if !status.is_valid() {
+        eyre::bail!(
+            "sibling submit: newPayload rejected sibling_hash={sibling_hash} status={status:?}"
+        );
+    }
+
+    // Build the forkchoice state. Caller pre-populates `existing_parent_hashes`
+    // with hashes up to and including `target - 1`; we append the sibling hash
+    // and cap the deque at `FORK_CHOICE_DEPTH`.
+    let mut new_hashes = existing_parent_hashes.clone();
+    new_hashes.push_back(sibling_hash);
+    if new_hashes.len() > FORK_CHOICE_DEPTH {
+        new_hashes.pop_front();
+    }
+
+    let fcs = compute_forkchoice_state(sibling_hash, &new_hashes);
+    let fcu = submit_fork_choice_with_retry(engine, fcs, None)
+        .await
+        .wrap_err("sibling submit: forkchoiceUpdated failed")?;
+
+    if fcu.is_invalid() {
+        eyre::bail!(
+            "sibling submit: forkchoiceUpdated rejected sibling_hash={sibling_hash} status={:?}",
+            fcu.payload_status
+        );
+    }
+
+    Ok(SiblingSubmitOutcome { new_hashes })
+}
+
+/// Engine-agnostic `fork_choice_updated` with the same SYNCING retry schedule
+/// as the driver's internal `fork_choice_updated_with_retry`. Kept separate so
+/// it can be reused by both the real engine path and the mock-engine tests.
+pub(crate) async fn submit_fork_choice_with_retry<E: EngineClient>(
+    engine: &E,
+    state: ForkchoiceState,
+    payload_attrs: Option<PayloadAttributes>,
+) -> Result<ForkchoiceUpdated> {
+    let mut backoff_ms = FCU_SYNCING_INITIAL_BACKOFF_MS;
+    for attempt in 0..FCU_SYNCING_MAX_RETRIES {
+        let fcu = engine
+            .fork_choice_updated(
+                state,
+                payload_attrs.clone(),
+                EngineApiMessageVersion::default(),
+            )
+            .await
+            .wrap_err("fork choice update failed")?;
+
+        if fcu.is_valid() || fcu.is_invalid() {
+            return Ok(fcu);
+        }
+
+        if attempt + 1 < FCU_SYNCING_MAX_RETRIES {
+            warn!(
+                target: "based_rollup::driver",
+                attempt = attempt + 1,
+                max_retries = FCU_SYNCING_MAX_RETRIES,
+                backoff_ms,
+                "FCU returned SYNCING, retrying"
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            backoff_ms *= 2;
+        }
+    }
+
+    eyre::bail!(
+        "engine stuck in SYNCING after {} retries",
+        FCU_SYNCING_MAX_RETRIES
+    )
 }
 
 /// Compute the gas limit for the next block, bounded by the EIP-1559 elasticity divisor (1024).
@@ -1056,6 +1309,20 @@ where
                         block_number,
                         new_hash,
                     } => {
+                        // Apply the same +1000 safety cap as `BlockArrived` above
+                        // for defense-in-depth: a malicious or misbehaving
+                        // broadcaster must not be able to poison the cache with
+                        // arbitrary future-block hashes.
+                        if block_number > self.l2_head_number.saturating_add(1000) {
+                            warn!(
+                                target: "based_rollup::driver",
+                                block_number,
+                                head = self.l2_head_number,
+                                %new_hash,
+                                "ignoring BlockInvalidated far ahead of head"
+                            );
+                            continue;
+                        }
                         debug!(
                             target: "based_rollup::driver",
                             block_number,
@@ -1172,6 +1439,7 @@ where
                             block.l1_info.l1_block_hash,
                             block.l1_info.l1_block_number,
                             &effective_transactions,
+                            req.expected_root,
                         )
                         .await
                     {
@@ -1187,6 +1455,15 @@ where
                             self.pending_sibling_reorg = None;
                             self.consecutive_rewind_cycles = 0;
                             self.consecutive_flush_mismatches = 0;
+                            // Drive-by (second-pass review): the §4f-filtered
+                            // divergent block may have been entry-bearing. The
+                            // verify fast-path clears both fields when it
+                            // queues the request; `step_sync` must match that
+                            // parity on successful consumption — otherwise the
+                            // entry-verification hold persists and `step_builder`
+                            // returns early forever (different livelock class).
+                            self.pending_entry_verification_block = None;
+                            self.entry_verify_deferrals = 0;
                             continue;
                         }
                         Err(err) => {
@@ -2131,36 +2408,41 @@ where
                         //
                         // Record BEFORE draining so we retain the evidence even after
                         // the blocks are popped.
+                        //
+                        // M4 (second-pass review): delegate to
+                        // `find_rightmost_sibling_reorg_target`, which scans
+                        // the window in REVERSE so the block at `pos` (the
+                        // rightmost `rposition` match above) is tried first.
+                        // Earlier blocks can coincidentally have
+                        // `clean_state_root == on_chain_root` (e.g. an empty
+                        // block whose clean root matches a later entry
+                        // block's on-chain root); a forward scan would pick
+                        // the first such match and hijack the decision.
                         if self.pending_sibling_reorg.is_none() {
-                            for b in self.pending_submissions.iter().take(pos + 1) {
-                                let decision = decide_divergence_recovery(
-                                    b,
-                                    root,
-                                    u64::from(self.consecutive_rewind_cycles),
-                                    REORG_SAFETY_THRESHOLD,
+                            if let Some(req) = find_rightmost_sibling_reorg_target(
+                                &self.pending_submissions,
+                                root,
+                                u64::from(self.consecutive_rewind_cycles),
+                                REORG_SAFETY_THRESHOLD,
+                                pos + 1,
+                            ) {
+                                let speculative_root = self
+                                    .pending_submissions
+                                    .iter()
+                                    .find(|b| b.l2_block_number == req.target_l2_block)
+                                    .map(|b| b.state_root)
+                                    .unwrap_or_default();
+                                warn!(
+                                    target: "based_rollup::driver",
+                                    target_block = req.target_l2_block,
+                                    %speculative_root,
+                                    clean_root = %req.expected_root,
+                                    on_chain_root = %root,
+                                    "issue #36: speculative/clean divergence detected at drain — \
+                                     queuing sibling reorg (reth canonicalized speculative \
+                                     version; FCU-to-ancestor is a no-op per Engine API spec)"
                                 );
-                                if let SiblingReorgDecision::SiblingReorg {
-                                    target_block,
-                                    filtered_root,
-                                } = decision
-                                {
-                                    warn!(
-                                        target: "based_rollup::driver",
-                                        target_block,
-                                        speculative_root = %b.state_root,
-                                        clean_root = %filtered_root,
-                                        on_chain_root = %root,
-                                        "issue #36: speculative/clean divergence detected at drain — \
-                                         queuing sibling reorg (reth canonicalized speculative \
-                                         version; FCU-to-ancestor is a no-op per Engine API spec)"
-                                    );
-                                    self.pending_sibling_reorg = Some(SiblingReorgRequest {
-                                        target_l2_block: target_block,
-                                        expected_root: filtered_root,
-                                        depth: u64::from(self.consecutive_rewind_cycles),
-                                    });
-                                    break;
-                                }
+                                self.pending_sibling_reorg = Some(req);
                             }
                         }
 
@@ -2194,7 +2476,9 @@ where
                 target: "based_rollup::driver",
                 target = req.target_l2_block,
                 expected_root = %req.expected_root,
-                depth = req.depth,
+                pending_depth = self
+                    .l2_head_number
+                    .saturating_sub(req.target_l2_block),
                 "switching to Sync mode to re-derive block for sibling reorg"
             );
             let (rewind_target, rollback_l1_block) =
@@ -2209,10 +2493,14 @@ where
                         self.config.deployment_l1_block,
                     )
                 };
-            // Do NOT call `clear_internal_state` here: pending_sibling_reorg must
-            // survive, and clear_internal_state does not touch it (it only clears
-            // preconfirmed_hashes, pending_submissions, and the L1 entry queues).
+            // IMPORTANT: the request we just set MUST survive `clear_internal_state`
+            // so the Sync re-derivation step can consume it. `clear_internal_state`
+            // clears `pending_sibling_reorg` (see M2 fix: it's recovery state, and
+            // a full internal reset indicates a different-level recovery is taking
+            // over). So we stash the request, clear, then reinstate it.
+            let saved_req = req;
             self.clear_internal_state();
+            self.pending_sibling_reorg = Some(saved_req);
             self.derivation.set_last_derived_l2_block(rewind_target);
             self.derivation.rollback_to(rollback_l1_block);
             self.mode = DriverMode::Sync;
@@ -3193,12 +3481,31 @@ where
     }
 
     /// Clear internal driver state (pending submissions, entries, hold).
+    ///
     /// Preserves external queues (cross-chain calls, L2→L1 calls) because they
-    /// represent user-initiated actions from the composer RPCs that must eventually
-    /// be processed — silently discarding them loses user transactions.
-    /// Also clears `pending_l1_forward_txs` as defense-in-depth: the normal path
-    /// (step_builder) only commits L1 forward txs after successful block builds,
-    /// but this ensures no orphaned txs survive a Sync transition. See issue #237.
+    /// represent user-initiated actions from the composer RPCs that must
+    /// eventually be processed — silently discarding them loses user
+    /// transactions.
+    ///
+    /// Also clears `pending_l1_forward_txs` as defense-in-depth: the normal
+    /// path (step_builder) only commits L1 forward txs after successful block
+    /// builds, but this ensures no orphaned txs survive a Sync transition. See
+    /// issue #237.
+    ///
+    /// ## M2 (issue #36 second-pass review) — also clears `pending_sibling_reorg`
+    ///
+    /// `pending_sibling_reorg` is recovery state that targets a specific
+    /// `(target_l2_block, expected_root)` derived from a particular L1 view. If
+    /// a caller invokes `clear_internal_state` (e.g. an L1 reorg detected
+    /// upstream, or a generic "wipe pending state and restart derivation"
+    /// action), the expected_root may be obsolete — committing a sibling
+    /// against it would overwrite the canonical block with the wrong root and
+    /// cause silent drift.
+    ///
+    /// Call sites that legitimately need the request to survive (the two
+    /// sibling-reorg dispatch paths in `flush_to_l1` and
+    /// `verify_local_block_matches_l1`) explicitly save + reinstate the
+    /// request around this call.
     fn clear_internal_state(&mut self) {
         self.preconfirmed_hashes.clear();
         self.pending_submissions.clear();
@@ -3208,6 +3515,9 @@ where
         self.pending_l1_trigger_metadata.clear();
         self.pending_entry_verification_block = None;
         self.entry_verify_deferrals = 0;
+        // M2: recovery state tied to a specific L1 view. Callers that need
+        // it to survive save+reinstate it around this call.
+        self.pending_sibling_reorg = None;
         {
             let mut fwd = self
                 .pending_l1_forward_txs
@@ -3536,6 +3846,52 @@ where
             Some(self.pending_rewind_target.map_or(target, |t| t.min(target)));
     }
 
+    /// Apply the sibling-reorg recovery state transition computed by
+    /// [`plan_sibling_reorg_from_verify`].
+    ///
+    /// Centralizes the state mutation so:
+    /// (a) the `verify_local_block_matches_l1` fast path and any future caller
+    ///     can't accidentally omit one of the fields (C1 regression), and
+    /// (b) tests can construct a plan independently and assert the driver's
+    ///     post-state against it without spinning up a full engine.
+    ///
+    /// Fields mutated:
+    /// - `pending_sibling_reorg` ← the planned request (survives the
+    ///   `clear_internal_state` wipe via save+reinstate; see M2).
+    /// - `pending_rewind_target` ← `plan.rewind_target_l2` via
+    ///   `set_rewind_target` (C1: required so `step_builder` early-returns and
+    ///   skips `commit_batch`).
+    /// - `mode` ← `Sync`.
+    /// - `synced` ← `false`.
+    /// - `pending_entry_verification_block` ← `None` (hold released).
+    /// - `entry_verify_deferrals` ← `0`.
+    ///
+    /// Fields INTENTIONALLY NOT mutated:
+    /// - `consecutive_rewind_cycles` — sibling reorg is a productive recovery,
+    ///   not a rewind cycle. The safety gate counts unresolved recovery
+    ///   attempts; a successful first-time queue should not advance it.
+    fn apply_sibling_reorg_plan(&mut self, plan: SiblingReorgVerifyPlan) {
+        // Save the planned request across `clear_internal_state` (which — per
+        // the M2 fix — deliberately wipes `pending_sibling_reorg`).
+        let saved_req = plan.request;
+        self.clear_internal_state();
+        self.pending_sibling_reorg = Some(saved_req);
+        self.derivation
+            .set_last_derived_l2_block(plan.rewind_target_l2);
+        self.derivation.rollback_to(plan.rollback_l1_block);
+        self.mode = DriverMode::Sync;
+        self.synced
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        // C1: wire the rewind target. Without this, `step_builder` commits the
+        // batch and overwrites the derivation rollback.
+        self.set_rewind_target(plan.rewind_target_l2);
+        // `clear_internal_state` already zeroes `entry_verify_deferrals` and
+        // clears `pending_entry_verification_block`, but we restate them here
+        // so the invariant is visible to readers of this function.
+        self.entry_verify_deferrals = 0;
+        self.pending_entry_verification_block = None;
+    }
+
     fn verify_local_block_matches_l1(
         &mut self,
         derived: &crate::derivation::DerivedBlock,
@@ -3670,29 +4026,13 @@ where
                     "issue #36: §4f-filtered divergence at verify — queuing sibling \
                      reorg immediately (skipping deferrals; L1 is already definitive)"
                 );
-                self.pending_sibling_reorg = Some(SiblingReorgRequest {
-                    target_l2_block: derived.l2_block_number,
-                    expected_root: derived.state_root,
-                    depth: u64::from(self.consecutive_rewind_cycles),
-                });
-                let entry_block = derived.l2_block_number;
-                let (rewind_target, rollback_l1_block) =
-                    if let Some(anchor) = self.l1_confirmed_anchor {
-                        let target = entry_block.saturating_sub(1);
-                        (target, anchor.l1_block_number.saturating_sub(1))
-                    } else {
-                        (0, self.config.deployment_l1_block)
-                    };
-                self.clear_internal_state();
-                self.derivation.set_last_derived_l2_block(rewind_target);
-                self.derivation.rollback_to(rollback_l1_block);
-                self.mode = DriverMode::Sync;
-                self.synced
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                // Do NOT bump consecutive_rewind_cycles — sibling reorg is a
-                // productive recovery, not a failed rewind cycle.
-                self.entry_verify_deferrals = 0;
-                self.pending_entry_verification_block = None;
+                let plan = plan_sibling_reorg_from_verify(
+                    derived.l2_block_number,
+                    derived.state_root,
+                    self.l1_confirmed_anchor,
+                    self.config.deployment_l1_block,
+                );
+                self.apply_sibling_reorg_plan(plan);
                 return Ok(());
             }
 
@@ -4784,6 +5124,7 @@ where
         l1_block_hash: B256,
         l1_block_number: u64,
         derived_transactions: &Bytes,
+        expected_root: B256,
     ) -> Result<BuiltBlock> {
         if target == 0 {
             eyre::bail!("cannot rebuild genesis block (target=0) as sibling");
@@ -4808,6 +5149,35 @@ where
                 )
             })?;
 
+        // C2 (issue #36 second-pass review): assert the rebuilt block's state
+        // root equals the `expected_root` we promised (the §4f-filtered root
+        // observed on L1). If `apply_deferred_filtering` / `build_derived_block`
+        // has any defect, committing the sibling anyway silently drifts from
+        // L1 canon — and the next flush_to_l1 cycle queues ANOTHER reorg,
+        // repeating indefinitely.
+        //
+        // Per CLAUDE.md cardinal rule: "If roots don't match, there is a real
+        // bug in derivation or filtering. The builder must keep rewinding
+        // until the root cause is fixed." So we bail loud here instead of
+        // submitting the wrong root. No engine call is made, no driver state
+        // is mutated. The caller returns Err upward and the sibling-reorg
+        // request stays in place for the next retry.
+        if built.state_root != expected_root {
+            error!(
+                target: "based_rollup::driver",
+                built_root = %built.state_root,
+                expected_root = %expected_root,
+                target_block = target,
+                "sibling rebuild produced wrong state root — filter defect, aborting"
+            );
+            eyre::bail!(
+                "sibling rebuild: state root mismatch — built={} expected={} (filter defect at block {})",
+                built.state_root,
+                expected_root,
+                target
+            );
+        }
+
         let sibling_hash = built.hash;
 
         if sibling_hash == old_hash && target == old_head {
@@ -4831,50 +5201,24 @@ where
             "submitting sibling payload to engine (reorg via newPayload+FCU)"
         );
 
-        let status = self
-            .engine
-            .new_payload(execution_data)
-            .await
-            .wrap_err("sibling rebuild: engine_newPayload call failed")?;
-
-        if !status.is_valid() {
-            eyre::bail!(
-                "sibling rebuild: newPayload rejected target={target} sibling_hash={sibling_hash} \
-                 status={status:?}"
-            );
-        }
-
-        // Build the forkchoice state for the sibling. We rebuild the hash
-        // deque from scratch by walking back from `target - 1` through reth
-        // (those are untouched by the reorg), then append the sibling hash.
-        let mut new_hashes = VecDeque::new();
+        // Pre-populate the hash deque with hashes up to and including
+        // `target - 1`. `submit_sibling_payload` appends the sibling hash and
+        // caps the deque depth, so it returns the final deque we should adopt
+        // on success.
+        let mut parent_hashes = VecDeque::new();
         let start = parent_block_number.saturating_sub(FORK_CHOICE_DEPTH as u64);
         for n in start..=parent_block_number {
             if let Ok(Some(h)) = self.l2_provider.block_hash(n) {
-                new_hashes.push_back(h);
+                parent_hashes.push_back(h);
             }
         }
-        new_hashes.push_back(sibling_hash);
-        if new_hashes.len() > FORK_CHOICE_DEPTH {
-            new_hashes.pop_front();
-        }
 
-        let fcs = compute_forkchoice_state(sibling_hash, &new_hashes);
-        let fcu = self
-            .fork_choice_updated_with_retry(fcs, None)
-            .await
-            .wrap_err("sibling rebuild: forkchoiceUpdated failed")?;
-
-        if fcu.is_invalid() {
-            eyre::bail!(
-                "sibling rebuild: forkchoiceUpdated rejected sibling_hash={sibling_hash} \
-                 status={:?}",
-                fcu.payload_status
-            );
-        }
+        let outcome =
+            submit_sibling_payload(&self.engine, execution_data, sibling_hash, &parent_hashes)
+                .await?;
 
         // Only after reth confirms the reorg do we mutate driver state.
-        self.block_hashes = new_hashes;
+        self.block_hashes = outcome.new_hashes;
         self.head_hash = sibling_hash;
         self.l2_head_number = target;
 
@@ -4942,45 +5286,16 @@ where
     /// SYNCING is transient — the engine needs time to reconcile its state tree
     /// after blocks are unwound or rebuilt. Without retry, SYNCING causes the
     /// driver to bail and enter exponential backoff in the main loop.
+    ///
+    /// Delegates to the free `submit_fork_choice_with_retry` helper so the
+    /// same retry schedule is exercised by both production (via the real
+    /// `ConsensusEngineHandle`) and unit tests (via mock engine).
     async fn fork_choice_updated_with_retry(
         &self,
         state: ForkchoiceState,
         payload_attrs: Option<PayloadAttributes>,
     ) -> Result<ForkchoiceUpdated> {
-        let mut backoff_ms = FCU_SYNCING_INITIAL_BACKOFF_MS;
-        for attempt in 0..FCU_SYNCING_MAX_RETRIES {
-            let fcu = self
-                .engine
-                .fork_choice_updated(
-                    state,
-                    payload_attrs.clone(),
-                    EngineApiMessageVersion::default(),
-                )
-                .await
-                .wrap_err("fork choice update failed")?;
-
-            if fcu.is_valid() || fcu.is_invalid() {
-                return Ok(fcu);
-            }
-
-            // SYNCING — retry with exponential backoff
-            if attempt + 1 < FCU_SYNCING_MAX_RETRIES {
-                warn!(
-                    target: "based_rollup::driver",
-                    attempt = attempt + 1,
-                    max_retries = FCU_SYNCING_MAX_RETRIES,
-                    backoff_ms,
-                    "FCU returned SYNCING, retrying"
-                );
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                backoff_ms *= 2;
-            }
-        }
-
-        eyre::bail!(
-            "engine stuck in SYNCING after {} retries",
-            FCU_SYNCING_MAX_RETRIES
-        );
+        submit_fork_choice_with_retry(&self.engine, state, payload_attrs).await
     }
 
     /// Update fork choice state after inserting a new block.

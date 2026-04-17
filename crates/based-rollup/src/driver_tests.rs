@@ -3961,18 +3961,15 @@ fn test_sibling_reorg_request_uniquely_identifies_divergent_block() {
     let req = SiblingReorgRequest {
         target_l2_block: 5354,
         expected_root: B256::with_last_byte(0x42),
-        depth: 0,
     };
     assert_eq!(req.target_l2_block, 5354);
     assert_eq!(req.expected_root, B256::with_last_byte(0x42));
-    assert_eq!(req.depth, 0);
 
     // Copy semantics — required because the driver passes the request by value
     // through the drain loop and then checks `is_none()` after `.take()`.
     let copy = req;
     assert_eq!(copy.target_l2_block, req.target_l2_block);
     assert_eq!(copy.expected_root, req.expected_root);
-    assert_eq!(copy.depth, req.depth);
 }
 
 // --- Reorg safety gate (issue #36) ---
