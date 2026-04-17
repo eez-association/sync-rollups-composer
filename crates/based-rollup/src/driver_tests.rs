@@ -4023,3 +4023,1113 @@ fn test_skip_logic_checks_state_root_and_clean_state_root() {
         "partial consumption should NOT match either root"
     );
 }
+
+// =============================================================================
+// Sibling-reorg recovery (issue #36)
+//
+// Tests for the `newPayloadV3 + forkchoiceUpdatedV3(head=N')` recovery path
+// that replaces a committed speculative canonical block `N` with a §4f-filtered
+// sibling `N'` when L1 confirms a different state root than reth canonicalized.
+// =============================================================================
+
+use crate::cross_chain::CleanStateRoot;
+
+// --- Pure planner/classifier tests (no engine, no harness) ------------------
+
+/// Reproduces the testnet-eez-2026-04-16 sequence:
+/// 1. Builder commits speculative block N with stateRoot `S_speculative` (includes
+///    a protocol trigger tx that L1 later filters via §4f).
+/// 2. L1 confirms the §4f-filtered variant: stateRoot `S_clean`.
+/// 3. Driver observes `first.pre_state_root != on_chain_root`.
+///
+/// With the fix, `decide_divergence_recovery()` returns `SiblingReorg` when the
+/// block's `clean_state_root` matches on-chain. The driver then builds sibling
+/// N' with the §4f-filtered tx set and submits it via
+/// `newPayloadV3 + forkchoiceUpdatedV3(head=N')`.
+#[test]
+fn test_sibling_reorg_resolves_speculative_divergence_after_4f_filter() {
+    let pre_state = B256::with_last_byte(0xA0);
+    let speculative = B256::with_last_byte(0xA1);
+    let clean = B256::with_last_byte(0xA2);
+    let divergent_block = PendingBlock {
+        l2_block_number: 5354,
+        pre_state_root: pre_state,
+        state_root: speculative,
+        clean_state_root: CleanStateRoot::new(clean),
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+
+    let on_chain = clean;
+
+    let decision = decide_divergence_recovery(
+        &divergent_block,
+        on_chain,
+        /* reorg_depth = */ 1,
+        /* threshold  = */ REORG_SAFETY_THRESHOLD,
+    );
+
+    assert_eq!(
+        decision,
+        SiblingReorgDecision::SiblingReorg {
+            target_block: 5354,
+            filtered_root: clean,
+        },
+        "when clean_state_root matches on-chain, driver must attempt sibling reorg \
+         (not bare FCU, which is a silent no-op per Engine API spec)"
+    );
+}
+
+/// When `clean_state_root == state_root` the block had no cross-chain entries,
+/// so §4f filtering is not the cause of the divergence. Fall back to the
+/// bare-FCU rewind path (defense-in-depth).
+#[test]
+fn test_sibling_reorg_falls_back_to_fcu_rewind_when_no_4f_evidence() {
+    let pre_state = B256::with_last_byte(0xB0);
+    let root = B256::with_last_byte(0xB1);
+    let block = PendingBlock {
+        l2_block_number: 100,
+        pre_state_root: pre_state,
+        state_root: root,
+        clean_state_root: CleanStateRoot::new(root), // same — no §4f filtering possible
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+
+    let on_chain = B256::with_last_byte(0xC0);
+
+    let decision = decide_divergence_recovery(&block, on_chain, 1, REORG_SAFETY_THRESHOLD);
+
+    assert_eq!(
+        decision,
+        SiblingReorgDecision::BareRewind,
+        "without clean_state_root evidence of §4f filtering, fall back to \
+         bare-FCU rewind (defense-in-depth)"
+    );
+}
+
+/// Even when `clean_state_root != state_root`, if on-chain doesn't match the
+/// clean root either, we have no known-good target for the sibling and must
+/// fall back.
+#[test]
+fn test_sibling_reorg_falls_back_when_clean_root_does_not_match_on_chain() {
+    let pre_state = B256::with_last_byte(0xD0);
+    let clean = B256::with_last_byte(0xD1);
+    let spec = B256::with_last_byte(0xD2);
+    let block = PendingBlock {
+        l2_block_number: 42,
+        pre_state_root: pre_state,
+        state_root: spec,
+        clean_state_root: CleanStateRoot::new(clean),
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+    let on_chain = B256::with_last_byte(0xD9);
+
+    let decision = decide_divergence_recovery(&block, on_chain, 1, REORG_SAFETY_THRESHOLD);
+
+    assert_eq!(decision, SiblingReorgDecision::BareRewind);
+}
+
+#[test]
+fn test_sibling_reorg_decision_is_stable_under_repeated_calls() {
+    let pre_state = B256::with_last_byte(0xE0);
+    let clean = B256::with_last_byte(0xE1);
+    let spec = B256::with_last_byte(0xE2);
+    let block = PendingBlock {
+        l2_block_number: 42,
+        pre_state_root: pre_state,
+        state_root: spec,
+        clean_state_root: CleanStateRoot::new(clean),
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+    let on_chain = clean;
+
+    let d1 = decide_divergence_recovery(&block, on_chain, 0, REORG_SAFETY_THRESHOLD);
+    let d2 = decide_divergence_recovery(&block, on_chain, 1, REORG_SAFETY_THRESHOLD);
+    let d3 = decide_divergence_recovery(&block, on_chain, 2, REORG_SAFETY_THRESHOLD);
+    assert_eq!(d1, d2);
+    assert_eq!(d2, d3);
+}
+
+/// Beyond the safety threshold, continuing to attempt recovery would
+/// eventually cross reth's `MAX_REORG_DEPTH = 64` eviction window, past which
+/// no strategy can succeed. Halt instead.
+#[test]
+fn test_sibling_reorg_halts_beyond_safety_threshold() {
+    let block = PendingBlock {
+        l2_block_number: 10,
+        pre_state_root: B256::with_last_byte(0x00),
+        state_root: B256::with_last_byte(0x01),
+        clean_state_root: CleanStateRoot::new(B256::with_last_byte(0x02)),
+        encoded_transactions: alloy_primitives::Bytes::new(),
+        intermediate_roots: vec![],
+    };
+
+    let decision = decide_divergence_recovery(
+        &block,
+        B256::with_last_byte(0x02),
+        REORG_SAFETY_THRESHOLD,
+        REORG_SAFETY_THRESHOLD,
+    );
+    assert_eq!(decision, SiblingReorgDecision::Halt);
+
+    let decision = decide_divergence_recovery(
+        &block,
+        B256::with_last_byte(0x02),
+        REORG_SAFETY_THRESHOLD + 1,
+        REORG_SAFETY_THRESHOLD,
+    );
+    assert_eq!(decision, SiblingReorgDecision::Halt);
+}
+
+// --- Reorg safety gate (issue #36) ---
+
+#[test]
+fn test_reorg_safety_gate_halts_at_depth_threshold() {
+    for depth in 0..REORG_SAFETY_THRESHOLD {
+        assert!(
+            !reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD),
+            "depth {depth} must be allowed (threshold {REORG_SAFETY_THRESHOLD})"
+        );
+    }
+    assert!(
+        reorg_depth_exceeded(REORG_SAFETY_THRESHOLD, REORG_SAFETY_THRESHOLD),
+        "depth == threshold must halt"
+    );
+    assert!(
+        reorg_depth_exceeded(REORG_SAFETY_THRESHOLD + 1, REORG_SAFETY_THRESHOLD),
+        "depth > threshold must halt"
+    );
+}
+
+#[test]
+fn test_safety_gate_halts_builder_at_depth_48() {
+    let target: u64 = 1000;
+    let tip_at_threshold: u64 = target + REORG_SAFETY_THRESHOLD;
+    let depth = tip_at_threshold.saturating_sub(target);
+    assert_eq!(depth, REORG_SAFETY_THRESHOLD);
+    assert!(
+        reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD),
+        "step_builder must halt when tip is exactly REORG_SAFETY_THRESHOLD blocks ahead"
+    );
+
+    let tip_below_threshold: u64 = target + (REORG_SAFETY_THRESHOLD - 1);
+    let depth = tip_below_threshold.saturating_sub(target);
+    assert_eq!(depth, REORG_SAFETY_THRESHOLD - 1);
+    assert!(
+        !reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD),
+        "one block below threshold must still allow building"
+    );
+
+    let remaining = MAX_REORG_DEPTH - REORG_SAFETY_THRESHOLD;
+    assert!(
+        remaining >= 16,
+        "safety gate must leave at least 16 blocks of recovery headroom; got {remaining}"
+    );
+}
+
+#[test]
+fn test_reorg_safety_threshold_strictly_less_than_reth_eviction() {
+    const _: () = assert!(
+        REORG_SAFETY_THRESHOLD < MAX_REORG_DEPTH,
+        "REORG_SAFETY_THRESHOLD must be strictly less than MAX_REORG_DEPTH \
+         so we halt before reth's eviction window"
+    );
+    const _: () = assert!(
+        MAX_REORG_DEPTH == 64,
+        "MAX_REORG_DEPTH must match reth's CHANGESET_CACHE_RETENTION_BLOCKS"
+    );
+    const _: () = assert!(
+        REORG_SAFETY_THRESHOLD * 4 / 3 <= MAX_REORG_DEPTH,
+        "threshold should be approximately 75% of the limit"
+    );
+}
+
+// --- SiblingReorgRequest shape ---
+
+#[test]
+fn test_sibling_reorg_request_uniquely_identifies_divergent_block() {
+    let req = SiblingReorgRequest {
+        target_l2_block: 5354,
+        expected_root: B256::with_last_byte(0x42),
+    };
+    assert_eq!(req.target_l2_block, 5354);
+    assert_eq!(req.expected_root, B256::with_last_byte(0x42));
+
+    // Copy semantics — required because the driver passes the request by value
+    // through the drain loop and then checks `is_none()` after `.take()`.
+    let copy = req;
+    assert_eq!(copy.target_l2_block, req.target_l2_block);
+    assert_eq!(copy.expected_root, req.expected_root);
+}
+
+// --- BlockInvalidated preconfirmation message ---
+
+#[test]
+fn test_preconfirmed_message_block_invalidated_evicts_cached_hash() {
+    use crate::builder_sync::PreconfirmedMessage;
+
+    let old_hash = B256::with_last_byte(0xE0);
+    let new_hash = B256::with_last_byte(0xE1);
+    let mut preconfirmed_hashes: HashMap<u64, B256> = HashMap::new();
+    preconfirmed_hashes.insert(100, old_hash);
+
+    let msg = PreconfirmedMessage::BlockInvalidated {
+        block_number: 100,
+        new_hash,
+    };
+    match msg {
+        PreconfirmedMessage::BlockInvalidated {
+            block_number,
+            new_hash,
+        } => {
+            preconfirmed_hashes.insert(block_number, new_hash);
+        }
+        PreconfirmedMessage::BlockArrived(_) => {
+            panic!("expected BlockInvalidated variant");
+        }
+    }
+
+    assert_eq!(
+        preconfirmed_hashes.get(&100),
+        Some(&new_hash),
+        "BlockInvalidated must overwrite the cached hash with the sibling's hash"
+    );
+}
+
+#[test]
+fn test_preconfirmed_message_block_arrived_preserves_legacy_semantics() {
+    use crate::builder_sync::{PreconfirmedBlock, PreconfirmedMessage};
+
+    let block_number = 77;
+    let block_hash = B256::with_last_byte(0x77);
+    let msg = PreconfirmedMessage::BlockArrived(PreconfirmedBlock {
+        block_number,
+        block_hash,
+    });
+    match msg {
+        PreconfirmedMessage::BlockArrived(pb) => {
+            assert_eq!(pb.block_number, block_number);
+            assert_eq!(pb.block_hash, block_hash);
+        }
+        PreconfirmedMessage::BlockInvalidated { .. } => {
+            panic!("expected BlockArrived variant");
+        }
+    }
+}
+
+/// Exercises the full broadcast path: builder sends `BlockInvalidated` on the
+/// internal `preconfirmed_message_tx`, receiver drains it on
+/// `preconfirmed_message_rx` and updates its `HashMap<u64, B256>`.
+#[tokio::test]
+async fn test_sibling_reorg_broadcast_channel_roundtrip() {
+    use crate::builder_sync::PreconfirmedMessage;
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::channel::<PreconfirmedMessage>(8);
+    let old_hash = B256::with_last_byte(0xAB);
+    let new_hash = B256::with_last_byte(0xCD);
+
+    let mut preconfirmed_hashes: HashMap<u64, B256> = HashMap::new();
+    preconfirmed_hashes.insert(42, old_hash);
+
+    tx.try_send(PreconfirmedMessage::BlockInvalidated {
+        block_number: 42,
+        new_hash,
+    })
+    .expect("broadcast channel must accept within capacity");
+
+    let mut drained = 0usize;
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            PreconfirmedMessage::BlockInvalidated {
+                block_number,
+                new_hash,
+            } => {
+                preconfirmed_hashes.insert(block_number, new_hash);
+            }
+            PreconfirmedMessage::BlockArrived(pb) => {
+                preconfirmed_hashes.insert(pb.block_number, pb.block_hash);
+            }
+        }
+        drained += 1;
+    }
+
+    assert_eq!(drained, 1, "exactly one message should have been drained");
+    assert_eq!(
+        preconfirmed_hashes.get(&42),
+        Some(&new_hash),
+        "after BlockInvalidated the cached hash for block 42 must be the sibling hash"
+    );
+    assert_ne!(
+        preconfirmed_hashes.get(&42),
+        Some(&old_hash),
+        "the speculative hash must be evicted — otherwise verify_local_block_matches_l1 \
+         would keep rejecting the new canonical hash"
+    );
+}
+
+// =============================================================================
+// Tier-1 mock-engine tests (issue #36 second-pass review)
+// =============================================================================
+
+mod sibling_reorg_mock_engine {
+    //! Mock [`EngineClient`] for sibling-reorg submission tests.
+
+    use super::*;
+    use crate::driver::{
+        EngineClient, submit_fork_choice_with_retry, submit_sibling_payload,
+    };
+    use alloy_primitives::{Address, Bloom, U256};
+    use alloy_rpc_types_engine::{
+        ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, ExecutionPayloadV1,
+        ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatus, PayloadStatusEnum,
+    };
+    use eyre::Result;
+    use reth_payload_primitives::EngineApiMessageVersion;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum MockEngineCall {
+        NewPayload { parent_hash: B256 },
+        ForkchoiceUpdated { head: B256 },
+    }
+
+    pub(crate) struct MockEngine {
+        pub(crate) calls: Mutex<Vec<MockEngineCall>>,
+        pub(crate) new_payload_responses: Mutex<Vec<PayloadStatus>>,
+        pub(crate) fcu_responses: Mutex<Vec<ForkchoiceUpdated>>,
+    }
+
+    impl MockEngine {
+        pub(crate) fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                new_payload_responses: Mutex::new(Vec::new()),
+                fcu_responses: Mutex::new(Vec::new()),
+            }
+        }
+
+        pub(crate) fn push_new_payload_response(&self, status: PayloadStatus) {
+            self.new_payload_responses.lock().unwrap().push(status);
+        }
+
+        pub(crate) fn push_fcu_response(&self, fcu: ForkchoiceUpdated) {
+            self.fcu_responses.lock().unwrap().push(fcu);
+        }
+
+        pub(crate) fn take_calls(&self) -> Vec<MockEngineCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl EngineClient for MockEngine {
+        async fn new_payload(&self, payload: ExecutionData) -> Result<PayloadStatus> {
+            let parent_hash = payload.payload.parent_hash();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockEngineCall::NewPayload { parent_hash });
+            let mut responses = self.new_payload_responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err(eyre::eyre!(
+                    "mock: new_payload called but no scripted response queued"
+                ));
+            }
+            Ok(responses.remove(0))
+        }
+
+        async fn fork_choice_updated(
+            &self,
+            state: ForkchoiceState,
+            _payload_attrs: Option<PayloadAttributes>,
+            _version: EngineApiMessageVersion,
+        ) -> Result<ForkchoiceUpdated> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockEngineCall::ForkchoiceUpdated {
+                    head: state.head_block_hash,
+                });
+            let mut responses = self.fcu_responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err(eyre::eyre!(
+                    "mock: fork_choice_updated called but no scripted response queued"
+                ));
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    pub(crate) fn test_execution_data(parent_hash: B256) -> ExecutionData {
+        let v1 = ExecutionPayloadV1 {
+            parent_hash,
+            fee_recipient: Address::ZERO,
+            state_root: B256::ZERO,
+            receipts_root: B256::ZERO,
+            logs_bloom: Bloom::ZERO,
+            prev_randao: B256::ZERO,
+            block_number: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            timestamp: 0,
+            extra_data: Bytes::new(),
+            base_fee_per_gas: U256::ZERO,
+            block_hash: B256::ZERO,
+            transactions: Vec::new(),
+        };
+        ExecutionData::new(ExecutionPayload::V1(v1), ExecutionPayloadSidecar::none())
+    }
+
+    pub(crate) fn valid() -> PayloadStatus {
+        PayloadStatus::from_status(PayloadStatusEnum::Valid)
+    }
+
+    pub(crate) fn invalid() -> PayloadStatus {
+        PayloadStatus::from_status(PayloadStatusEnum::Invalid {
+            validation_error: "mock invalid".to_string(),
+        })
+    }
+
+    pub(crate) fn syncing() -> PayloadStatus {
+        PayloadStatus::from_status(PayloadStatusEnum::Syncing)
+    }
+
+    /// Test #1: happy path. Asserts `NewPayload` is dispatched BEFORE
+    /// `ForkchoiceUpdated`, and the FCU head equals the sibling hash.
+    #[tokio::test]
+    async fn test_rebuild_block_as_sibling_happy_path_order() {
+        let parent = B256::with_last_byte(0x11);
+        let sibling_hash = B256::with_last_byte(0x22);
+
+        let engine = MockEngine::new();
+        engine.push_new_payload_response(valid());
+        engine.push_fcu_response(ForkchoiceUpdated::from_status(PayloadStatusEnum::Valid));
+
+        let mut parent_hashes: VecDeque<B256> = VecDeque::new();
+        parent_hashes.push_back(parent);
+
+        let outcome = submit_sibling_payload(
+            &engine,
+            test_execution_data(parent),
+            sibling_hash,
+            &parent_hashes,
+        )
+        .await
+        .expect("happy path must succeed");
+
+        assert_eq!(
+            outcome.new_hashes.back(),
+            Some(&sibling_hash),
+            "final forkchoice deque must be headed by the sibling"
+        );
+
+        let calls = engine.take_calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "exactly one NewPayload + one FCU must be sent"
+        );
+        assert_eq!(
+            calls[0],
+            MockEngineCall::NewPayload { parent_hash: parent },
+            "new_payload must be first (parent={parent})"
+        );
+        match calls[1] {
+            MockEngineCall::ForkchoiceUpdated { head } => {
+                assert_eq!(head, sibling_hash, "FCU head must be the sibling");
+            }
+            _ => panic!("expected ForkchoiceUpdated as second call, got {:?}", calls[1]),
+        }
+    }
+
+    /// Test #2: INVALID new_payload → function bails; no FCU is sent.
+    #[tokio::test]
+    async fn test_rebuild_block_as_sibling_new_payload_invalid_bails() {
+        let parent = B256::with_last_byte(0x11);
+        let sibling_hash = B256::with_last_byte(0x22);
+
+        let engine = MockEngine::new();
+        engine.push_new_payload_response(invalid());
+
+        let mut parent_hashes: VecDeque<B256> = VecDeque::new();
+        parent_hashes.push_back(parent);
+
+        let err = submit_sibling_payload(
+            &engine,
+            test_execution_data(parent),
+            sibling_hash,
+            &parent_hashes,
+        )
+        .await
+        .expect_err("INVALID newPayload MUST bail — silent tolerance reintroduces #36");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("newPayload rejected"),
+            "error must be attributable to newPayload INVALID: {msg}"
+        );
+
+        let calls = engine.take_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "no FCU must be attempted after INVALID newPayload (calls={calls:?})"
+        );
+        assert!(matches!(calls[0], MockEngineCall::NewPayload { .. }));
+    }
+
+    /// Test #3: new_payload VALID but FCU INVALID → bail.
+    #[tokio::test]
+    async fn test_rebuild_block_as_sibling_fcu_invalid_bails() {
+        let parent = B256::with_last_byte(0x11);
+        let sibling_hash = B256::with_last_byte(0x22);
+
+        let engine = MockEngine::new();
+        engine.push_new_payload_response(valid());
+        engine.push_fcu_response(ForkchoiceUpdated::from_status(
+            PayloadStatusEnum::Invalid {
+                validation_error: "bad".to_string(),
+            },
+        ));
+
+        let mut parent_hashes: VecDeque<B256> = VecDeque::new();
+        parent_hashes.push_back(parent);
+
+        let err = submit_sibling_payload(
+            &engine,
+            test_execution_data(parent),
+            sibling_hash,
+            &parent_hashes,
+        )
+        .await
+        .expect_err("INVALID FCU MUST bail");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("forkchoiceUpdated rejected"),
+            "error must be attributable to FCU INVALID: {msg}"
+        );
+
+        let calls = engine.take_calls();
+        assert_eq!(calls.len(), 2, "both calls must have been attempted");
+    }
+
+    /// Test #4: FCU returns SYNCING for a few attempts then VALID.
+    #[tokio::test]
+    async fn test_rebuild_block_as_sibling_fcu_syncing_retries_then_succeeds() {
+        let engine = MockEngine::new();
+        engine.push_fcu_response(ForkchoiceUpdated::new(syncing()));
+        engine.push_fcu_response(ForkchoiceUpdated::new(syncing()));
+        engine.push_fcu_response(ForkchoiceUpdated::from_status(PayloadStatusEnum::Valid));
+
+        let head = B256::with_last_byte(0xCA);
+        let state = ForkchoiceState {
+            head_block_hash: head,
+            safe_block_hash: head,
+            finalized_block_hash: head,
+        };
+
+        let fcu = submit_fork_choice_with_retry(&engine, state, None)
+            .await
+            .expect("must succeed after SYNCING→VALID");
+
+        assert!(fcu.is_valid(), "final FCU must be VALID");
+        let calls = engine.take_calls();
+        assert_eq!(calls.len(), 3, "three FCU attempts must have been made");
+        for c in &calls {
+            assert!(matches!(c, MockEngineCall::ForkchoiceUpdated { .. }));
+        }
+    }
+
+    /// Test #5 (C2 regression): verifies the state-root mismatch guard
+    /// short-circuits BEFORE any engine call. Uses `submit_sibling_after_guard`
+    /// (wraps `check_sibling_state_root_matches` + `submit_sibling_payload`)
+    /// which mirrors the production order in `rebuild_block_as_sibling`.
+    #[tokio::test]
+    async fn test_rebuild_block_as_sibling_wrong_state_root_bails() {
+        use crate::driver::submit_sibling_after_guard;
+
+        let engine = MockEngine::new();
+        // No responses scripted — guard must fire before we reach either call.
+
+        let parent = B256::with_last_byte(0x11);
+        let sibling_hash = B256::with_last_byte(0x22);
+        let built_root = B256::with_last_byte(0xAA);
+        let expected_root = B256::with_last_byte(0xBB);
+        let target: u64 = 5354;
+
+        let mut parent_hashes: VecDeque<B256> = VecDeque::new();
+        parent_hashes.push_back(parent);
+
+        let err = submit_sibling_after_guard(
+            &engine,
+            test_execution_data(parent),
+            sibling_hash,
+            built_root,
+            expected_root,
+            target,
+            &parent_hashes,
+        )
+        .await
+        .expect_err("mismatched state root MUST bail before any engine call");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("state root mismatch"), "err: {msg}");
+        assert!(msg.contains(&target.to_string()), "err: {msg}");
+        assert!(msg.contains(&format!("{built_root}")), "err: {msg}");
+        assert!(msg.contains(&format!("{expected_root}")), "err: {msg}");
+
+        // C2: engine must have ZERO calls — the guard fires first.
+        assert_eq!(
+            engine.take_calls().len(),
+            0,
+            "C2 guard must short-circuit before any engine call"
+        );
+    }
+}
+
+// --- Planner-level tests ---
+
+/// Test #6 (C1 regression): `plan_sibling_reorg_from_verify` produces a plan
+/// with both a `SiblingReorgRequest` AND a rewind target.
+#[test]
+fn test_verify_fast_path_sets_both_rewind_target_and_sibling_reorg() {
+    let entry_block = 5354u64;
+    let expected_root = B256::with_last_byte(0x42);
+
+    // Cold start (no L1 anchor yet).
+    let plan = plan_sibling_reorg_from_verify(entry_block, expected_root, None, 120);
+    assert_eq!(plan.request.target_l2_block, entry_block);
+    assert_eq!(plan.request.expected_root, expected_root);
+    assert_eq!(plan.rewind_target_l2, 0, "cold-start rewind target must be 0");
+    assert_eq!(
+        plan.rollback_l1_block, 120,
+        "cold-start rollback must use deployment_l1_block"
+    );
+
+    // Warm start.
+    let anchor = L1ConfirmedAnchor {
+        l2_block_number: 5000,
+        l1_block_number: 200,
+    };
+    let plan = plan_sibling_reorg_from_verify(entry_block, expected_root, Some(anchor), 120);
+    assert_eq!(plan.rewind_target_l2, entry_block - 1);
+    assert_eq!(plan.rollback_l1_block, 199);
+
+    // Block 1 edge case.
+    let plan = plan_sibling_reorg_from_verify(1, expected_root, Some(anchor), 120);
+    assert_eq!(plan.rewind_target_l2, 0, "block 1 rewind target must saturate to 0");
+}
+
+/// Test #7: `classify_verify_mismatch` boolean gate truth table.
+#[test]
+fn test_verify_non_filtering_mismatch_uses_deferral_path() {
+    // FastPathSiblingReorg requires (filtering_present=true,
+    // sibling_reorg_already_queued=false).
+    assert_eq!(
+        classify_verify_mismatch(true, false, false, 0, 3),
+        VerifyMismatchAction::FastPathSiblingReorg,
+        "§4f-flagged divergence → fast path"
+    );
+    assert_eq!(
+        classify_verify_mismatch(true, true, false, 0, 3),
+        VerifyMismatchAction::GenericMismatchRewind,
+        "already queued → no double-queue"
+    );
+    assert_eq!(
+        classify_verify_mismatch(false, false, true, 0, 3),
+        VerifyMismatchAction::DeferEntryVerify,
+        "non-filtering + entry-block + fresh deferrals → defer"
+    );
+    assert_eq!(
+        classify_verify_mismatch(false, false, true, 2, 3),
+        VerifyMismatchAction::ExhaustedDeferralRewind,
+        "non-filtering + entry-block + exhausted deferrals → rewind"
+    );
+    assert_eq!(
+        classify_verify_mismatch(false, false, false, 0, 3),
+        VerifyMismatchAction::GenericMismatchRewind,
+        "non-filtering, no entry block → generic rewind"
+    );
+}
+
+/// Test #8 (M2 regression): `clear_recovery_state` zeros all fields.
+#[test]
+fn test_clear_recovery_state_wipes_all_fields() {
+    use crate::driver::{EntryVerificationHold, clear_recovery_state};
+
+    let mut pending_sibling = Some(SiblingReorgRequest {
+        target_l2_block: 1234,
+        expected_root: B256::with_last_byte(0x55),
+    });
+    let mut hold = EntryVerificationHold::Clear;
+    hold.arm(1234);
+    hold.defer();
+
+    clear_recovery_state(&mut pending_sibling, &mut hold);
+
+    assert!(pending_sibling.is_none(), "pending_sibling_reorg cleared");
+    assert!(!hold.is_armed(), "hold cleared");
+    assert_eq!(hold.deferrals(), 0, "deferrals reset");
+}
+
+/// Test #9: `clear_fields_on_sibling_reorg_success` zeros all five fields.
+#[test]
+fn test_step_sync_success_clears_all_five_fields() {
+    use crate::driver::{EntryVerificationHold, clear_fields_on_sibling_reorg_success};
+
+    let mut pending_sibling = Some(SiblingReorgRequest {
+        target_l2_block: 100,
+        expected_root: B256::with_last_byte(0x42),
+    });
+    let mut hold = EntryVerificationHold::Clear;
+    hold.arm(100);
+    hold.defer();
+    hold.defer();
+    let mut consecutive_rewind_cycles = 3u32;
+    let mut consecutive_flush_mismatches = 1u32;
+
+    clear_fields_on_sibling_reorg_success(
+        &mut pending_sibling,
+        &mut consecutive_rewind_cycles,
+        &mut consecutive_flush_mismatches,
+        &mut hold,
+    );
+
+    assert!(pending_sibling.is_none());
+    assert!(!hold.is_armed());
+    assert_eq!(hold.deferrals(), 0);
+    assert_eq!(consecutive_rewind_cycles, 0);
+    assert_eq!(consecutive_flush_mismatches, 0);
+}
+
+/// Test #10 (M4 regression): when two pending blocks both match
+/// `clean_state_root == on_chain_root`, detection MUST target the rightmost
+/// (the one `rposition` found upstream), not the first forward-scan match.
+#[test]
+fn test_flush_detection_targets_rposition_block_not_earliest() {
+    use crate::driver::find_rightmost_sibling_reorg_target;
+
+    let on_chain_root = B256::with_last_byte(0x42);
+    let speculative_root_a = B256::with_last_byte(0xAA);
+    let speculative_root_b = B256::with_last_byte(0xBB);
+
+    let mut pending: VecDeque<PendingBlock> = VecDeque::new();
+    pending.push_back(PendingBlock {
+        l2_block_number: 100,
+        pre_state_root: B256::ZERO,
+        state_root: speculative_root_a,
+        clean_state_root: CleanStateRoot::new(on_chain_root), // MATCH 1 — earliest
+        encoded_transactions: Bytes::from(vec![0xc0]),
+        intermediate_roots: vec![],
+    });
+    pending.push_back(PendingBlock {
+        l2_block_number: 101,
+        pre_state_root: B256::ZERO,
+        state_root: B256::with_last_byte(0xCC),
+        clean_state_root: CleanStateRoot::new(B256::with_last_byte(0xCC)),
+        encoded_transactions: Bytes::from(vec![0xc0]),
+        intermediate_roots: vec![],
+    });
+    pending.push_back(PendingBlock {
+        l2_block_number: 200,
+        pre_state_root: B256::ZERO,
+        state_root: speculative_root_b,
+        clean_state_root: CleanStateRoot::new(on_chain_root), // MATCH 2 — rightmost
+        encoded_transactions: Bytes::from(vec![0xc0]),
+        intermediate_roots: vec![],
+    });
+
+    let req = find_rightmost_sibling_reorg_target(
+        &pending,
+        on_chain_root,
+        /* reorg_depth = */ 0,
+        REORG_SAFETY_THRESHOLD,
+        /* window_len = */ 3,
+    )
+    .expect("both blocks match; detection must pick one");
+
+    assert_eq!(
+        req.target_l2_block, 200,
+        "detection MUST target the rightmost block (200), not the earliest (100)"
+    );
+    assert_eq!(req.expected_root, on_chain_root);
+
+    // Window-trimming subcase.
+    let req = find_rightmost_sibling_reorg_target(
+        &pending,
+        on_chain_root,
+        0,
+        REORG_SAFETY_THRESHOLD,
+        /* window_len = */ 1, // only block #100 in window
+    )
+    .expect("single-block window containing match");
+    assert_eq!(
+        req.target_l2_block, 100,
+        "window trimmed to the first block only → that's the rightmost inside the window"
+    );
+}
+
+/// Test #11: DriverRecoveryFields + apply_sibling_reorg_plan_fields.
+#[test]
+fn test_apply_sibling_reorg_plan_mutates_all_fields() {
+    use crate::driver::{DriverRecoveryFields, EntryVerificationHold, apply_sibling_reorg_plan_fields};
+    use crate::config::RollupConfig;
+
+    let plan = plan_sibling_reorg_from_verify(
+        100,
+        B256::with_last_byte(0x42),
+        Some(L1ConfirmedAnchor {
+            l2_block_number: 50,
+            l1_block_number: 99,
+        }),
+        1000,
+    );
+    let mut fields = DriverRecoveryFields {
+        pending_sibling_reorg: None,
+        pending_rewind_target: None,
+        hold: {
+            let mut h = EntryVerificationHold::Clear;
+            h.arm(100);
+            h.defer();
+            h
+        },
+        mode: DriverMode::Builder,
+    };
+    let mut derivation = crate::derivation::DerivationPipeline::new(Arc::new(RollupConfig {
+        l1_rpc_url: "http://127.0.0.1:1/".to_string(),
+        l2_context_address: alloy_primitives::Address::ZERO,
+        deployment_l1_block: 1000,
+        deployment_timestamp: 1_700_000_000,
+        block_time: 12,
+        builder_mode: false,
+        builder_private_key: None,
+        l1_rpc_url_fallback: None,
+        builder_ws_url: None,
+        health_port: 0,
+        rollups_address: alloy_primitives::Address::ZERO,
+        cross_chain_manager_address: alloy_primitives::Address::ZERO,
+        rollup_id: 0,
+        proxy_port: 0,
+        l1_proxy_port: 0,
+        l1_gas_overbid_pct: 10,
+        builder_address: alloy_primitives::Address::ZERO,
+        bridge_l2_address: alloy_primitives::Address::ZERO,
+        bridge_l1_address: alloy_primitives::Address::ZERO,
+        bootstrap_accounts_raw: String::new(),
+        bootstrap_accounts: Vec::new(),
+    }));
+
+    apply_sibling_reorg_plan_fields(&mut fields, plan.request, plan, &mut derivation);
+
+    assert_eq!(fields.pending_sibling_reorg, Some(plan.request));
+    assert_eq!(fields.pending_rewind_target, Some(plan.rewind_target_l2));
+    assert_eq!(fields.mode, DriverMode::Sync);
+    assert!(!fields.hold.is_armed());
+    assert_eq!(fields.hold.deferrals(), 0);
+}
+
+#[test]
+fn test_apply_sibling_reorg_plan_survives_clear_internal_state_sequence() {
+    use crate::driver::{DriverRecoveryFields, EntryVerificationHold, apply_sibling_reorg_plan_fields, clear_recovery_state};
+    use crate::config::RollupConfig;
+
+    // Pre-state has a STALE sibling reorg request.
+    let stale_req = SiblingReorgRequest {
+        target_l2_block: 999,
+        expected_root: B256::with_last_byte(0xEE),
+    };
+    let mut fields = DriverRecoveryFields {
+        pending_sibling_reorg: Some(stale_req),
+        pending_rewind_target: None,
+        hold: {
+            let mut h = EntryVerificationHold::Clear;
+            h.arm(999);
+            h
+        },
+        mode: DriverMode::Builder,
+    };
+    let plan = plan_sibling_reorg_from_verify(
+        100,
+        B256::with_last_byte(0x42),
+        None,
+        1000,
+    );
+
+    // Save the planned request, clear, then apply. The clear wipes the stale
+    // request; apply reinstates the fresh one.
+    let saved = plan.request;
+    clear_recovery_state(&mut fields.pending_sibling_reorg, &mut fields.hold);
+    assert!(fields.pending_sibling_reorg.is_none(), "clear wiped stale request");
+
+    let mut derivation = crate::derivation::DerivationPipeline::new(Arc::new(RollupConfig {
+        l1_rpc_url: "http://127.0.0.1:1/".to_string(),
+        l2_context_address: alloy_primitives::Address::ZERO,
+        deployment_l1_block: 1000,
+        deployment_timestamp: 1_700_000_000,
+        block_time: 12,
+        builder_mode: false,
+        builder_private_key: None,
+        l1_rpc_url_fallback: None,
+        builder_ws_url: None,
+        health_port: 0,
+        rollups_address: alloy_primitives::Address::ZERO,
+        cross_chain_manager_address: alloy_primitives::Address::ZERO,
+        rollup_id: 0,
+        proxy_port: 0,
+        l1_proxy_port: 0,
+        l1_gas_overbid_pct: 10,
+        builder_address: alloy_primitives::Address::ZERO,
+        bridge_l2_address: alloy_primitives::Address::ZERO,
+        bridge_l1_address: alloy_primitives::Address::ZERO,
+        bootstrap_accounts_raw: String::new(),
+        bootstrap_accounts: Vec::new(),
+    }));
+    apply_sibling_reorg_plan_fields(&mut fields, saved, plan, &mut derivation);
+
+    assert_eq!(fields.pending_sibling_reorg, Some(plan.request));
+    assert_eq!(fields.pending_rewind_target, Some(plan.rewind_target_l2));
+    assert_eq!(fields.mode, DriverMode::Sync);
+    assert!(!fields.hold.is_armed());
+}
+
+// =============================================================================
+// Wire-through tests — drive the REAL `Driver` methods via `DriverTestHarness`
+// =============================================================================
+
+#[test]
+fn test_clear_internal_state_via_real_driver_clears_pending_sibling_reorg() {
+    use crate::driver_test_harness::DriverTestHarness;
+
+    let mut harness = DriverTestHarness::new();
+
+    let seeded_req = SiblingReorgRequest {
+        target_l2_block: 5354,
+        expected_root: B256::with_last_byte(0x42),
+    };
+    harness
+        .driver
+        .set_pending_sibling_reorg_for_test(Some(seeded_req));
+    harness.driver.arm_hold_for_test(5354);
+
+    assert_eq!(
+        harness.driver.pending_sibling_reorg_for_test(),
+        Some(seeded_req),
+        "seed: pending_sibling_reorg must be populated before the call"
+    );
+    assert!(harness.driver.hold_for_test().is_armed());
+
+    harness.driver.clear_internal_state_for_test();
+
+    harness.assert_recovery_state_cleared();
+}
+
+#[test]
+fn test_apply_sibling_reorg_plan_via_real_driver() {
+    use crate::driver_test_harness::DriverTestHarness;
+
+    let mut harness = DriverTestHarness::new();
+
+    let stale_req = SiblingReorgRequest {
+        target_l2_block: 999,
+        expected_root: B256::with_last_byte(0xEE),
+    };
+    harness
+        .driver
+        .set_pending_sibling_reorg_for_test(Some(stale_req));
+    harness.driver.arm_hold_for_test(5354);
+
+    let anchor = L1ConfirmedAnchor {
+        l2_block_number: 5000,
+        l1_block_number: 200,
+    };
+    harness.driver.set_l1_confirmed_anchor_for_test(Some(anchor));
+    harness
+        .driver
+        .seed_derivation_cursor_for_test(anchor.l1_block_number);
+    assert_eq!(
+        harness.driver.derivation_last_processed_l1_for_test(),
+        anchor.l1_block_number,
+        "seed: derivation cursor must be at anchor before apply"
+    );
+
+    let entry_block = 5354u64;
+    let expected_root = B256::with_last_byte(0x42);
+    let plan = plan_sibling_reorg_from_verify(
+        entry_block,
+        expected_root,
+        Some(anchor),
+        /* deployment_l1_block = */ 1000,
+    );
+    assert_eq!(plan.rewind_target_l2, entry_block - 1);
+    assert_eq!(plan.rollback_l1_block, anchor.l1_block_number - 1);
+
+    harness.driver.apply_sibling_reorg_plan_for_test(plan);
+
+    // (1) Fresh request installed.
+    assert_eq!(
+        harness.driver.pending_sibling_reorg_for_test(),
+        Some(plan.request),
+        "M2 save/reinstate: stale request must be wiped, fresh one installed"
+    );
+    // (2) Rewind target wired (C1 regression).
+    assert_eq!(
+        harness.driver.pending_rewind_target_for_test(),
+        Some(plan.rewind_target_l2),
+        "C1: pending_rewind_target MUST be set"
+    );
+    // (3) Mode flipped to Sync.
+    assert_eq!(harness.driver.mode(), DriverMode::Sync);
+    // (4) Hold released.
+    assert!(!harness.driver.hold_for_test().is_armed());
+    // (5) Derivation cursor rolled back.
+    assert_eq!(
+        harness.driver.derivation_last_processed_l1_for_test(),
+        plan.rollback_l1_block,
+        "derivation.rollback_to(plan.rollback_l1_block) must move the cursor"
+    );
+    // (6) Intentionally-not-mutated: consecutive_rewind_cycles.
+    assert_eq!(
+        harness.driver.consecutive_rewind_cycles_for_test(),
+        0,
+        "consecutive_rewind_cycles MUST NOT be incremented by the helper"
+    );
+}
+
+#[test]
+fn test_clear_then_apply_sibling_reorg_plan_on_real_driver() {
+    use crate::driver_test_harness::DriverTestHarness;
+
+    let mut harness = DriverTestHarness::new();
+
+    harness
+        .driver
+        .set_pending_sibling_reorg_for_test(Some(SiblingReorgRequest {
+            target_l2_block: 1,
+            expected_root: B256::ZERO,
+        }));
+
+    let plan = plan_sibling_reorg_from_verify(
+        42,
+        B256::with_last_byte(0x99),
+        None,
+        /* deployment_l1_block = */ 1000,
+    );
+
+    harness.driver.apply_sibling_reorg_plan_for_test(plan);
+
+    assert_eq!(
+        harness.driver.pending_sibling_reorg_for_test(),
+        Some(plan.request),
+        "final: plan.request must be installed"
+    );
+    assert_eq!(
+        harness.driver.pending_rewind_target_for_test(),
+        Some(plan.rewind_target_l2),
+        "final: pending_rewind_target must be set to plan.rewind_target_l2"
+    );
+    assert_eq!(harness.driver.mode(), DriverMode::Sync);
+}
