@@ -5393,10 +5393,12 @@ mod post_commit_anchor_divergence {
         ));
         // Headroom invariant: threshold must leave strictly positive room
         // before reth's retention window closes.
-        assert!(
-            REORG_SAFETY_THRESHOLD < MAX_REORG_DEPTH,
-            "safety gate must halt strictly before reth's changeset eviction"
-        );
+        const {
+            assert!(
+                REORG_SAFETY_THRESHOLD < MAX_REORG_DEPTH,
+                "safety gate must halt strictly before reth's changeset eviction"
+            );
+        }
     }
 
     /// Fix 1 / Fix 2 — the SiblingReorgRequest constructed by both branches
