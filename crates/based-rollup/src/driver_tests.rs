@@ -4379,9 +4379,7 @@ mod sibling_reorg_mock_engine {
     //! Mock [`EngineClient`] for sibling-reorg submission tests.
 
     use super::*;
-    use crate::driver::{
-        EngineClient, submit_fork_choice_with_retry, submit_sibling_payload,
-    };
+    use crate::driver::{EngineClient, submit_fork_choice_with_retry, submit_sibling_payload};
     use alloy_primitives::{Address, Bloom, U256};
     use alloy_rpc_types_engine::{
         ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, ExecutionPayloadV1,
@@ -4534,14 +4532,19 @@ mod sibling_reorg_mock_engine {
         );
         assert_eq!(
             calls[0],
-            MockEngineCall::NewPayload { parent_hash: parent },
+            MockEngineCall::NewPayload {
+                parent_hash: parent
+            },
             "new_payload must be first (parent={parent})"
         );
         match calls[1] {
             MockEngineCall::ForkchoiceUpdated { head } => {
                 assert_eq!(head, sibling_hash, "FCU head must be the sibling");
             }
-            _ => panic!("expected ForkchoiceUpdated as second call, got {:?}", calls[1]),
+            _ => panic!(
+                "expected ForkchoiceUpdated as second call, got {:?}",
+                calls[1]
+            ),
         }
     }
 
@@ -4589,11 +4592,9 @@ mod sibling_reorg_mock_engine {
 
         let engine = MockEngine::new();
         engine.push_new_payload_response(valid());
-        engine.push_fcu_response(ForkchoiceUpdated::from_status(
-            PayloadStatusEnum::Invalid {
-                validation_error: "bad".to_string(),
-            },
-        ));
+        engine.push_fcu_response(ForkchoiceUpdated::from_status(PayloadStatusEnum::Invalid {
+            validation_error: "bad".to_string(),
+        }));
 
         let mut parent_hashes: VecDeque<B256> = VecDeque::new();
         parent_hashes.push_back(parent);
@@ -4704,7 +4705,10 @@ fn test_verify_fast_path_sets_both_rewind_target_and_sibling_reorg() {
     let plan = plan_sibling_reorg_from_verify(entry_block, expected_root, None, 120);
     assert_eq!(plan.request.target_l2_block, entry_block);
     assert_eq!(plan.request.expected_root, expected_root);
-    assert_eq!(plan.rewind_target_l2, 0, "cold-start rewind target must be 0");
+    assert_eq!(
+        plan.rewind_target_l2, 0,
+        "cold-start rewind target must be 0"
+    );
     assert_eq!(
         plan.rollback_l1_block, 120,
         "cold-start rollback must use deployment_l1_block"
@@ -4721,7 +4725,10 @@ fn test_verify_fast_path_sets_both_rewind_target_and_sibling_reorg() {
 
     // Block 1 edge case.
     let plan = plan_sibling_reorg_from_verify(1, expected_root, Some(anchor), 120);
-    assert_eq!(plan.rewind_target_l2, 0, "block 1 rewind target must saturate to 0");
+    assert_eq!(
+        plan.rewind_target_l2, 0,
+        "block 1 rewind target must saturate to 0"
+    );
 }
 
 /// Test #7: `classify_verify_mismatch` boolean gate truth table.
@@ -4876,8 +4883,10 @@ fn test_flush_detection_targets_rposition_block_not_earliest() {
 /// Test #11: DriverRecoveryFields + apply_sibling_reorg_plan_fields.
 #[test]
 fn test_apply_sibling_reorg_plan_mutates_all_fields() {
-    use crate::driver::{DriverRecoveryFields, EntryVerificationHold, apply_sibling_reorg_plan_fields};
     use crate::config::RollupConfig;
+    use crate::driver::{
+        DriverRecoveryFields, EntryVerificationHold, apply_sibling_reorg_plan_fields,
+    };
 
     let plan = plan_sibling_reorg_from_verify(
         100,
@@ -4934,8 +4943,11 @@ fn test_apply_sibling_reorg_plan_mutates_all_fields() {
 
 #[test]
 fn test_apply_sibling_reorg_plan_survives_clear_internal_state_sequence() {
-    use crate::driver::{DriverRecoveryFields, EntryVerificationHold, apply_sibling_reorg_plan_fields, clear_recovery_state};
     use crate::config::RollupConfig;
+    use crate::driver::{
+        DriverRecoveryFields, EntryVerificationHold, apply_sibling_reorg_plan_fields,
+        clear_recovery_state,
+    };
 
     // Pre-state has a STALE sibling reorg request.
     let stale_req = SiblingReorgRequest {
@@ -4952,18 +4964,16 @@ fn test_apply_sibling_reorg_plan_survives_clear_internal_state_sequence() {
         },
         mode: DriverMode::Builder,
     };
-    let plan = plan_sibling_reorg_from_verify(
-        100,
-        B256::with_last_byte(0x42),
-        None,
-        1000,
-    );
+    let plan = plan_sibling_reorg_from_verify(100, B256::with_last_byte(0x42), None, 1000);
 
     // Save the planned request, clear, then apply. The clear wipes the stale
     // request; apply reinstates the fresh one.
     let saved = plan.request;
     clear_recovery_state(&mut fields.pending_sibling_reorg, &mut fields.hold);
-    assert!(fields.pending_sibling_reorg.is_none(), "clear wiped stale request");
+    assert!(
+        fields.pending_sibling_reorg.is_none(),
+        "clear wiped stale request"
+    );
 
     let mut derivation = crate::derivation::DerivationPipeline::new(Arc::new(RollupConfig {
         l1_rpc_url: "http://127.0.0.1:1/".to_string(),
@@ -5046,7 +5056,9 @@ fn test_apply_sibling_reorg_plan_via_real_driver() {
         l2_block_number: 5000,
         l1_block_number: 200,
     };
-    harness.driver.set_l1_confirmed_anchor_for_test(Some(anchor));
+    harness
+        .driver
+        .set_l1_confirmed_anchor_for_test(Some(anchor));
     harness
         .driver
         .seed_derivation_cursor_for_test(anchor.l1_block_number);

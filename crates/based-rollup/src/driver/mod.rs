@@ -181,6 +181,8 @@ pub use types::{BuiltBlock, DriverMode};
 // at the re-export site rather than splitting across a `#[cfg(...)]` gate so
 // external tests see a stable API surface regardless of build flags.
 #[allow(unused_imports)]
+pub(crate) use types::{DriverRecoveryFields, L1ConfirmedAnchor};
+#[allow(unused_imports)]
 pub(crate) use types::{
     EngineClient, MAX_REORG_DEPTH, REORG_SAFETY_THRESHOLD, SiblingReorgDecision,
     SiblingReorgRequest, SiblingReorgVerifyPlan, SiblingSubmitOutcome, VerifyMismatchAction,
@@ -189,8 +191,6 @@ pub(crate) use types::{
     find_rightmost_sibling_reorg_target, plan_sibling_reorg_from_verify, reorg_depth_exceeded,
     submit_fork_choice_with_retry, submit_sibling_payload,
 };
-#[allow(unused_imports)]
-pub(crate) use types::{DriverRecoveryFields, L1ConfirmedAnchor};
 
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(unused_imports)]
@@ -413,10 +413,7 @@ where
     /// method (e.g. `clear_internal_state`).
     #[cfg(any(test, feature = "test-utils"))]
     #[allow(dead_code)]
-    pub(crate) fn set_pending_sibling_reorg_for_test(
-        &mut self,
-        req: Option<SiblingReorgRequest>,
-    ) {
+    pub(crate) fn set_pending_sibling_reorg_for_test(&mut self, req: Option<SiblingReorgRequest>) {
         self.pending_sibling_reorg = req;
     }
 
@@ -459,10 +456,7 @@ where
     /// branch in `plan_sibling_reorg_from_verify`).
     #[cfg(any(test, feature = "test-utils"))]
     #[allow(dead_code)]
-    pub(crate) fn set_l1_confirmed_anchor_for_test(
-        &mut self,
-        anchor: Option<L1ConfirmedAnchor>,
-    ) {
+    pub(crate) fn set_l1_confirmed_anchor_for_test(&mut self, anchor: Option<L1ConfirmedAnchor>) {
         self.l1_confirmed_anchor = anchor;
     }
 
@@ -500,10 +494,7 @@ where
     /// `apply_sibling_reorg_plan_fields` helper) end-to-end.
     #[cfg(any(test, feature = "test-utils"))]
     #[allow(dead_code)]
-    pub(crate) fn apply_sibling_reorg_plan_for_test(
-        &mut self,
-        plan: SiblingReorgVerifyPlan,
-    ) {
+    pub(crate) fn apply_sibling_reorg_plan_for_test(&mut self, plan: SiblingReorgVerifyPlan) {
         self.apply_sibling_reorg_plan(plan);
     }
 

@@ -120,18 +120,16 @@ impl DriverTestHarness {
         let dummy_header = alloy_consensus::Header::default();
         let dummy_hash = B256::with_last_byte(0x42);
         let sealed = reth_primitives_traits::SealedHeader::new(dummy_header, dummy_hash);
-        let blockchain_provider =
-            BlockchainProvider::with_latest(provider_factory.clone(), sealed)
-                .expect("BlockchainProvider::with_latest on fresh factory");
+        let blockchain_provider = BlockchainProvider::with_latest(provider_factory.clone(), sealed)
+            .expect("BlockchainProvider::with_latest on fresh factory");
         let chain_spec: Arc<ChainSpec> = MAINNET.clone();
         let config = Self::default_config();
         let evm_config = RollupEvmConfig::new(chain_spec, config.clone());
 
         // Minimal L1 provider. No actual RPC is reachable at this URL but the
         // field has to be populated; nothing we test calls through it.
-        let l1_provider = RootProvider::new_http(
-            "http://127.0.0.1:1/".parse().expect("valid URL literal"),
-        );
+        let l1_provider =
+            RootProvider::new_http("http://127.0.0.1:1/".parse().expect("valid URL literal"));
 
         let pool = testing_pool();
         let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));

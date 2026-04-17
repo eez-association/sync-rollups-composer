@@ -219,18 +219,20 @@ where
                     .saturating_sub(req.target_l2_block),
                 "switching to Sync mode to re-derive block for sibling reorg"
             );
-            let (rewind_target, rollback_l1_block) =
-                if let Some(anchor) = self.l1_confirmed_anchor {
-                    (
-                        req.target_l2_block.saturating_sub(1).max(anchor.l2_block_number),
-                        anchor.l1_block_number.saturating_sub(1),
-                    )
-                } else {
-                    (
-                        req.target_l2_block.saturating_sub(1),
-                        self.config.deployment_l1_block,
-                    )
-                };
+            let (rewind_target, rollback_l1_block) = if let Some(anchor) = self.l1_confirmed_anchor
+            {
+                (
+                    req.target_l2_block
+                        .saturating_sub(1)
+                        .max(anchor.l2_block_number),
+                    anchor.l1_block_number.saturating_sub(1),
+                )
+            } else {
+                (
+                    req.target_l2_block.saturating_sub(1),
+                    self.config.deployment_l1_block,
+                )
+            };
             // M2: stash the request across `clear_internal_state`.
             //
             // Symmetry note (issue #36 third-pass review): unlike the verify

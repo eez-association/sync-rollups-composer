@@ -219,7 +219,10 @@ pub(crate) enum SiblingReorgDecision {
     /// `target_block` with a parent matching `target_block - 1`'s hash and
     /// submits via the engine API. The expected post-execution root is
     /// `filtered_root` (equal to `on_chain_root`).
-    SiblingReorg { target_block: u64, filtered_root: B256 },
+    SiblingReorg {
+        target_block: u64,
+        filtered_root: B256,
+    },
     /// No evidence of §4f filtering — fall back to bare FCU rewind. (Typically
     /// a no-op on committed blocks; present for defense-in-depth.)
     BareRewind,
