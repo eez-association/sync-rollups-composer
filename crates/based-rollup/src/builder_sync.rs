@@ -16,6 +16,47 @@ pub struct PreconfirmedBlock {
     pub block_hash: B256,
 }
 
+/// Messages delivered via the preconfirmation channel.
+///
+/// ## Current wire status
+///
+/// - `BlockArrived` is produced by [`BuilderSync`] from the builder's
+///   `newHeads` WebSocket subscription.
+/// - `BlockInvalidated` is currently **intra-process only** — produced by
+///   [`crate::driver::Driver::broadcast_sibling_reorg`] and consumed by the
+///   driver's own `drain_preconfirmed_blocks` to evict stale cached hashes
+///   after a local sibling reorg.
+///
+///   External fullnodes do NOT receive `BlockInvalidated` today; they rely on
+///   L1 derivation to override local cached hashes on the next sync cycle.
+///   This is consensus-safe — L1 derivation is always the tiebreaker on
+///   mismatch (see `docs/DERIVATION.md` §4f). The `BlockInvalidated` path
+///   exists as a latency optimization for the builder's own in-process
+///   preconfirmation cache.
+///
+/// Wiring `BlockInvalidated` through the WebSocket transport (so remote
+/// fullnodes receive it out-of-band, before L1 finalization) is tracked as a
+/// follow-up to issue #36 ("M3 follow-up"). This PR's scope is the
+/// in-process detection and dispatch logic; the WS transport upgrade is an
+/// orthogonal feature.
+///
+/// Introduced for issue #36 so that after the builder performs a sibling
+/// reorg (`new_payload(N') + forkchoiceUpdated(head=N')`), subscribed
+/// **in-process** observers can evict their cached hash for block N and adopt
+/// N' without waiting for the next L1 confirmation cycle.
+#[derive(Debug, Clone)]
+pub enum PreconfirmedMessage {
+    /// A new head arrived via the builder's `newHeads` subscription.
+    BlockArrived(PreconfirmedBlock),
+    /// A previously-announced block was invalidated by a sibling reorg.
+    /// Fullnodes should overwrite any cached hash for `block_number` with
+    /// `new_hash`.
+    ///
+    /// Currently produced/consumed intra-process only — see the enum-level
+    /// doc comment.
+    BlockInvalidated { block_number: u64, new_hash: B256 },
+}
+
 /// Connects to the builder's WebSocket endpoint and streams new blocks.
 ///
 /// On each new block header, records the block number and hash and sends

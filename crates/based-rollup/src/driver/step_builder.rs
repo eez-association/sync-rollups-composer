@@ -18,7 +18,10 @@
 
 use super::Driver;
 use super::TriggerMetadata;
-use super::types::{DriverMode, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS};
+use super::types::{
+    DriverMode, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS, MAX_REORG_DEPTH,
+    REORG_SAFETY_THRESHOLD, reorg_depth_exceeded,
+};
 use crate::cross_chain::CrossChainExecutionEntry;
 use crate::proposer::PendingBlock;
 use alloy_primitives::{B256, Bytes};
@@ -99,6 +102,38 @@ where
     /// 4. Builds new blocks up to the target
     /// 5. Submits pending blocks to L1 in batches
     pub(super) async fn step_builder(&mut self, latest_l1_block: u64) -> Result<()> {
+        // Issue #36 safety gate: if a sibling reorg has been pending for
+        // longer than `REORG_SAFETY_THRESHOLD` blocks' worth of unresolved
+        // divergence, refuse to build more blocks. Continuing would eventually
+        // push reth past `MAX_REORG_DEPTH = CHANGESET_CACHE_RETENTION_BLOCKS =
+        // 64`, at which point no recovery strategy (sibling reorg, bare FCU,
+        // anything) can restore consensus — the state changesets needed to
+        // rewind will have been evicted.
+        //
+        // We measure the depth as `current_tip - target_l2_block`; if the tip
+        // keeps advancing while the reorg can't converge, halt BEFORE the
+        // eviction window closes so operators can intervene. No sibling reorg
+        // request → nothing to halt for; normal building proceeds.
+        if let Some(req) = self.pending_sibling_reorg {
+            let depth = self.l2_head_number.saturating_sub(req.target_l2_block);
+            if reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD) {
+                error!(
+                    target: "based_rollup::driver",
+                    target_l2_block = req.target_l2_block,
+                    expected_root = %req.expected_root,
+                    current_tip = self.l2_head_number,
+                    depth,
+                    threshold = REORG_SAFETY_THRESHOLD,
+                    max_reorg_depth = MAX_REORG_DEPTH,
+                    "issue #36 SAFETY GATE TRIPPED: unresolved sibling reorg exceeds \
+                     safe recovery depth — HALTING block production. Manual \
+                     intervention required before reth's changeset eviction window \
+                     (64 blocks) closes."
+                );
+                return Ok(());
+            }
+        }
+
         // Phase 1: Catch up with L1 — derive, verify, commit.
         self.derive_and_verify_from_l1(latest_l1_block).await?;
         if self.pending_rewind_target.is_some() {
