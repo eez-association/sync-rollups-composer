@@ -23,7 +23,8 @@ use super::flush_plan::{Collected, FlushPlan, NoEntries, SendResult};
 use super::pending_queue::TriggerMetadata;
 use super::types::{
     L1ConfirmedAnchor, MAX_BATCH_SIZE, REORG_SAFETY_THRESHOLD, SUBMISSION_COOLDOWN_SECS,
-    TriggerExecutionResult, find_rightmost_sibling_reorg_target,
+    SiblingReorgRequest, TriggerExecutionResult, find_rightmost_sibling_reorg_target,
+    reorg_depth_exceeded,
 };
 use crate::proposer::{GasPriceHint, PendingBlock};
 use alloy_primitives::{B256, Bytes, U256};
@@ -364,8 +365,108 @@ where
                         self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                         return Ok(());
                     } else {
-                        // First time hitting persistent mismatch — rewind to re-derive.
-                        // §4f protocol tx filtering should produce the correct root.
+                        // First time hitting persistent mismatch. Before falling
+                        // through to bare rewind, attempt to detect the
+                        // post-commit anchor divergence pattern: the anchor
+                        // block's LOCAL reth state root disagrees with what
+                        // `rollups(rollupId).stateRoot` contains on L1. This
+                        // happens when the entry-bearing block's trigger tx
+                        // reverted on L1 AFTER postBatch confirmed the
+                        // §4f-filtered root — reth has the speculative block
+                        // canonicalised, but the confirmed root is the filtered
+                        // one. A bare rewind to `earliest_block - 1` is floored
+                        // at `anchor.l2_block_number` to avoid losing the
+                        // confirmed anchor, so it can never rebuild the anchor
+                        // itself — the mismatch repeats forever.
+                        //
+                        // The fix queues a sibling reorg for the anchor block,
+                        // mirroring the drain-time detection at lines 134–184
+                        // (which only works while the divergent block still
+                        // sits in `pending_submissions`). Here the divergent
+                        // block is long-confirmed and only lives in reth's
+                        // canonical DB, so we target it directly.
+                        if self.pending_sibling_reorg.is_none() {
+                            if let Some(anchor) = self.l1_confirmed_anchor {
+                                let local_anchor_root = self
+                                    .l2_provider
+                                    .sealed_header(anchor.l2_block_number)
+                                    .ok()
+                                    .flatten()
+                                    .map(|h| h.state_root);
+                                if let Some(local_root) = local_anchor_root {
+                                    if local_root != on_chain_root {
+                                        let reorg_depth = self
+                                            .l2_head_number
+                                            .saturating_sub(anchor.l2_block_number);
+                                        if !reorg_depth_exceeded(
+                                            reorg_depth,
+                                            REORG_SAFETY_THRESHOLD,
+                                        ) {
+                                            warn!(
+                                                target: "based_rollup::driver",
+                                                anchor_l2 = anchor.l2_block_number,
+                                                anchor_l1 = anchor.l1_block_number,
+                                                local_anchor_root = %local_root,
+                                                %on_chain_root,
+                                                reorg_depth,
+                                                l2_head = self.l2_head_number,
+                                                "anchor-block post-commit divergence detected — \
+                                                 queuing sibling reorg (reth canonicalized speculative \
+                                                 version; confirmed root diverges from local header)"
+                                            );
+                                            self.pending_sibling_reorg =
+                                                Some(SiblingReorgRequest {
+                                                    target_l2_block: anchor.l2_block_number,
+                                                    expected_root: on_chain_root,
+                                                });
+                                            // Preserve batched blocks for the
+                                            // next attempt (same pattern as the
+                                            // transient-mismatch branch below).
+                                            for block in blocks.into_iter().rev() {
+                                                self.pending_submissions.push_front(block);
+                                            }
+                                            self.consecutive_flush_mismatches = 0;
+                                            // `flush_precheck` dispatch on the
+                                            // next tick consumes
+                                            // `pending_sibling_reorg` and
+                                            // transitions to Sync mode cleanly.
+                                            // Do NOT bump
+                                            // `consecutive_rewind_cycles` —
+                                            // sibling reorg is a productive
+                                            // recovery, not a rewind cycle.
+                                            return Ok(());
+                                        } else {
+                                            error!(
+                                                target: "based_rollup::driver",
+                                                anchor_l2 = anchor.l2_block_number,
+                                                anchor_l1 = anchor.l1_block_number,
+                                                local_anchor_root = %local_root,
+                                                %on_chain_root,
+                                                reorg_depth,
+                                                threshold = REORG_SAFETY_THRESHOLD,
+                                                l2_head = self.l2_head_number,
+                                                "anchor-block post-commit divergence beyond \
+                                                 safety threshold — halting; manual operator \
+                                                 recovery required (reth changeset eviction \
+                                                 window would be crossed)"
+                                            );
+                                            // Preserve batched blocks so an
+                                            // operator can inspect them.
+                                            for block in blocks.into_iter().rev() {
+                                                self.pending_submissions.push_front(block);
+                                            }
+                                            self.consecutive_flush_mismatches = 0;
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback: bare rewind to re-derive. Retained for
+                        // non-anchor-divergence cases (L1 reorg, transient
+                        // context mismatches with `derived.filtering = None`,
+                        // etc.).
                         let earliest_block = first.l2_block_number;
 
                         let (rewind_target, rollback_l1_block) =
@@ -672,19 +773,36 @@ where
                                     }
                                 };
 
+                            // Common: precompute the real-entry set (entries
+                            // expected to emit `ExecutionConsumed`). Used by
+                            // both the partial-consumption branch below and
+                            // the zero-consumption branch that follows.
+                            //
+                            // REVERT / REVERT_CONTINUE entries are consumed
+                            // inside reverted scopes and their
+                            // `ExecutionConsumed` events are reverted by
+                            // `ScopeReverted`, so they never appear in
+                            // `consumed_hashes`. Action-hash-zero entries are
+                            // the immediate postBatch entry (state-delta
+                            // carrier with no consumption event of its own).
+                            let revert_continue_hash =
+                                crate::cross_chain::compute_revert_continue_hash(
+                                    crate::cross_chain::RollupId::new(
+                                        alloy_primitives::U256::from(self.config.rollup_id),
+                                    ),
+                                );
+                            let real_entry_count = l1_entries
+                                .iter()
+                                .filter(|e| {
+                                    e.action_hash != crate::cross_chain::ActionHash::ZERO
+                                        && e.next_action.action_type
+                                            != crate::cross_chain::CrossChainActionType::Revert
+                                        && e.action_hash != revert_continue_hash
+                                })
+                                .count();
+
                             if !consumed_hashes.is_empty() {
                                 // Count how many entries we need per hash.
-                                // Skip REVERT/REVERT_CONTINUE entries — they are consumed inside
-                                // reverted scopes so their ExecutionConsumed events are reverted
-                                // by ScopeReverted. We identify them by action_type (Revert) and
-                                // by matching the REVERT_CONTINUE action hash.
-                                let revert_continue_hash =
-                                    crate::cross_chain::compute_revert_continue_hash(
-                                        crate::cross_chain::RollupId::new(
-                                            alloy_primitives::U256::from(self.config.rollup_id),
-                                        ),
-                                    );
-
                                 let mut entry_counts: std::collections::HashMap<
                                     crate::cross_chain::ActionHash,
                                     usize,
@@ -727,7 +845,7 @@ where
                                         target: "based_rollup::driver",
                                         l1_block_number,
                                         consumed = consumed_total,
-                                        total = l1_entries.iter().filter(|e| e.action_hash != crate::cross_chain::ActionHash::ZERO).count(),
+                                        total = real_entry_count,
                                         "partial entry consumption — rewinding immediately"
                                     );
                                     let entry_block = self.hold.armed_for();
@@ -743,10 +861,156 @@ where
                                     self.rewind_to_re_derive(rewind_target, rollback_l1_block);
                                     return Ok(());
                                 }
+                            } else if real_entry_count > 0 {
+                                // Zero-consumption: `ExecutionConsumed` logs
+                                // were queried successfully but NONE were
+                                // emitted, despite the batch carrying real
+                                // entries. This is the signature of the
+                                // trigger tx reverting completely on L1 (e.g.
+                                // the depth-0 post-commit divergence observed
+                                // on testnet 2026-04-17 — see
+                                // `project_testnet_stall_2026_04_17.md`).
+                                //
+                                // The anchor block is the block we just
+                                // confirmed on L1 via postBatch; its
+                                // speculative local root diverges from the
+                                // §4f-filtered root that Rollups.sol now
+                                // stores. We can queue a sibling reorg for
+                                // the anchor IMMEDIATELY at depth 0, before
+                                // any subsequent blocks build up and drive us
+                                // toward the eviction window. The subsequent
+                                // `flush_precheck` dispatch picks up the
+                                // request and switches to Sync mode cleanly.
+                                //
+                                // Guard: we need the POST-postBatch on-chain
+                                // root. `on_chain_root` captured by
+                                // `flush_precheck` at the top of the function
+                                // is pre-postBatch; re-query it here.
+                                //
+                                // Re-acquire the proposer reference locally
+                                // (rather than reusing the outer `proposer`
+                                // binding) so the immutable borrow doesn't
+                                // conflict with the `&mut self` calls earlier
+                                // in this arm (e.g. `prune_tx_journal`).
+                                let refreshed_on_chain_root = match self
+                                    .proposer
+                                    .as_ref()
+                                    .expect("precheck confirmed proposer")
+                                    .last_submitted_state_root()
+                                    .await
+                                {
+                                    Ok(r) => Some(r),
+                                    Err(err) => {
+                                        warn!(
+                                            target: "based_rollup::driver",
+                                            %err,
+                                            l1_block_number,
+                                            "zero-consumption detected but failed to \
+                                             re-query on-chain root — Gap 2 \
+                                             (anchor-divergence detection in flush \
+                                             mismatch path) will catch it next cycle"
+                                        );
+                                        None
+                                    }
+                                };
+
+                                if let Some(refreshed_root) = refreshed_on_chain_root {
+                                    if let Some(anchor) = self.l1_confirmed_anchor {
+                                        let reorg_depth = self
+                                            .l2_head_number
+                                            .saturating_sub(anchor.l2_block_number);
+                                        if reorg_depth_exceeded(reorg_depth, REORG_SAFETY_THRESHOLD)
+                                        {
+                                            error!(
+                                                target: "based_rollup::driver",
+                                                anchor_l2 = anchor.l2_block_number,
+                                                anchor_l1 = anchor.l1_block_number,
+                                                %refreshed_root,
+                                                reorg_depth,
+                                                threshold = REORG_SAFETY_THRESHOLD,
+                                                l2_head = self.l2_head_number,
+                                                real_entry_count,
+                                                l1_block_number,
+                                                "zero-consumption (trigger fully reverted) \
+                                                 AND sibling-reorg depth beyond safety \
+                                                 threshold — halting; operator intervention \
+                                                 required. Clearing hold so one cycle \
+                                                 doesn't silently wedge."
+                                            );
+                                            // Clear the hold so
+                                            // `flush_precheck` re-enters on
+                                            // subsequent ticks (the hold
+                                            // would otherwise block forever);
+                                            // do NOT queue a sibling reorg
+                                            // that cannot complete.
+                                            self.hold.clear();
+                                        } else if self.pending_sibling_reorg.is_none() {
+                                            warn!(
+                                                target: "based_rollup::driver",
+                                                anchor_l2 = anchor.l2_block_number,
+                                                anchor_l1 = anchor.l1_block_number,
+                                                %refreshed_root,
+                                                reorg_depth,
+                                                l2_head = self.l2_head_number,
+                                                real_entry_count,
+                                                l1_block_number,
+                                                "zero-consumption at postBatch-confirm: trigger \
+                                                 fully reverted on L1. Queuing sibling reorg \
+                                                 for anchor block (depth-0 recovery; \
+                                                 flush_precheck dispatch will switch to Sync \
+                                                 mode on next tick). See \
+                                                 project_testnet_stall_2026_04_17."
+                                            );
+                                            self.pending_sibling_reorg =
+                                                Some(SiblingReorgRequest {
+                                                    target_l2_block: anchor.l2_block_number,
+                                                    expected_root: refreshed_root,
+                                                });
+                                            // Release the hold — the
+                                            // divergence is being handled via
+                                            // sibling reorg; the subsequent
+                                            // dispatch will clear internal
+                                            // state anyway.
+                                            self.hold.clear();
+                                            return Ok(());
+                                        } else {
+                                            // A sibling reorg is already in
+                                            // flight — let it complete before
+                                            // queuing another. Fall through
+                                            // to the deferral-mechanism
+                                            // backup below.
+                                            warn!(
+                                                target: "based_rollup::driver",
+                                                anchor_l2 = anchor.l2_block_number,
+                                                l1_block_number,
+                                                real_entry_count,
+                                                "zero-consumption detected while a sibling \
+                                                 reorg is already pending — falling through \
+                                                 to deferral backup"
+                                            );
+                                        }
+                                    } else {
+                                        // No anchor yet (cold start). Fall
+                                        // through to the deferral backup.
+                                        warn!(
+                                            target: "based_rollup::driver",
+                                            l1_block_number,
+                                            real_entry_count,
+                                            "zero-consumption detected without an \
+                                             L1-confirmed anchor — falling through to \
+                                             deferral backup"
+                                        );
+                                    }
+                                }
                             }
-                            // If consumed_hashes is empty (query failed or no events),
-                            // fall through — the deferral mechanism in
-                            // verify_local_block_matches_l1 handles it as backup.
+                            // If `consumed_hashes` is empty AND there are no
+                            // real entries (or the refreshed-root re-query
+                            // failed, or a sibling reorg is already in
+                            // flight), fall through — the deferral mechanism
+                            // in `verify_local_block_matches_l1` handles it
+                            // as backup, and Gap 2 (anchor-divergence
+                            // detection in the flush mismatch path) catches
+                            // the post-commit case on the next cycle.
                         }
                     }
                     Err(err) => {
