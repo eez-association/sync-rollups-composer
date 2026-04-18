@@ -573,6 +573,36 @@ where
                     break;
                 }
 
+                // If a sibling reorg has been queued (by Fix 1 / Fix 2 / verify
+                // fast-path), break out so `flush_to_l1`'s `flush_precheck` can
+                // dispatch it on the same tick. Without this, `verify_local_block_matches_l1`
+                // would fire `NoOpPendingSiblingReorg` → `Err`, which would
+                // propagate through `?` and short-circuit `step_builder` BEFORE
+                // `flush_to_l1` runs — the dispatch would never fire and the
+                // chain would wedge (byte-level evidence: 2026-04-18 devnet soak
+                // showed L2 stuck at block 71 for 23+ min with 38 NoOp Err
+                // events accumulating, never a dispatch).
+                //
+                // Skipping the verify loop here is safe because `step_sync`
+                // (which runs after the queued reorg transitions mode=Sync)
+                // re-processes these blocks via derivation and either calls
+                // `rebuild_block_as_sibling` for the target block (mod.rs:1133)
+                // or skips already-built blocks cleanly. Any non-target block
+                // that would have been verified here will be re-derived and
+                // verified by `step_sync` or re-fired by the builder loop once
+                // the reorg completes.
+                if self.pending_sibling_reorg.is_some() {
+                    info!(
+                        target: "based_rollup::driver",
+                        pending_target = self.pending_sibling_reorg.map(|r| r.target_l2_block),
+                        current_block_in_batch = block.l2_block_number,
+                        l2_head = self.l2_head_number,
+                        "derive_and_verify: breaking loop — pending sibling reorg queued, \
+                         letting flush_precheck dispatch it before any more verify calls"
+                    );
+                    break;
+                }
+
                 if block.l2_block_number <= self.l2_head_number {
                     // We already built this block locally. Verify it matches L1.
                     self.verify_local_block_matches_l1(block)?;
@@ -600,7 +630,12 @@ where
             // If a rewind was triggered during verification, do NOT commit the
             // batch — the cursor must stay so blocks are re-derived after the
             // rewind completes.
-            if self.pending_rewind_target.is_some() {
+            //
+            // Same rule applies when a sibling reorg is pending: we broke out
+            // of the loop early, so not all blocks were processed. Committing
+            // the cursor here would advance past blocks that must still be
+            // re-derived by `step_sync` to trigger the sibling-reorg rebuild.
+            if self.pending_rewind_target.is_some() || self.pending_sibling_reorg.is_some() {
                 return Ok(());
             }
 
