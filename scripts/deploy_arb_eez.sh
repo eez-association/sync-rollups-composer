@@ -19,7 +19,16 @@ L2_RPC="${L2_RPC:-https://eez.dev/composer/l2}"
 
 ROLLUPS="0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
 BRIDGE="0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
-BRIDGE_L2="0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
+# BRIDGE_L2 is deployed at L2 genesis as the 3rd contract (nonce 2).
+# Auto-discover from block 1 so this script survives chain resets.
+BRIDGE_L2="${BRIDGE_L2:-$(python3 -c "
+import json, urllib.request
+req = urllib.request.Request('$L2_RPC', data=json.dumps({'jsonrpc':'2.0','method':'eth_getBlockByNumber','params':['0x1', True],'id':1}).encode(), headers={'Content-Type':'application/json'})
+blk = json.loads(urllib.request.urlopen(req).read())['result']
+tx = next(t for t in blk['transactions'] if int(t['nonce'],16)==2)
+r = urllib.request.Request('$L2_RPC', data=json.dumps({'jsonrpc':'2.0','method':'eth_getTransactionReceipt','params':[tx['hash']],'id':1}).encode(), headers={'Content-Type':'application/json'})
+print(json.loads(urllib.request.urlopen(r).read())['result']['contractAddress'])
+")}"
 ROLLUP_ID=1
 
 # Funder — DO NOT use dev#0 (0xf39F…): that is the builder / deployer key.
