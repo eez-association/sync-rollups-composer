@@ -4743,8 +4743,12 @@ fn test_verify_non_filtering_mismatch_uses_deferral_path() {
     );
     assert_eq!(
         classify_verify_mismatch(true, true, false, 0, 3),
-        VerifyMismatchAction::GenericMismatchRewind,
-        "already queued → no double-queue"
+        VerifyMismatchAction::NoOpPendingSiblingReorg,
+        "already queued → no-op (preserve pending_sibling_reorg; avoid \
+         bare FCU rewind). PR #39 soak uncovered that this previously \
+         fell through to GenericMismatchRewind, which called \
+         clear_internal_state (wiping the queued request) and set \
+         pending_rewind_target (triggering bare FCU on the next tick)."
     );
     assert_eq!(
         classify_verify_mismatch(false, false, true, 0, 3),
@@ -4760,6 +4764,21 @@ fn test_verify_non_filtering_mismatch_uses_deferral_path() {
         classify_verify_mismatch(false, false, false, 0, 3),
         VerifyMismatchAction::GenericMismatchRewind,
         "non-filtering, no entry block → generic rewind"
+    );
+    // Option B (PR #39 soak fix): `NoOpPendingSiblingReorg` must take
+    // precedence over the entry-block branches when a sibling reorg is
+    // already queued. Otherwise a queued reorg for an entry-bearing block
+    // would be wiped by the deferral-exhausted rewind path.
+    assert_eq!(
+        classify_verify_mismatch(true, true, true, 0, 3),
+        VerifyMismatchAction::NoOpPendingSiblingReorg,
+        "filtering + already-queued + entry-block → queued reorg wins over defer"
+    );
+    assert_eq!(
+        classify_verify_mismatch(true, true, true, 2, 3),
+        VerifyMismatchAction::NoOpPendingSiblingReorg,
+        "filtering + already-queued + entry-block + exhausted → queued reorg wins \
+         over rewind (do NOT clear_internal_state + set pending_rewind_target)"
     );
 }
 

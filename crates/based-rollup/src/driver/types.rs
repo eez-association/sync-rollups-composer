@@ -100,6 +100,23 @@ pub(super) enum VerificationDecision {
         target_l2_block: u64,
         expected_root: B256,
     },
+    /// §4f-flagged mismatch at a block while `pending_sibling_reorg` was
+    /// already queued (by Fix 1 / Fix 2 / verify fast-path on a prior tick).
+    /// The current divergence is expected to be resolved by the queued reorg
+    /// on a subsequent tick (via `flush_precheck` dispatch or `step_sync`'s
+    /// `rebuild_block_as_sibling`). The verify path intentionally does NOT
+    /// clear internal state (which would wipe the queued request) and does
+    /// NOT set `pending_rewind_target` (which would trigger bare FCU rewind).
+    /// The caller returns `Err` so the main loop's backoff machinery engages
+    /// while the queued reorg completes.
+    ///
+    /// Mirror telemetry only — the handler returns `Err` directly; this
+    /// variant exists so tests and the decision-log `trace!` can name the
+    /// branch taken.
+    SiblingReorgAlreadyQueued {
+        target_l2_block: u64,
+        queued_target: Option<u64>,
+    },
 }
 
 /// Outcome of verifying L2→L1 trigger receipts after a postBatch lands on L1.
@@ -611,6 +628,15 @@ pub(crate) enum VerifyMismatchAction {
     /// `plan_sibling_reorg_from_verify` + `apply_sibling_reorg_plan`. No
     /// deferral. This is the fast path (issue #36).
     FastPathSiblingReorg,
+    /// A sibling-reorg request is already queued (by Fix 1 / Fix 2 / verify
+    /// fast-path on a prior tick). The current mismatch is expected to be
+    /// resolved by that queued reorg — do NOT call `clear_internal_state`
+    /// (which would wipe the queued request), do NOT set
+    /// `pending_rewind_target` (which would trigger bare FCU rewind on the
+    /// next tick). Return Err so the main loop's backoff machinery engages,
+    /// and let the queued reorg complete on a subsequent tick via
+    /// `flush_precheck` dispatch or `step_sync`'s `rebuild_block_as_sibling`.
+    NoOpPendingSiblingReorg,
     /// Entry-bearing block with a pending hold — defer verification one more
     /// time so L1 has a chance to mine the consumption event.
     DeferEntryVerify,
@@ -645,6 +671,21 @@ pub(crate) fn classify_verify_mismatch(
     // Fast path: the two-pass C1 gate. Both conditions must be true.
     if filtering_present && !sibling_reorg_already_queued {
         return VerifyMismatchAction::FastPathSiblingReorg;
+    }
+    // §4f-shaped divergence at a block whose queued sibling reorg is about to
+    // fix it (production-critical bug from PR #39 soak — 55% of Fix 1
+    // recoveries silently fell through to bare FCU rewind because the verify
+    // path wiped `pending_sibling_reorg` via `clear_internal_state` and armed
+    // `pending_rewind_target` for a bare rewind on the next tick). Returning
+    // this variant tells the handler to do NOTHING to driver state and just
+    // return `Err` so backoff engages while the queued reorg completes.
+    //
+    // Must come BEFORE the entry-block check: a sibling reorg can legitimately
+    // be queued for an entry-bearing block (deposits/withdrawals divergence),
+    // and in that case we still want the queued reorg to win over the
+    // deferral/rewind paths.
+    if filtering_present && sibling_reorg_already_queued {
+        return VerifyMismatchAction::NoOpPendingSiblingReorg;
     }
     // Entry-bearing block with pending verification: defer or rewind depending
     // on how many deferrals we've already spent. The `+ 1` simulates the

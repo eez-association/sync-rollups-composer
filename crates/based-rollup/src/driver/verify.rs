@@ -225,6 +225,47 @@ where
                         expected_root: derived.state_root,
                     });
                 }
+                VerifyMismatchAction::NoOpPendingSiblingReorg => {
+                    // Production-critical: a sibling-reorg request is already
+                    // queued for an earlier tick (by Fix 1 in flush_to_l1,
+                    // Fix 2 in flush_precheck, or the verify fast-path above
+                    // on a prior tick). `step_builder` / `step_sync` dispatch
+                    // will complete the reorg on a subsequent tick. If we
+                    // instead took the generic-rewind path we would
+                    // `clear_internal_state()` — wiping `pending_sibling_reorg`
+                    // — and `set_rewind_target()` — arming a bare FCU rewind.
+                    // On reth `--dev` bare FCU-to-ancestor accidentally works
+                    // because the auto-seal engine tolerates backward FCU; on
+                    // production Ethereum-engine reth it's a silent no-op per
+                    // Engine API spec, leaving the builder permanently
+                    // divergent from fullnodes.
+                    //
+                    // Return `Err` so the main loop's backoff machinery
+                    // engages, but do NOT mutate driver state: the queued
+                    // reorg stays intact and completes on its own.
+                    let queued_target = self.pending_sibling_reorg.map(|r| r.target_l2_block);
+                    let queued_expected_root = self.pending_sibling_reorg.map(|r| r.expected_root);
+                    warn!(
+                        target: "based_rollup::driver",
+                        l2_block = derived.l2_block_number,
+                        %header_root,
+                        l1_state_root = %derived.state_root,
+                        ?queued_target,
+                        ?queued_expected_root,
+                        "§4f divergence at verify but sibling reorg already queued — \
+                         returning Err to engage backoff; queued reorg will complete on a \
+                         subsequent tick (do NOT wipe pending_sibling_reorg or set \
+                         pending_rewind_target)"
+                    );
+                    let _decision = VerificationDecision::SiblingReorgAlreadyQueued {
+                        target_l2_block: derived.l2_block_number,
+                        queued_target,
+                    };
+                    return Err(eyre::eyre!(
+                        "state root mismatch at L2 block {} deferred to queued sibling reorg",
+                        derived.l2_block_number
+                    ));
+                }
                 VerifyMismatchAction::DeferEntryVerify => {
                     // Existing hold-defer branch — the classifier identified
                     // `is_pending_entry_block && deferrals < MAX-1`.
