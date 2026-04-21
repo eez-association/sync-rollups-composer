@@ -827,11 +827,22 @@ async fn build_and_run_bundled_initial_trace(
     // Second param is StateContext / block override. reth doesn't accept a
     // bare string like "latest" here — must be null or a struct. See existing
     // invocations in sim_client.rs (line 116-119).
+    // blockOverride advances the simulated block number + timestamp by 1,
+    // matching direction.rs::build_retrace_bundle. Without this, our fake
+    // postBatch reverts with StateAlreadyUpdatedThisBlock (0x622d0c4a) —
+    // Rollups.sol refuses a second postBatch in the same L1 block, and the
+    // REAL postBatch already landed before our sim runs.
     let trace_req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "debug_traceCallMany",
         "params": [
-            [{ "transactions": transactions }],
+            [{
+                "transactions": transactions,
+                "blockOverride": {
+                    "number": next_block,
+                    "time": format!("{:#x}", timestamp),
+                }
+            }],
             Value::Null,
             { "tracer": "callTracer" }
         ],
@@ -858,10 +869,36 @@ async fn build_and_run_bundled_initial_trace(
         return Ok(None);
     }
 
+    // INSTRUMENTATION: log outcome of each tx in the bundle to diagnose
+    // whether prior user txs' state effects persisted into the subject's
+    // trace. If a prior tx REVERTED here, its AMM swap etc. rolled back
+    // and the subject sees pre-prior state — the same bug as pre-fix.
+    for (i, t) in bundle_traces.iter().enumerate() {
+        let slot_name = if i == 0 {
+            "postBatch".to_string()
+        } else if i == bundle_traces.len() - 1 {
+            "subject".to_string()
+        } else {
+            format!("prior[{}]", i - 1)
+        };
+        let err = t.get("error").and_then(|v| v.as_str()).unwrap_or("none");
+        let out = t.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        let revert_reason = t
+            .get("revertReason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        tracing::info!(
+            target: "based_rollup::l1_proxy",
+            slot = slot_name,
+            position = i,
+            error = err,
+            revert_reason,
+            output_prefix = %&out[..out.len().min(20)],
+            "bundled_trace: per-slot outcome"
+        );
+    }
+
     // Return the LAST trace — this tx's behavior in the post-priors state.
-    // Use `next_block` / `timestamp` block-override? debug_traceCallMany
-    // already advances state per tx; no extra override needed here.
-    let _ = (next_block, timestamp); // suppress unused
     Ok(Some(bundle_traces[bundle_traces.len() - 1].clone()))
 }
 
