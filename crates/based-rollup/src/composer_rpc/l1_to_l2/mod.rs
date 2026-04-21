@@ -50,10 +50,16 @@ use process::parse_u256_from_return;
 
 /// Run the L1 RPC proxy server.
 ///
-/// `pending_l1_forward_txs`, `l1_block_time_ms` and `bundle_close_fraction` are
-/// wired through for the BundleManager (Phase 2 of the composer bundling fix,
-/// issue #41 / docs/DERIVATION.md §15). In Phase 1 they are accepted but not
-/// yet consumed — behavior is unchanged.
+/// Creates a `BundleManager` and spawns its cycle loop to enforce the
+/// sim-runtime determinism invariant (docs/DERIVATION.md §15.1).
+///
+/// Cross-chain user txs are intercepted by `handle_request`, decoded into
+/// [`PendingUserTx`] entries, and submitted to the bundler. The bundler's
+/// background cycle loop closes the window every
+/// `l1_block_time_ms * bundle_close_fraction` ms and dispatches the drained
+/// bundle to the finalizer, which processes each tx (Phase 3.A: sequentially
+/// via the existing `handle_cross_chain_tx`; Phase 3.B: with prior-bundle
+/// context for the sim==runtime invariant).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_l1_rpc_proxy(
     l1_proxy_port: u16,
@@ -68,8 +74,11 @@ pub async fn run_l1_rpc_proxy(
     l1_block_time_ms: u64,
     bundle_close_fraction: f64,
 ) -> eyre::Result<()> {
-    // Silence "unused while Phase 2 lands" warnings without suppressing real issues.
-    let _ = (&pending_l1_forward_txs, l1_block_time_ms, bundle_close_fraction);
+    // `pending_l1_forward_txs` is retained for a future phase where the composer
+    // may want to observe already-queued txs (e.g. if the bundler restarts and
+    // we want to carry state forward). Phase 3 doesn't read it.
+    let _ = &pending_l1_forward_txs;
+
     let addr = SocketAddr::from(([0, 0, 0, 0], l1_proxy_port));
     let listener = TcpListener::bind(addr).await?;
 
@@ -80,6 +89,8 @@ pub async fn run_l1_rpc_proxy(
         %l2_rpc_url,
         %rollups_address,
         %builder_address,
+        l1_block_time_ms,
+        bundle_close_fraction,
         "L1 RPC proxy listening"
     );
 
@@ -88,13 +99,42 @@ pub async fn run_l1_rpc_proxy(
         .build()
         .expect("failed to build reqwest client");
 
+    // ── BundleManager wiring ────────────────────────────────────────────────
+    let bundle_manager = Arc::new(super::bundle_manager::BundleManager::new(
+        super::bundle_manager::BundleConfig {
+            l1_block_time_ms,
+            close_fraction: bundle_close_fraction,
+        },
+    ));
+
+    // Spawn the cycle loop. Phase 3.A ships with an **observer** finalizer —
+    // it logs what it sees but takes no action, so behavior is unchanged
+    // from pre-bundling. Phase 3.B swaps in the passthrough finalizer that
+    // actually processes drained txs, and Phase 3.C adds the bundle-aware
+    // simulation that implements the sim==runtime invariant (§15.1).
+    {
+        let bundle_manager_clone = bundle_manager.clone();
+        tokio::spawn(async move {
+            bundle_manager_clone
+                .run_cycle_loop(|_mgr, drained| async move {
+                    tracing::info!(
+                        target: "based_rollup::composer_bundle",
+                        bundle_id = %drained.bundle_id,
+                        tx_count = drained.txs.len(),
+                        sim_source = "observer",
+                        "bundle_observer — Phase 3.A no-op"
+                    );
+                    Ok(())
+                })
+                .await;
+        });
+    }
+
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(target: "based_rollup::l1_proxy", %e, "accept failed");
-                // Brief backoff to prevent CPU-saturating spin on persistent errors
-                // (e.g., file descriptor exhaustion).
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
@@ -104,6 +144,7 @@ pub async fn run_l1_rpc_proxy(
         let l1_rpc_url = l1_rpc_url.clone();
         let l2_rpc_url = l2_rpc_url.clone();
         let builder_private_key = builder_private_key.clone();
+        let bundle_manager = bundle_manager.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
@@ -111,6 +152,7 @@ pub async fn run_l1_rpc_proxy(
                 let l1_rpc_url = l1_rpc_url.clone();
                 let l2_rpc_url = l2_rpc_url.clone();
                 let builder_private_key = builder_private_key.clone();
+                let bundle_manager = bundle_manager.clone();
                 handle_request(
                     req,
                     client,
@@ -121,6 +163,7 @@ pub async fn run_l1_rpc_proxy(
                     builder_private_key,
                     rollup_id,
                     cross_chain_manager_address,
+                    bundle_manager,
                     peer,
                 )
             });
@@ -143,7 +186,14 @@ pub async fn run_l1_rpc_proxy(
     }
 }
 
+
 /// Handle a single JSON-RPC request.
+///
+/// `_bundle_manager` is threaded through for Phase 3.B, where `handle_request`
+/// stops calling `handle_cross_chain_tx` inline and instead submits a
+/// `PendingUserTx` to the bundler. In Phase 3.A the parameter is accepted but
+/// unused — the observer cycle loop logs whenever the window closes with an
+/// empty bundle, proving the plumbing works before we flip the switch.
 #[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
@@ -155,6 +205,7 @@ async fn handle_request(
     builder_private_key: Option<String>,
     rollup_id: u64,
     cross_chain_manager_address: Address,
+    _bundle_manager: Arc<super::bundle_manager::BundleManager>,
     _peer: SocketAddr,
 ) -> Result<Response<Full<HyperBytes>>, hyper::Error> {
     // Handle CORS preflight
