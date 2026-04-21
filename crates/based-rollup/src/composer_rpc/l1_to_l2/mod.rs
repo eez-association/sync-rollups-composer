@@ -815,12 +815,15 @@ async fn build_and_run_bundled_initial_trace(
         "gas": "0x2faf080"
     }));
 
+    // Second param is StateContext / block override. reth doesn't accept a
+    // bare string like "latest" here — must be null or a struct. See existing
+    // invocations in sim_client.rs (line 116-119).
     let trace_req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "debug_traceCallMany",
         "params": [
             [{ "transactions": transactions }],
-            "latest",
+            Value::Null,
             { "tracer": "callTracer" }
         ],
         "id": 1
