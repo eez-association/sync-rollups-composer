@@ -126,9 +126,11 @@ pub async fn run_l1_rpc_proxy(
         let bundle_manager_clone = bundle_manager.clone();
         let queued_calls = queued_cross_chain_calls.clone();
 
+        let poll_client = client.clone();
+        let poll_url = Some(l1_rpc_url.clone());
         tokio::spawn(async move {
             bundle_manager_clone
-                .run_cycle_loop(move |mgr, drained| {
+                .run_cycle_loop(poll_url, poll_client, move |mgr, drained| {
                     finalize_bundle_with_context(
                         mgr,
                         drained,
@@ -249,6 +251,17 @@ async fn finalize_bundle_with_context(
     // Sort by gas price descending to match reth mempool ordering.
     super::bundle_manager::sort_bundle_by_gas_desc(&mut txs);
 
+    // Inter-bundle races are handled NATURALLY by timing: by the time bundle
+    // N+1 opens its window, bundle N's postBatch + raw txs have already
+    // landed in the most recent L1 block, so the L1 "latest" state seen by
+    // bundle N+1's debug_traceCall reflects bundle N's effects automatically.
+    // No carry-over of prior_entries/prior_raw_txs from the driver queue is
+    // required. See docs/DERIVATION.md §15.1 ("deterministic timing model").
+    //
+    // Intra-bundle (this finalize): accumulates via the loop below.
+    let mut prior_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> = Vec::new();
+    let mut prior_raw_txs: Vec<Bytes> = Vec::new();
+
     let start = Instant::now();
     let sim_source = if txs.len() > 1 { "bundle" } else { "standalone" };
     tracing::info!(
@@ -258,10 +271,6 @@ async fn finalize_bundle_with_context(
         sim_source,
         "bundle_finalize_start"
     );
-
-    // Accumulators — grow as each tx commits.
-    let mut prior_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> = Vec::new();
-    let mut prior_raw_txs: Vec<Bytes> = Vec::new();
 
     for tx in &txs {
         let raw_tx_hex = format!("0x{}", alloy_primitives::hex::encode(&tx.raw_tx));

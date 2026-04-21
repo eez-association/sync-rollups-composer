@@ -198,19 +198,35 @@ impl BundleManager {
         self.state.lock().expect("bundle state poisoned").cycle_start_ms
     }
 
-    /// Main cycle loop — drives rotation on `(window_ms, grace_ms)` intervals.
+    /// Main cycle loop — drives rotation event-driven on L1 block arrival.
     ///
-    /// This is a `Arc<Self>` method: spawn it in a tokio task and it runs forever.
-    /// On each cycle:
-    /// 1. Wait `window_ms`.
-    /// 2. Drain `current` atomically, spawn `finalize_bundle` in a sibling task.
-    /// 3. Wait `grace_ms`.
-    /// 4. Rotate: `current` ← `next`.
-    pub async fn run_cycle_loop<F, Fut>(self: Arc<Self>, finalizer: F)
-    where
+    /// Per docs/DERIVATION.md §15.1 the bundle N+1 MUST be rooted in a fresh L1
+    /// block (the one that potentially carries bundle N's postBatch), so we
+    /// poll L1 during the grace period and rotate on block advance, not on a
+    /// timer. This guarantees that bundle N+1's very first simulation reads an
+    /// L1 "latest" state already containing bundle N's effects.
+    ///
+    /// Flow per cycle:
+    /// 1. Wait `window_ms` (accept txs into `current`).
+    /// 2. Drain `current`, spawn `finalize` in a sibling task (so we can start
+    ///    polling while the finalize runs concurrently).
+    /// 3. Poll L1 `eth_blockNumber` every `L1_POLL_INTERVAL_MS` (default 200ms)
+    ///    until the number advances, or until `grace_ms` elapses as a hard
+    ///    timeout — whichever comes first.
+    /// 4. Rotate: `current` ← `next`; `cycle_start_ms = now`.
+    ///
+    /// Takes an `l1_poll_url` for the observation. If `None`, falls back to
+    /// timer-based rotation (used by unit tests).
+    pub async fn run_cycle_loop<F, Fut>(
+        self: Arc<Self>,
+        l1_poll_url: Option<String>,
+        client: reqwest::Client,
+        finalizer: F,
+    ) where
         F: Fn(Arc<Self>, DrainedBundle) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = eyre::Result<()>> + Send + 'static,
     {
+        const L1_POLL_INTERVAL_MS: u64 = 200;
         let finalizer = Arc::new(finalizer);
 
         // Sync the first close_deadline to wall-clock time.
@@ -222,7 +238,7 @@ impl BundleManager {
         }
 
         let window = Duration::from_millis(self.config.window_ms());
-        let grace = Duration::from_millis(self.config.grace_ms());
+        let grace_timeout = Duration::from_millis(self.config.grace_ms());
 
         loop {
             sleep(window).await;
@@ -251,10 +267,113 @@ impl BundleManager {
                 });
             }
 
-            sleep(grace).await;
+            // Wait for an L1 block advance or grace timeout — whichever first.
+            // Rotating earlier means bundle N+1's sim would use the PREVIOUS
+            // L1 block as "latest" and miss bundle N's effects.
+            let rotation_reason = match &l1_poll_url {
+                Some(url) => {
+                    match wait_for_l1_block_advance(
+                        &client,
+                        url,
+                        grace_timeout,
+                        Duration::from_millis(L1_POLL_INTERVAL_MS),
+                    )
+                    .await
+                    {
+                        Ok(Some(new_block)) => {
+                            tracing::info!(
+                                target: "based_rollup::composer_bundle",
+                                new_l1_block = new_block,
+                                "cycle_rotation: new L1 block observed"
+                            );
+                            "l1_block_advance"
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                target: "based_rollup::composer_bundle",
+                                grace_timeout_ms = grace_timeout.as_millis() as u64,
+                                "cycle_rotation: grace timeout hit without new L1 block — rotating anyway"
+                            );
+                            "grace_timeout"
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "based_rollup::composer_bundle",
+                                %e,
+                                "cycle_rotation: L1 poll error — rotating by timer"
+                            );
+                            "poll_error"
+                        }
+                    }
+                }
+                None => {
+                    sleep(grace_timeout).await;
+                    "timer_only"
+                }
+            };
+
+            tracing::debug!(
+                target: "based_rollup::composer_bundle",
+                rotation_reason,
+                "cycle_rotation"
+            );
             self.rotate();
         }
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  L1 block observation
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Poll `eth_blockNumber` at `poll_interval` until it advances from the number
+/// observed on entry, or until `timeout` elapses.
+///
+/// - `Ok(Some(new_block))` — the block number advanced; returns the new value.
+/// - `Ok(None)` — timeout hit without observing an advance (caller should log
+///   and proceed, not treat this as a hard error — the rotation continues).
+/// - `Err(e)` — RPC / parsing failure on the FIRST poll (we cannot even read
+///   the baseline number). Caller falls back to timer rotation.
+pub async fn wait_for_l1_block_advance(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> eyre::Result<Option<u64>> {
+    let baseline = fetch_l1_block_number(client, l1_rpc_url).await?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        sleep(poll_interval).await;
+        match fetch_l1_block_number(client, l1_rpc_url).await {
+            Ok(n) if n > baseline => return Ok(Some(n)),
+            Ok(_) => continue,
+            // Transient RPC errors during poll — keep polling until deadline.
+            Err(_) => continue,
+        }
+    }
+}
+
+async fn fetch_l1_block_number(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+) -> eyre::Result<u64> {
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_blockNumber",
+        "params": [],
+        "id": 1
+    });
+    let resp = client.post(l1_rpc_url).json(&req).send().await?;
+    let body: serde_json::Value = resp.json().await?;
+    let hex = body
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("missing result"))?;
+    let hex = hex.strip_prefix("0x").unwrap_or(hex);
+    Ok(u64::from_str_radix(hex, 16)?)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

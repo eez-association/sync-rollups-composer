@@ -63,11 +63,14 @@ pub struct RollupConfig {
 
     /// Fraction of the L1 block time during which the composer accepts new user
     /// txs into the CURRENT bundle. After this fraction elapses, new txs land
-    /// in the next bundle. Default 0.7 (8.4s window out of 12s block time),
-    /// leaving ~3.6s slack for finalize + driver commit + L1 inclusion.
+    /// in the next bundle. Default 0.9 (10.8s window out of 12s block time),
+    /// leaving ~1.2s slack for finalize + driver commit + L1 inclusion.
+    ///
+    /// Higher values maximize bundle overlap (sim==runtime for more races) at
+    /// the cost of less finalize slack.
     ///
     /// See docs/DERIVATION.md §15 (Composer Bundling) for the full model.
-    #[arg(long, env = "COMPOSER_BUNDLE_CLOSE_FRACTION", default_value = "0.7")]
+    #[arg(long, env = "COMPOSER_BUNDLE_CLOSE_FRACTION", default_value = "0.9")]
     #[serde(default = "default_composer_bundle_close_fraction")]
     pub composer_bundle_close_fraction: f64,
 
@@ -242,7 +245,7 @@ fn default_block_time() -> u64 {
 }
 
 fn default_composer_bundle_close_fraction() -> f64 {
-    0.7
+    0.9
 }
 
 /// Parse the BOOTSTRAP_ACCOUNTS string into a list of (address, wei) pairs.
