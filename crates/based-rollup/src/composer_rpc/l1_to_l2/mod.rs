@@ -107,24 +107,33 @@ pub async fn run_l1_rpc_proxy(
         },
     ));
 
-    // Spawn the cycle loop. Phase 3.A ships with an **observer** finalizer —
-    // it logs what it sees but takes no action, so behavior is unchanged
-    // from pre-bundling. Phase 3.B swaps in the passthrough finalizer that
-    // actually processes drained txs, and Phase 3.C adds the bundle-aware
-    // simulation that implements the sim==runtime invariant (§15.1).
+    // Spawn the cycle loop with the **passthrough** finalizer (Phase 3.B):
+    // each drained tx is processed sequentially via `handle_cross_chain_tx`.
+    // Processing happens in isolation per tx — equivalent to pre-bundling
+    // behavior but delayed up to `window_ms`. Phase 3.C upgrades this to
+    // bundle-aware simulation for the sim==runtime invariant (§15.1).
     {
+        let client = client.clone();
+        let l1_rpc_url = l1_rpc_url.clone();
+        let l2_rpc_url = l2_rpc_url.clone();
+        let builder_private_key = builder_private_key.clone();
         let bundle_manager_clone = bundle_manager.clone();
+
         tokio::spawn(async move {
             bundle_manager_clone
-                .run_cycle_loop(|_mgr, drained| async move {
-                    tracing::info!(
-                        target: "based_rollup::composer_bundle",
-                        bundle_id = %drained.bundle_id,
-                        tx_count = drained.txs.len(),
-                        sim_source = "observer",
-                        "bundle_observer — Phase 3.A no-op"
-                    );
-                    Ok(())
+                .run_cycle_loop(move |mgr, drained| {
+                    finalize_bundle_passthrough(
+                        mgr,
+                        drained,
+                        client.clone(),
+                        l1_rpc_url.clone(),
+                        l2_rpc_url.clone(),
+                        rollups_address,
+                        builder_address,
+                        builder_private_key.clone(),
+                        rollup_id,
+                        cross_chain_manager_address,
+                    )
                 })
                 .await;
         });
@@ -187,13 +196,211 @@ pub async fn run_l1_rpc_proxy(
 }
 
 
-/// Handle a single JSON-RPC request.
+/// Passthrough finalizer (Phase 3.B): process each queued user tx sequentially
+/// via the existing `handle_cross_chain_tx` pipeline.
 ///
-/// `_bundle_manager` is threaded through for Phase 3.B, where `handle_request`
-/// stops calling `handle_cross_chain_tx` inline and instead submits a
-/// `PendingUserTx` to the bundler. In Phase 3.A the parameter is accepted but
-/// unused — the observer cycle loop logs whenever the window closes with an
-/// empty bundle, proving the plumbing works before we flip the switch.
+/// Each tx is simulated in isolation — same as pre-bundling behavior but
+/// delayed up to `window_ms`. Phase 3.C upgrades this to bundle-aware
+/// simulation where each tx's trace sees the effects of prior txs in the
+/// bundle, enforcing the `sim == runtime` invariant (§15.1).
+///
+/// Sorts the bundle by effective_gas_price DESC (matches reth mempool order).
+/// On per-tx failure: log ERROR and continue — a single bad tx must not kill
+/// the cycle. No retry at this layer; retry is a Phase 3.C concern for the
+/// bundle-wide simulation.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_bundle_passthrough(
+    mgr: Arc<super::bundle_manager::BundleManager>,
+    drained: super::bundle_manager::DrainedBundle,
+    client: reqwest::Client,
+    l1_rpc_url: String,
+    l2_rpc_url: String,
+    rollups_address: Address,
+    builder_address: Address,
+    builder_private_key: Option<String>,
+    rollup_id: u64,
+    cross_chain_manager_address: Address,
+) -> eyre::Result<()> {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    let bundle_id = drained.bundle_id;
+    let mut txs = drained.txs;
+
+    // Sort by gas price descending to match reth mempool ordering, so the
+    // order we commit entries in matches the order L1 will mine user txs.
+    super::bundle_manager::sort_bundle_by_gas_desc(&mut txs);
+
+    let start = Instant::now();
+    tracing::info!(
+        target: "based_rollup::composer_bundle",
+        %bundle_id,
+        tx_count = txs.len(),
+        sim_source = "passthrough",
+        "bundle_finalize_start"
+    );
+
+    for tx in &txs {
+        let raw_tx_hex = format!("0x{}", alloy_primitives::hex::encode(&tx.raw_tx));
+        match handle_cross_chain_tx(
+            &client,
+            &l1_rpc_url,
+            &l2_rpc_url,
+            &raw_tx_hex,
+            rollups_address,
+            builder_address,
+            builder_private_key.clone(),
+            rollup_id,
+            cross_chain_manager_address,
+        )
+        .await
+        {
+            Ok(Some(_hash)) => {
+                // Cross-chain tx queued to driver (entries + raw_tx).
+            }
+            Ok(None) => {
+                // Quick-detect in handle_request classified this as cross-chain
+                // but handle_cross_chain_tx disagrees — possible if proxy lookups
+                // changed between the two calls. Log + skip; bot sees timeout.
+                tracing::warn!(
+                    target: "based_rollup::composer_bundle",
+                    %bundle_id,
+                    tx_hash = %tx.tx_hash,
+                    "bundle_tx_not_cross_chain — detection mismatch, skipping"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "based_rollup::composer_bundle",
+                    %bundle_id,
+                    tx_hash = %tx.tx_hash,
+                    %e,
+                    "bundle_tx_finalize_error"
+                );
+            }
+        }
+    }
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    tracing::info!(
+        target: "based_rollup::composer_bundle",
+        %bundle_id,
+        tx_count = txs.len(),
+        elapsed_ms,
+        "bundle_finalize_success"
+    );
+    mgr.metrics
+        .finalize_success_total
+        .fetch_add(1, Ordering::Relaxed);
+    mgr.metrics
+        .tx_finalized_total
+        .fetch_add(txs.len() as u64, Ordering::Relaxed);
+
+    Ok(())
+}
+
+/// Quick detection: does this tx make any cross-chain calls?
+///
+/// Runs `debug_traceCall` once on the tx, walks the call tree for
+/// `executeCrossChainCall` children on the Rollups contract. Same logic
+/// `trace_and_detect_internal_calls` uses to decide whether to process,
+/// but stops immediately after the first trace — no iterative discovery.
+///
+/// Returns `false` on any RPC error (conservative: fall through to
+/// regular forwarding; no cross-chain processing attempted).
+async fn quick_detect_cross_chain(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    tx_obj: &Value,
+    rollups_address: Address,
+) -> bool {
+    let from = tx_obj
+        .get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0x0000000000000000000000000000000000000000");
+    let to = match tx_obj.get("to").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return false,
+    };
+    let data = tx_obj.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
+    let value = tx_obj
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0x0");
+
+    let trace_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "debug_traceCall",
+        "params": [
+            {"from": from, "to": to, "data": data, "value": value, "gas": "0x2faf080"},
+            "latest",
+            { "tracer": "callTracer" }
+        ],
+        "id": 1
+    });
+
+    let resp = match client.post(l1_rpc_url).json(&trace_req).send().await {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let body: super::common::JsonRpcResponse = match resp.json().await {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let trace = match body.into_result() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let mut proxy_cache: HashMap<Address, Option<super::trace::ProxyInfo>> = HashMap::new();
+    let detected = walk_l1_trace_generic(
+        client,
+        l1_rpc_url,
+        rollups_address,
+        &trace,
+        &mut proxy_cache,
+    )
+    .await;
+    !detected.is_empty()
+}
+
+/// Build a [`super::bundle_manager::PendingUserTx`] from a raw signed tx.
+///
+/// Decodes the envelope to extract the sender (via ecrecover), target,
+/// calldata, value, and effective gas price. Computes `tx_hash` as
+/// `keccak256(raw_bytes)` — the same hash the bot computes client-side.
+///
+/// Returns `None` for CREATE txs (no `to`) or any decode failure —
+/// those txs fall through to regular forwarding, not the bundler.
+fn build_pending_user_tx(raw_tx_hex: &str) -> Option<super::bundle_manager::PendingUserTx> {
+    use alloy_consensus::Transaction;
+    use alloy_consensus::transaction::TxEnvelope;
+    use alloy_primitives::keccak256;
+    use alloy_rlp::Decodable;
+    use reth_primitives_traits::SignerRecoverable;
+
+    let raw_hex = raw_tx_hex.strip_prefix("0x").unwrap_or(raw_tx_hex);
+    let raw_bytes = hex_decode(raw_hex)?;
+
+    let envelope = TxEnvelope::decode(&mut raw_bytes.as_slice()).ok()?;
+    let from = envelope.recover_signer().ok()?;
+    let to = envelope.to()?;
+
+    let tx_hash = keccak256(&raw_bytes);
+
+    Some(super::bundle_manager::PendingUserTx {
+        raw_tx: Bytes::from(raw_bytes.clone()),
+        tx_hash,
+        from,
+        to,
+        data: Bytes::from(envelope.input().to_vec()),
+        value: envelope.value(),
+        effective_gas_price: super::bundle_manager::effective_gas_price(&raw_bytes),
+        arrived_at_ms: super::bundle_manager::now_ms(),
+    })
+}
+
+/// Handle a single JSON-RPC request.
 #[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
@@ -205,9 +412,22 @@ async fn handle_request(
     builder_private_key: Option<String>,
     rollup_id: u64,
     cross_chain_manager_address: Address,
-    _bundle_manager: Arc<super::bundle_manager::BundleManager>,
+    bundle_manager: Arc<super::bundle_manager::BundleManager>,
     _peer: SocketAddr,
 ) -> Result<Response<Full<HyperBytes>>, hyper::Error> {
+    // `l2_rpc_url`, `builder_private_key`, `builder_address`, `rollup_id`, and
+    // `cross_chain_manager_address` are only consumed by the finalizer (via
+    // the cycle loop closure). In `handle_request` we only need `client`,
+    // `l1_rpc_url`, `rollups_address`, and `bundle_manager`. Silence the unused
+    // warnings; removing these params would break backward compat with any
+    // inline fallthrough path we might add in future.
+    let _ = (
+        &l2_rpc_url,
+        &builder_private_key,
+        builder_address,
+        rollup_id,
+        cross_chain_manager_address,
+    );
     // Handle CORS preflight
     if req.method() == hyper::Method::OPTIONS {
         return Ok(cors_response(
@@ -262,48 +482,53 @@ async fn handle_request(
                         raw_tx_len = raw_tx.len(),
                         "L1 compositor: intercepted eth_sendRawTransaction"
                     );
-                    match handle_cross_chain_tx(
-                        &client,
-                        &l1_rpc_url,
-                        &l2_rpc_url,
-                        raw_tx,
-                        rollups_address,
-                        builder_address,
-                        builder_private_key.clone(),
-                        rollup_id,
-                        cross_chain_manager_address,
-                    )
-                    .await
-                    {
-                        Ok(Some(tx_hash)) => {
-                            // Cross-chain tx queued — entries + user tx sent to builder.
-                            // Return the tx hash directly WITHOUT forwarding to L1.
-                            // The driver will submit postBatch then forward the raw tx.
-                            let json_id = json.get("id").cloned().unwrap_or(Value::Null);
-                            let response_body = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "result": tx_hash,
-                                "id": json_id
-                            });
-                            return Ok(cors_response(
-                                Response::builder()
-                                    .status(StatusCode::OK)
-                                    .header("Content-Type", "application/json")
-                                    .body(Full::new(HyperBytes::from(response_body.to_string())))
-                                    .expect("valid response"),
-                            ));
+
+                    // Phase 3.B: quick-detect cross-chain, then submit to the
+                    // bundler and return tx_hash immediately (fire-and-forget).
+                    // Non-cross-chain txs fall through to direct L1 forwarding.
+                    let is_cross_chain = match decode_raw_tx_for_trace(raw_tx) {
+                        Ok(tx_obj) => {
+                            quick_detect_cross_chain(&client, &l1_rpc_url, &tx_obj, rollups_address)
+                                .await
                         }
-                        Ok(None) => {
-                            // Not a cross-chain tx, forward normally (fall through)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "based_rollup::l1_proxy",
-                                %e,
-                                "cross-chain handling failed, forwarding tx anyway"
-                            );
+                        Err(_) => false,
+                    };
+
+                    if is_cross_chain {
+                        match build_pending_user_tx(raw_tx) {
+                            Some(pending_tx) => {
+                                let tx_hash_hex = format!("{:#x}", pending_tx.tx_hash);
+                                bundle_manager.submit(pending_tx);
+                                tracing::info!(
+                                    target: "based_rollup::l1_proxy",
+                                    tx_hash = %tx_hash_hex,
+                                    "cross-chain tx submitted to bundler"
+                                );
+                                let json_id = json.get("id").cloned().unwrap_or(Value::Null);
+                                let response_body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "result": tx_hash_hex,
+                                    "id": json_id
+                                });
+                                return Ok(cors_response(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("Content-Type", "application/json")
+                                        .body(Full::new(HyperBytes::from(
+                                            response_body.to_string(),
+                                        )))
+                                        .expect("valid response"),
+                                ));
+                            }
+                            None => {
+                                tracing::warn!(
+                                    target: "based_rollup::l1_proxy",
+                                    "failed to build PendingUserTx from raw — forwarding to L1"
+                                );
+                            }
                         }
                     }
+                    // Not a cross-chain tx (or decode/build failed), forward normally.
                 }
             }
 
