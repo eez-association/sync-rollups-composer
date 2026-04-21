@@ -240,6 +240,23 @@ impl BundleManager {
         let window = Duration::from_millis(self.config.window_ms());
         let grace_timeout = Duration::from_millis(self.config.grace_ms());
 
+        // Baseline L1 block for the CURRENT cycle — the one bundle N is rooted
+        // in. Initialized from RPC on the first iteration; updated on each
+        // successful rotation (after observing advance). We track this across
+        // iterations because L1 may advance DURING the window; the "advance"
+        // we care about is "past cycle N's baseline", not "past current".
+        let mut current_cycle_l1_baseline: Option<u64> = None;
+        if let Some(url) = &l1_poll_url {
+            if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                current_cycle_l1_baseline = Some(n);
+                tracing::debug!(
+                    target: "based_rollup::composer_bundle",
+                    cycle_l1_baseline = n,
+                    "cycle_rotation_init: observed initial L1 block"
+                );
+            }
+        }
+
         loop {
             sleep(window).await;
 
@@ -267,14 +284,16 @@ impl BundleManager {
                 });
             }
 
-            // Wait for an L1 block advance or grace timeout — whichever first.
-            // Rotating earlier means bundle N+1's sim would use the PREVIOUS
-            // L1 block as "latest" and miss bundle N's effects.
-            let rotation_reason = match &l1_poll_url {
-                Some(url) => {
-                    match wait_for_l1_block_advance(
+            // Wait for L1 to advance PAST the cycle's baseline — not the
+            // number observed at grace start. L1 may have advanced during
+            // the window (10.8s is nearly a full L1 block cycle), so the
+            // baseline captured at cycle start is the correct reference.
+            let rotation_reason = match (&l1_poll_url, current_cycle_l1_baseline) {
+                (Some(url), Some(baseline)) => {
+                    match wait_for_l1_block_past(
                         &client,
                         url,
+                        baseline,
                         grace_timeout,
                         Duration::from_millis(L1_POLL_INTERVAL_MS),
                     )
@@ -283,17 +302,25 @@ impl BundleManager {
                         Ok(Some(new_block)) => {
                             tracing::info!(
                                 target: "based_rollup::composer_bundle",
+                                cycle_l1_baseline = baseline,
                                 new_l1_block = new_block,
-                                "cycle_rotation: new L1 block observed"
+                                "cycle_rotation: new L1 block past baseline"
                             );
+                            current_cycle_l1_baseline = Some(new_block);
                             "l1_block_advance"
                         }
                         Ok(None) => {
                             tracing::warn!(
                                 target: "based_rollup::composer_bundle",
+                                cycle_l1_baseline = baseline,
                                 grace_timeout_ms = grace_timeout.as_millis() as u64,
-                                "cycle_rotation: grace timeout hit without new L1 block — rotating anyway"
+                                "cycle_rotation: grace timeout without L1 advance past baseline"
                             );
+                            // Refresh baseline anyway so we don't repeatedly
+                            // time out against the same stale value.
+                            if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                                current_cycle_l1_baseline = Some(n);
+                            }
                             "grace_timeout"
                         }
                         Err(e) => {
@@ -306,7 +333,15 @@ impl BundleManager {
                         }
                     }
                 }
-                None => {
+                (Some(url), None) => {
+                    // Initial baseline read failed in init; try again now.
+                    if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                        current_cycle_l1_baseline = Some(n);
+                    }
+                    sleep(grace_timeout).await;
+                    "poll_not_initialized"
+                }
+                (None, _) => {
                     sleep(grace_timeout).await;
                     "timer_only"
                 }
@@ -326,22 +361,33 @@ impl BundleManager {
 //  L1 block observation
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Poll `eth_blockNumber` at `poll_interval` until it advances from the number
-/// observed on entry, or until `timeout` elapses.
+/// Poll `eth_blockNumber` at `poll_interval` until it's strictly greater than
+/// `baseline`, or until `timeout` elapses.
 ///
-/// - `Ok(Some(new_block))` — the block number advanced; returns the new value.
-/// - `Ok(None)` — timeout hit without observing an advance (caller should log
-///   and proceed, not treat this as a hard error — the rotation continues).
-/// - `Err(e)` — RPC / parsing failure on the FIRST poll (we cannot even read
-///   the baseline number). Caller falls back to timer rotation.
-pub async fn wait_for_l1_block_advance(
+/// The baseline is provided by the caller — this is important because L1 may
+/// have advanced significantly during the bundle window; the "advance" we care
+/// about is relative to the cycle's baseline, not to whenever this function
+/// was called.
+///
+/// - `Ok(Some(new_block))` — some block > baseline observed; returns its number.
+/// - `Ok(None)` — timeout elapsed with no block > baseline.
+/// - `Err(e)` — never returned from the polling loop (transient RPC errors are
+///   swallowed during polling); reserved for future structural failure modes.
+pub async fn wait_for_l1_block_past(
     client: &reqwest::Client,
     l1_rpc_url: &str,
+    baseline: u64,
     timeout: Duration,
     poll_interval: Duration,
 ) -> eyre::Result<Option<u64>> {
-    let baseline = fetch_l1_block_number(client, l1_rpc_url).await?;
     let deadline = std::time::Instant::now() + timeout;
+    // First poll immediately — if L1 already advanced during the window,
+    // we catch it without sleeping.
+    if let Ok(n) = fetch_l1_block_number(client, l1_rpc_url).await {
+        if n > baseline {
+            return Ok(Some(n));
+        }
+    }
     loop {
         if std::time::Instant::now() >= deadline {
             return Ok(None);
@@ -350,7 +396,6 @@ pub async fn wait_for_l1_block_advance(
         match fetch_l1_block_number(client, l1_rpc_url).await {
             Ok(n) if n > baseline => return Ok(Some(n)),
             Ok(_) => continue,
-            // Transient RPC errors during poll — keep polling until deadline.
             Err(_) => continue,
         }
     }
