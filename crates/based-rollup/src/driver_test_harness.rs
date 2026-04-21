@@ -181,6 +181,7 @@ impl DriverTestHarness {
             deployment_l1_block: 1000,
             deployment_timestamp: 1_700_000_000,
             block_time: 12,
+            composer_bundle_close_fraction: 0.7,
             builder_mode: false,
             builder_private_key: None,
             l1_rpc_url_fallback: None,

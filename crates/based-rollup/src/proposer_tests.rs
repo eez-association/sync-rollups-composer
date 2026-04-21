@@ -29,6 +29,7 @@ fn test_config() -> RollupConfig {
         deployment_l1_block: 0,
         deployment_timestamp: 0,
         block_time: 12,
+        composer_bundle_close_fraction: 0.7,
         builder_mode: true,
         builder_private_key: None,
         l1_rpc_url_fallback: None,

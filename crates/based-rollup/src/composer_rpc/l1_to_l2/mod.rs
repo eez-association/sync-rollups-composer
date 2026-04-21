@@ -18,7 +18,7 @@
 mod process;
 mod simulation;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 #[cfg(test)]
 use alloy_primitives::U256;
 use http_body_util::{BodyExt, Full};
@@ -30,6 +30,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
 // Shared helpers from the common module.
@@ -48,6 +49,11 @@ use process::parse_address_from_return;
 use process::parse_u256_from_return;
 
 /// Run the L1 RPC proxy server.
+///
+/// `pending_l1_forward_txs`, `l1_block_time_ms` and `bundle_close_fraction` are
+/// wired through for the BundleManager (Phase 2 of the composer bundling fix,
+/// issue #41 / docs/DERIVATION.md §15). In Phase 1 they are accepted but not
+/// yet consumed — behavior is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_l1_rpc_proxy(
     l1_proxy_port: u16,
@@ -58,7 +64,12 @@ pub async fn run_l1_rpc_proxy(
     builder_private_key: Option<String>,
     rollup_id: u64,
     cross_chain_manager_address: Address,
+    pending_l1_forward_txs: Arc<Mutex<Vec<Bytes>>>,
+    l1_block_time_ms: u64,
+    bundle_close_fraction: f64,
 ) -> eyre::Result<()> {
+    // Silence "unused while Phase 2 lands" warnings without suppressing real issues.
+    let _ = (&pending_l1_forward_txs, l1_block_time_ms, bundle_close_fraction);
     let addr = SocketAddr::from(([0, 0, 0, 0], l1_proxy_port));
     let listener = TcpListener::bind(addr).await?;
 

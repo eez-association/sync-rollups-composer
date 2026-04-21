@@ -70,6 +70,10 @@ fn main() -> Result<()> {
         let pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<alloy_primitives::Bytes>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let forward_txs_for_rpc = pending_l1_forward_txs.clone();
+        // Separate clone for the L1 composer's BundleManager so it can read
+        // pending user txs when constructing debug_traceCallMany bundles.
+        // See docs/DERIVATION.md §15 (Composer Bundling).
+        let forward_txs_for_composer = pending_l1_forward_txs.clone();
 
         // Shared queue for L2→L1 calls.
         // The L2 composer RPC detects cross-chain calls and queues here;
@@ -173,6 +177,8 @@ fn main() -> Result<()> {
             let builder_private_key = rollup_config.builder_private_key.clone();
             let rollup_id = rollup_config.rollup_id;
             let cross_chain_manager_address = rollup_config.cross_chain_manager_address;
+            let l1_block_time_ms = rollup_config.block_time.saturating_mul(1000);
+            let bundle_close_fraction = rollup_config.composer_bundle_close_fraction;
             tokio::spawn(async move {
                 if let Err(e) = based_rollup::composer_rpc::l1_to_l2::run_l1_rpc_proxy(
                     l1_proxy_port,
@@ -183,6 +189,9 @@ fn main() -> Result<()> {
                     builder_private_key,
                     rollup_id,
                     cross_chain_manager_address,
+                    forward_txs_for_composer,
+                    l1_block_time_ms,
+                    bundle_close_fraction,
                 )
                 .await
                 {
