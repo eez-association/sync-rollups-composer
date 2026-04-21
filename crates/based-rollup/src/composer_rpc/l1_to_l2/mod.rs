@@ -57,9 +57,13 @@ use process::parse_u256_from_return;
 /// [`PendingUserTx`] entries, and submitted to the bundler. The bundler's
 /// background cycle loop closes the window every
 /// `l1_block_time_ms * bundle_close_fraction` ms and dispatches the drained
-/// bundle to the finalizer, which processes each tx (Phase 3.A: sequentially
-/// via the existing `handle_cross_chain_tx`; Phase 3.B: with prior-bundle
-/// context for the sim==runtime invariant).
+/// bundle to the finalizer, which processes each tx with prior-bundle context
+/// (Phase 3.C: each tx's trace sees effects of prior txs in the bundle).
+///
+/// `queued_cross_chain_calls` is shared with the driver; the finalizer
+/// snapshots `queue.len()` before each tx and reads the delta after, so it
+/// can use each prior tx's produced L1 entries as the postBatch for the next
+/// tx's simulation bundle.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_l1_rpc_proxy(
     l1_proxy_port: u16,
@@ -71,6 +75,7 @@ pub async fn run_l1_rpc_proxy(
     rollup_id: u64,
     cross_chain_manager_address: Address,
     pending_l1_forward_txs: Arc<Mutex<Vec<Bytes>>>,
+    queued_cross_chain_calls: Arc<Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
     l1_block_time_ms: u64,
     bundle_close_fraction: f64,
 ) -> eyre::Result<()> {
@@ -107,22 +112,24 @@ pub async fn run_l1_rpc_proxy(
         },
     ));
 
-    // Spawn the cycle loop with the **passthrough** finalizer (Phase 3.B):
-    // each drained tx is processed sequentially via `handle_cross_chain_tx`.
-    // Processing happens in isolation per tx — equivalent to pre-bundling
-    // behavior but delayed up to `window_ms`. Phase 3.C upgrades this to
-    // bundle-aware simulation for the sim==runtime invariant (§15.1).
+    // Spawn the cycle loop with the **bundle-aware** finalizer (Phase 3.C):
+    // each drained tx is processed sequentially, but bot_i's initial trace
+    // runs inside a `debug_traceCallMany` bundle that prepends prior bot
+    // txs (with their produced L1 entries preloaded via postBatch). This
+    // ensures bot_i's actionHash reflects the post-prior state — the core
+    // sim==runtime invariant (§15.1).
     {
         let client = client.clone();
         let l1_rpc_url = l1_rpc_url.clone();
         let l2_rpc_url = l2_rpc_url.clone();
         let builder_private_key = builder_private_key.clone();
         let bundle_manager_clone = bundle_manager.clone();
+        let queued_calls = queued_cross_chain_calls.clone();
 
         tokio::spawn(async move {
             bundle_manager_clone
                 .run_cycle_loop(move |mgr, drained| {
-                    finalize_bundle_passthrough(
+                    finalize_bundle_with_context(
                         mgr,
                         drained,
                         client.clone(),
@@ -133,6 +140,7 @@ pub async fn run_l1_rpc_proxy(
                         builder_private_key.clone(),
                         rollup_id,
                         cross_chain_manager_address,
+                        queued_calls.clone(),
                     )
                 })
                 .await;
@@ -196,20 +204,30 @@ pub async fn run_l1_rpc_proxy(
 }
 
 
-/// Passthrough finalizer (Phase 3.B): process each queued user tx sequentially
-/// via the existing `handle_cross_chain_tx` pipeline.
+/// Bundle-aware finalizer (Phase 3.C): process each queued user tx sequentially
+/// with **prior-bundle context** so each tx's `actionHash` matches runtime.
 ///
-/// Each tx is simulated in isolation — same as pre-bundling behavior but
-/// delayed up to `window_ms`. Phase 3.C upgrades this to bundle-aware
-/// simulation where each tx's trace sees the effects of prior txs in the
-/// bundle, enforcing the `sim == runtime` invariant (§15.1).
+/// Algorithm:
+/// 1. Sort drained bundle by `effective_gas_price` DESC (matches reth mempool).
+/// 2. For each tx in order:
+///    a. Snapshot `queued_cross_chain_calls.len()` BEFORE.
+///    b. Call `handle_cross_chain_tx(..., prior_entries, prior_raw_txs)` with
+///       the accumulated context. The initial `debug_traceCall` becomes a
+///       `debug_traceCallMany([postBatch(prior_entries), prior_raw_txs..., tx])`
+///       so tx's trace sees prior txs' state effects.
+///    c. After: new items `queue[before_len..]` are THIS tx's produced entries.
+///       Extract L1 entries from each (Simple: [call,result]; WithContinuations:
+///       l1_entries) and append to `prior_entries`. Append raw tx to
+///       `prior_raw_txs`.
+/// 3. On per-tx error: log ERROR, skip the tx, continue with remaining — that
+///    tx's bot sees a 60s timeout but subsequent txs still benefit from
+///    prior-bundle context of the preceding successful ones.
 ///
-/// Sorts the bundle by effective_gas_price DESC (matches reth mempool order).
-/// On per-tx failure: log ERROR and continue — a single bad tx must not kill
-/// the cycle. No retry at this layer; retry is a Phase 3.C concern for the
-/// bundle-wide simulation.
+/// The `sim == runtime` invariant (§15.1) holds for every tx whose priors
+/// also went through the composer. Bot-vs-external-tx races remain out of
+/// scope (documented in §15).
 #[allow(clippy::too_many_arguments)]
-async fn finalize_bundle_passthrough(
+async fn finalize_bundle_with_context(
     mgr: Arc<super::bundle_manager::BundleManager>,
     drained: super::bundle_manager::DrainedBundle,
     client: reqwest::Client,
@@ -220,6 +238,7 @@ async fn finalize_bundle_passthrough(
     builder_private_key: Option<String>,
     rollup_id: u64,
     cross_chain_manager_address: Address,
+    queued_cross_chain_calls: Arc<Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
 ) -> eyre::Result<()> {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
@@ -227,21 +246,32 @@ async fn finalize_bundle_passthrough(
     let bundle_id = drained.bundle_id;
     let mut txs = drained.txs;
 
-    // Sort by gas price descending to match reth mempool ordering, so the
-    // order we commit entries in matches the order L1 will mine user txs.
+    // Sort by gas price descending to match reth mempool ordering.
     super::bundle_manager::sort_bundle_by_gas_desc(&mut txs);
 
     let start = Instant::now();
+    let sim_source = if txs.len() > 1 { "bundle" } else { "standalone" };
     tracing::info!(
         target: "based_rollup::composer_bundle",
         %bundle_id,
         tx_count = txs.len(),
-        sim_source = "passthrough",
+        sim_source,
         "bundle_finalize_start"
     );
 
+    // Accumulators — grow as each tx commits.
+    let mut prior_entries: Vec<crate::cross_chain::CrossChainExecutionEntry> = Vec::new();
+    let mut prior_raw_txs: Vec<Bytes> = Vec::new();
+
     for tx in &txs {
         let raw_tx_hex = format!("0x{}", alloy_primitives::hex::encode(&tx.raw_tx));
+
+        // Snapshot queue length BEFORE — so we can diff afterwards.
+        let before_len = queued_cross_chain_calls
+            .lock()
+            .map(|q| q.len())
+            .unwrap_or(0);
+
         match handle_cross_chain_tx(
             &client,
             &l1_rpc_url,
@@ -252,16 +282,26 @@ async fn finalize_bundle_passthrough(
             builder_private_key.clone(),
             rollup_id,
             cross_chain_manager_address,
+            &prior_entries,
+            &prior_raw_txs,
         )
         .await
         {
             Ok(Some(_hash)) => {
-                // Cross-chain tx queued to driver (entries + raw_tx).
+                // Harvest the new entries that were added to the queue by this
+                // tx's processing. They become priors for subsequent txs.
+                let guard = match queued_cross_chain_calls.lock() {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+                let new_items = guard.iter().skip(before_len);
+                for item in new_items {
+                    prior_entries.extend(extract_l1_entries_for_call(item));
+                }
+                drop(guard);
+                prior_raw_txs.push(tx.raw_tx.clone());
             }
             Ok(None) => {
-                // Quick-detect in handle_request classified this as cross-chain
-                // but handle_cross_chain_tx disagrees — possible if proxy lookups
-                // changed between the two calls. Log + skip; bot sees timeout.
                 tracing::warn!(
                     target: "based_rollup::composer_bundle",
                     %bundle_id,
@@ -287,6 +327,7 @@ async fn finalize_bundle_passthrough(
         %bundle_id,
         tx_count = txs.len(),
         elapsed_ms,
+        prior_entries_final = prior_entries.len(),
         "bundle_finalize_success"
     );
     mgr.metrics
@@ -297,6 +338,37 @@ async fn finalize_bundle_passthrough(
         .fetch_add(txs.len() as u64, Ordering::Relaxed);
 
     Ok(())
+}
+
+/// Extract the L1 deferred entries stored inside a `QueuedCrossChainCall`.
+///
+/// `Simple` deposits carry `[call_entry, result_entry]` (the L2 table pair;
+/// their L1 format is converted by the driver). For the purposes of
+/// pre-loading on a simulation postBatch we need the L1-shaped entries —
+/// the driver's `convert_pairs_to_l1_entries` does this conversion, but for
+/// the simulation we can use them as-is since the trace only needs the
+/// actionHash + state delta to line up.
+///
+/// `WithContinuations` carries `l1_entries` directly — those are the L1
+/// deferred entries pushed into the combined postBatch.
+fn extract_l1_entries_for_call(
+    call: &crate::rpc::QueuedCrossChainCall,
+) -> Vec<crate::cross_chain::CrossChainExecutionEntry> {
+    match call {
+        crate::rpc::QueuedCrossChainCall::Simple {
+            call_entry,
+            result_entry,
+            ..
+        } => {
+            // Convert the L2 pair to L1 format via the same conversion the
+            // driver uses at flush time.
+            let pairs = vec![call_entry.clone(), result_entry.clone()];
+            super::entry_builder::pairs_to_l1_format(&pairs)
+        }
+        crate::rpc::QueuedCrossChainCall::WithContinuations { l1_entries, .. } => {
+            l1_entries.clone()
+        }
+    }
 }
 
 /// Quick detection: does this tx make any cross-chain calls?
@@ -599,6 +671,188 @@ async fn handle_request(
 /// detection for direct proxy calls or bridge contracts — the generic walker
 /// detects all patterns (direct proxy, bridgeEther, bridgeTokens, wrapper
 /// contracts, multi-call continuations) via the `executeCrossChainCall` child pattern.
+/// Single-tx initial trace — the legacy path used when there are no priors.
+async fn run_standalone_initial_trace(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    from: &str,
+    to: &str,
+    data: &str,
+    value: &str,
+) -> eyre::Result<Option<Value>> {
+    let trace_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "debug_traceCall",
+        "params": [
+            {"from": from, "to": to, "data": data, "value": value, "gas": "0x2faf080"},
+            "latest",
+            { "tracer": "callTracer" }
+        ],
+        "id": 1
+    });
+    let resp: super::common::JsonRpcResponse =
+        client.post(l1_rpc_url).json(&trace_req).send().await?.json().await?;
+    match resp.into_result() {
+        Ok(t) => Ok(Some(t)),
+        Err(e) => {
+            tracing::debug!(
+                target: "based_rollup::l1_proxy",
+                %e,
+                "debug_traceCall failed — forwarding tx without cross-chain detection"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Bundled initial trace — runs this tx INSIDE a `debug_traceCallMany` where
+/// the first element is `postBatch(prior_entries)` (signed) and the next N
+/// elements are the prior raw txs as call shapes, followed by THIS tx.
+///
+/// Returns:
+/// - `Ok(Some(trace))` on success — the trace of THIS tx from the bundle's
+///   last slot.
+/// - `Ok(None)` if the response shape is wrong (bundle didn't produce as many
+///   traces as expected) — caller falls back.
+/// - `Err` on RPC / parsing / signing errors — caller falls back.
+#[allow(clippy::too_many_arguments)]
+async fn build_and_run_bundled_initial_trace(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    from: &str,
+    to: &str,
+    data: &str,
+    value: &str,
+    rollups_address: Address,
+    builder_private_key: Option<&str>,
+    rollup_id: u64,
+    prior_entries: &[crate::cross_chain::CrossChainExecutionEntry],
+    prior_raw_txs: &[Bytes],
+) -> eyre::Result<Option<Value>> {
+    use super::common::{get_l1_block_context, get_verification_key};
+    use alloy_signer::SignerSync;
+
+    // Parse builder signer key — required to sign postBatch proof.
+    let key_hex = match builder_private_key {
+        Some(k) => k,
+        None => {
+            return Err(eyre::eyre!(
+                "builder private key missing — cannot sign postBatch for bundled trace"
+            ));
+        }
+    };
+    let key_clean = key_hex.strip_prefix("0x").unwrap_or(key_hex);
+    let builder_key: alloy_signer_local::PrivateKeySigner = key_clean
+        .parse()
+        .map_err(|e| eyre::eyre!("bad builder key: {e}"))?;
+
+    let (block_number, block_hash, _) =
+        get_l1_block_context(client, l1_rpc_url).await?;
+    let vk = get_verification_key(client, l1_rpc_url, rollups_address, rollup_id)
+        .await?;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let call_data_bytes = alloy_primitives::Bytes::new();
+    let entry_hashes = crate::cross_chain::compute_entry_hashes(prior_entries, vk);
+    let public_inputs_hash = crate::cross_chain::compute_public_inputs_hash(
+        &entry_hashes,
+        &call_data_bytes,
+        block_hash,
+        timestamp,
+    );
+    let sig = builder_key
+        .sign_hash_sync(&public_inputs_hash)
+        .map_err(|e| eyre::eyre!("sign failed: {e}"))?;
+    let sig_bytes = sig.as_bytes();
+    let mut proof_bytes = sig_bytes.to_vec();
+    if proof_bytes.len() == 65 && proof_bytes[64] < 27 {
+        proof_bytes[64] += 27;
+    }
+    let proof = alloy_primitives::Bytes::from(proof_bytes);
+
+    let post_batch_calldata =
+        crate::cross_chain::encode_post_batch_calldata(prior_entries, call_data_bytes, proof);
+    let post_batch_hex = format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
+    let builder_addr_hex = format!("{}", builder_key.address());
+    let rollups_hex = format!("{}", rollups_address);
+    let next_block = format!("{:#x}", block_number + 1);
+
+    // Assemble the bundle: [postBatch, prior_tx_0_call, ..., prior_tx_{N-1}_call, this_tx_call]
+    let mut transactions: Vec<Value> = Vec::with_capacity(prior_raw_txs.len() + 2);
+    transactions.push(serde_json::json!({
+        "from": builder_addr_hex,
+        "to": rollups_hex,
+        "data": post_batch_hex,
+        "gas": "0x1c9c380"
+    }));
+    for raw in prior_raw_txs {
+        // Decode each prior raw tx to {from, to, data, value} call shape.
+        let raw_hex = format!("0x{}", hex::encode(raw.as_ref()));
+        let tx_obj = decode_raw_tx_for_trace(&raw_hex)?;
+        let (p_from, p_to, p_data, p_value) = (
+            tx_obj.get("from").and_then(|v| v.as_str()).unwrap_or(""),
+            tx_obj.get("to").and_then(|v| v.as_str()).unwrap_or(""),
+            tx_obj.get("data").and_then(|v| v.as_str()).unwrap_or("0x"),
+            tx_obj.get("value").and_then(|v| v.as_str()).unwrap_or("0x0"),
+        );
+        transactions.push(serde_json::json!({
+            "from": p_from,
+            "to": p_to,
+            "data": p_data,
+            "value": p_value,
+            "gas": "0x2faf080"
+        }));
+    }
+    // The subject tx (last in bundle — its trace is what we return).
+    transactions.push(serde_json::json!({
+        "from": from,
+        "to": to,
+        "data": data,
+        "value": value,
+        "gas": "0x2faf080"
+    }));
+
+    let trace_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "debug_traceCallMany",
+        "params": [
+            [{ "transactions": transactions }],
+            "latest",
+            { "tracer": "callTracer" }
+        ],
+        "id": 1
+    });
+
+    let resp: super::common::JsonRpcResponse =
+        client.post(l1_rpc_url).json(&trace_req).send().await?.json().await?;
+    let result_val = resp.into_result()?;
+
+    // Expected shape: [[trace_postBatch, trace_prior_0, ..., trace_prior_N-1, trace_subject]]
+    let bundle_traces = match result_val.get(0).and_then(|b| b.as_array()) {
+        Some(arr) => arr,
+        None => return Ok(None),
+    };
+    let expected = prior_raw_txs.len() + 2;
+    if bundle_traces.len() != expected {
+        tracing::warn!(
+            target: "based_rollup::l1_proxy",
+            got = bundle_traces.len(),
+            expected,
+            "bundled trace length mismatch"
+        );
+        return Ok(None);
+    }
+
+    // Return the LAST trace — this tx's behavior in the post-priors state.
+    // Use `next_block` / `timestamp` block-override? debug_traceCallMany
+    // already advances state per tx; no extra override needed here.
+    let _ = (next_block, timestamp); // suppress unused
+    Ok(Some(bundle_traces[bundle_traces.len() - 1].clone()))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_cross_chain_tx(
     client: &reqwest::Client,
@@ -610,6 +864,8 @@ async fn handle_cross_chain_tx(
     builder_private_key: Option<String>,
     rollup_id: u64,
     cross_chain_manager_address: Address,
+    prior_entries: &[crate::cross_chain::CrossChainExecutionEntry],
+    prior_raw_txs: &[Bytes],
 ) -> eyre::Result<Option<String>> {
     // Decode the raw transaction to extract fields needed by the trace path.
     let tx_obj = decode_raw_tx_for_trace(raw_tx)?;
@@ -631,6 +887,8 @@ async fn handle_cross_chain_tx(
         builder_private_key,
         rollup_id,
         cross_chain_manager_address,
+        prior_entries,
+        prior_raw_txs,
     )
     .await
 }
@@ -656,6 +914,8 @@ async fn trace_and_detect_internal_calls(
     builder_private_key: Option<String>,
     rollup_id: u64,
     cross_chain_manager_address: Address,
+    prior_entries: &[crate::cross_chain::CrossChainExecutionEntry],
+    prior_raw_txs: &[Bytes],
 ) -> eyre::Result<Option<String>> {
     // Build the debug_traceCall request from decoded tx fields
     let from = tx_obj
@@ -672,52 +932,68 @@ async fn trace_and_detect_internal_calls(
         .and_then(|v| v.as_str())
         .unwrap_or("0x0");
 
+    let has_priors = !prior_raw_txs.is_empty();
     tracing::info!(
         target: "based_rollup::l1_proxy",
         %to, %from,
-        "slow path: tracing tx with debug_traceCall to detect internal cross-chain calls"
+        prior_tx_count = prior_raw_txs.len(),
+        prior_entry_count = prior_entries.len(),
+        "initial trace — {}",
+        if has_priors { "debug_traceCallMany with prior-bundle context" } else { "debug_traceCall (no priors)" }
     );
 
-    // First trace: normal (no state overrides).
-    // If this finds only 1 cross-chain call but the tx reverts internally,
-    // we retry with state overrides (mock Rollups) to discover hidden calls
-    // that would execute after entries are posted (multi-call continuation pattern).
-    let trace_result = {
-        let trace_req = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "debug_traceCall",
-            "params": [
-                {
-                    "from": from,
-                    "to": to,
-                    "data": data,
-                    "value": value,
-                    "gas": "0x2faf080"
-                },
-                "latest",
-                { "tracer": "callTracer" }
-            ],
-            "id": 1
-        });
-
-        let rpc_resp: super::common::JsonRpcResponse = client
-            .post(l1_rpc_url)
-            .json(&trace_req)
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        match rpc_resp.into_result() {
-            Ok(r) => r,
+    // Initial trace: in the bundled-context path, run a debug_traceCallMany
+    // so the current tx sees prior txs' state effects (AMM swaps, balances,
+    // etc.). The prior txs need a postBatch loaded so their own CCM lookups
+    // don't revert — we build that postBatch from prior_entries.
+    //
+    // This is the heart of docs/DERIVATION.md §15.1.
+    let trace_result = if has_priors {
+        match build_and_run_bundled_initial_trace(
+            client,
+            l1_rpc_url,
+            from,
+            to,
+            data,
+            value,
+            rollups_address,
+            builder_private_key.as_deref(),
+            rollup_id,
+            prior_entries,
+            prior_raw_txs,
+        )
+        .await
+        {
+            Ok(Some(trace)) => trace,
+            Ok(None) => {
+                // Bundle sim failed structurally (no response / wrong length).
+                // Fall back to standalone trace — accepts correctness loss for
+                // this one tx rather than dropping it entirely. Logged loud.
+                tracing::warn!(
+                    target: "based_rollup::l1_proxy",
+                    "bundled initial trace returned unexpected shape — falling back to standalone traceCall"
+                );
+                match run_standalone_initial_trace(client, l1_rpc_url, from, to, data, value).await? {
+                    Some(t) => t,
+                    None => return Ok(None),
+                }
+            }
             Err(e) => {
-                tracing::debug!(
+                tracing::warn!(
                     target: "based_rollup::l1_proxy",
                     %e,
-                    "debug_traceCall failed — forwarding tx without cross-chain detection"
+                    "bundled initial trace error — falling back to standalone"
                 );
-                return Ok(None);
+                match run_standalone_initial_trace(client, l1_rpc_url, from, to, data, value).await? {
+                    Some(t) => t,
+                    None => return Ok(None),
+                }
             }
+        }
+    } else {
+        match run_standalone_initial_trace(client, l1_rpc_url, from, to, data, value).await? {
+            Some(t) => t,
+            None => return Ok(None),
         }
     };
 

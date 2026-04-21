@@ -74,6 +74,10 @@ fn main() -> Result<()> {
         // pending user txs when constructing debug_traceCallMany bundles.
         // See docs/DERIVATION.md §15 (Composer Bundling).
         let forward_txs_for_composer = pending_l1_forward_txs.clone();
+        // Separate clone of the unified cross-chain queue so the bundler's
+        // finalizer can snapshot entries produced by each user tx and use
+        // them as priors for subsequent txs in the same bundle (§15.1).
+        let queued_calls_for_composer = queued_cross_chain_calls.clone();
 
         // Shared queue for L2→L1 calls.
         // The L2 composer RPC detects cross-chain calls and queues here;
@@ -190,6 +194,7 @@ fn main() -> Result<()> {
                     rollup_id,
                     cross_chain_manager_address,
                     forward_txs_for_composer,
+                    queued_calls_for_composer,
                     l1_block_time_ms,
                     bundle_close_fraction,
                 )
