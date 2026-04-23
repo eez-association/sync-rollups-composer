@@ -373,6 +373,7 @@ impl Proposer {
                             l1_block_number,
                             "{label} confirmed on L1"
                         );
+
                         return Ok((tx_hash, l1_block_number));
                     } else {
                         return Err(eyre::eyre!("{label} reverted on L1 (tx_hash={tx_hash})"));

@@ -808,8 +808,9 @@ pub(crate) async fn extract_l1_to_l2_return_calls(
 }
 
 /// Build L1 execution entries from detected calls and run a `debug_traceCallMany`
-/// bundle on L1: `[postBatch(entries), userTx]`. Returns the user tx trace (bundle[0][1])
-/// and the full JSON-RPC response, or `None` on failure.
+/// bundle on L1: `[postBatch(prior_entries + current_entries), prior_raw_txs..., userTx]`.
+/// Returns the user tx trace (the last tx in the bundle) and the full JSON-RPC
+/// response, or `None` on failure.
 ///
 /// This encapsulates the entry-building, proof-signing, and traceCallMany execution
 /// that is shared between the iterative discovery loop and the post-convergence
@@ -822,6 +823,8 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
     rollup_id: u64,
     builder_key: &alloy_signer_local::PrivateKeySigner,
     detected_calls: &[DiscoveredCall],
+    prior_entries: &[crate::cross_chain::CrossChainExecutionEntry],
+    prior_raw_txs: &[alloy_primitives::Bytes],
     user_from: &str,
     user_to: &str,
     user_data: &str,
@@ -967,7 +970,12 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         }
     }
 
-    if entries.is_empty() {
+    let current_entry_count = entries.len();
+    let mut combined_entries = Vec::with_capacity(prior_entries.len() + current_entry_count);
+    combined_entries.extend_from_slice(prior_entries);
+    combined_entries.extend(entries.iter().cloned());
+
+    if combined_entries.is_empty() {
         return None;
     }
 
@@ -1001,7 +1009,7 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         .unwrap_or(0);
 
     let call_data_bytes = alloy_primitives::Bytes::new();
-    let entry_hashes = cross_chain::compute_entry_hashes(&entries, vk);
+    let entry_hashes = cross_chain::compute_entry_hashes(&combined_entries, vk);
     let public_inputs_hash = cross_chain::compute_public_inputs_hash(
         &entry_hashes,
         &call_data_bytes,
@@ -1026,12 +1034,48 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
 
     // Encode postBatch calldata
     let post_batch_calldata =
-        cross_chain::encode_post_batch_calldata(&entries, call_data_bytes, proof);
+        cross_chain::encode_post_batch_calldata(&combined_entries, call_data_bytes, proof);
 
-    // Build traceCallMany request: [postBatch, userTx] in a single bundle
+    // Build traceCallMany request: [postBatch(all entries), prior txs..., userTx]
+    // so the retrace sees the same state prefix as runtime.
     let builder_addr = format!("{}", builder_key.address());
     let rollups_hex = format!("{rollups_address}");
     let post_batch_data = format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
+    let mut transactions = Vec::with_capacity(prior_raw_txs.len() + 2);
+    transactions.push(serde_json::json!({
+        "from": builder_addr,
+        "to": rollups_hex,
+        "data": post_batch_data,
+        "gas": "0x1c9c380"
+    }));
+    for raw_tx in prior_raw_txs {
+        let raw_hex = format!("0x{}", hex::encode(raw_tx.as_ref()));
+        let tx_obj = match super::l1_to_l2::decode_raw_tx_for_trace(&raw_hex) {
+            Ok(tx) => tx,
+            Err(e) => {
+                tracing::warn!(
+                    target: "based_rollup::l1_proxy",
+                    %e,
+                    "({label}) failed to decode prior raw tx for retrace bundle"
+                );
+                return None;
+            }
+        };
+        transactions.push(serde_json::json!({
+            "from": tx_obj.get("from").and_then(|value| value.as_str()).unwrap_or(""),
+            "to": tx_obj.get("to").and_then(|value| value.as_str()).unwrap_or(""),
+            "data": tx_obj.get("data").and_then(|value| value.as_str()).unwrap_or("0x"),
+            "value": tx_obj.get("value").and_then(|value| value.as_str()).unwrap_or("0x0"),
+            "gas": "0x2faf080"
+        }));
+    }
+    transactions.push(serde_json::json!({
+        "from": user_from,
+        "to": user_to,
+        "data": user_data,
+        "value": user_value,
+        "gas": "0x2faf080"
+    }));
 
     let next_block = format!("{:#x}", block_number + 1);
     let trace_req = serde_json::json!({
@@ -1040,21 +1084,7 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         "params": [
             [
                 {
-                    "transactions": [
-                        {
-                            "from": builder_addr,
-                            "to": rollups_hex,
-                            "data": post_batch_data,
-                            "gas": "0x1c9c380"
-                        },
-                        {
-                            "from": user_from,
-                            "to": user_to,
-                            "data": user_data,
-                            "value": user_value,
-                            "gas": "0x2faf080"
-                        }
-                    ],
+                    "transactions": transactions,
                     "blockOverride": {
                         "number": next_block,
                         "time": format!("{:#x}", trace_block_timestamp)
@@ -1099,7 +1129,7 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         }
     };
     let bundle_traces = match result_val.get(0).and_then(|b| b.as_array()) {
-        Some(arr) if arr.len() >= 2 => arr,
+        Some(arr) if arr.len() >= prior_raw_txs.len() + 2 => arr,
         _ => {
             tracing::warn!(
                 target: "based_rollup::l1_proxy",
@@ -1110,17 +1140,17 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
     };
 
     // Check if postBatch succeeded
-    let tx1_trace = &bundle_traces[0];
-    if tx1_trace.get("error").is_some() || tx1_trace.get("revertReason").is_some() {
-        let error_msg = tx1_trace
+    let post_batch_trace = &bundle_traces[0];
+    if post_batch_trace.get("error").is_some() || post_batch_trace.get("revertReason").is_some() {
+        let error_msg = post_batch_trace
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let revert_reason = tx1_trace
+        let revert_reason = post_batch_trace
             .get("revertReason")
             .and_then(|v| v.as_str())
             .unwrap_or("none");
-        let output = tx1_trace
+        let output = post_batch_trace
             .get("output")
             .and_then(|v| v.as_str())
             .unwrap_or("none");
@@ -1134,7 +1164,7 @@ pub(crate) async fn build_and_run_l1_postbatch_trace(
         // Still return the user tx trace — caller may need partial results
     }
 
-    let user_trace = bundle_traces[1].clone();
+    let user_trace = bundle_traces[bundle_traces.len() - 1].clone();
     Some((user_trace, result_val))
 }
 

@@ -7,6 +7,7 @@
 //!
 //! Shared utilities in `common` and generic trace-based detection in `trace`.
 
+pub mod bundle_manager;
 pub mod common;
 pub mod delivery;
 pub mod direction;

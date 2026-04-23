@@ -61,6 +61,19 @@ pub struct RollupConfig {
     #[serde(default = "default_block_time")]
     pub block_time: u64,
 
+    /// Fraction of the L1 block time during which the composer accepts new user
+    /// txs into the CURRENT bundle. After this fraction elapses, new txs land
+    /// in the next bundle. Default 0.9 (10.8s window out of 12s block time),
+    /// leaving ~1.2s slack for finalize + driver commit + L1 inclusion.
+    ///
+    /// Higher values maximize bundle overlap (sim==runtime for more races) at
+    /// the cost of less finalize slack.
+    ///
+    /// See docs/DERIVATION.md §15 (Composer Bundling) for the full model.
+    #[arg(long, env = "COMPOSER_BUNDLE_CLOSE_FRACTION", default_value = "0.9")]
+    #[serde(default = "default_composer_bundle_close_fraction")]
+    pub composer_bundle_close_fraction: f64,
+
     /// Whether this node should run in builder mode (build + propose blocks).
     /// If false, runs as a fullnode/verifier (sync only).
     #[arg(long, env = "BUILDER_MODE", default_value = "false")]
@@ -197,6 +210,10 @@ impl std::fmt::Debug for RollupConfig {
             .field("deployment_l1_block", &self.deployment_l1_block)
             .field("deployment_timestamp", &self.deployment_timestamp)
             .field("block_time", &self.block_time)
+            .field(
+                "composer_bundle_close_fraction",
+                &self.composer_bundle_close_fraction,
+            )
             .field("builder_mode", &self.builder_mode)
             .field(
                 "builder_private_key",
@@ -225,6 +242,10 @@ impl std::fmt::Debug for RollupConfig {
 
 fn default_block_time() -> u64 {
     DEFAULT_BLOCK_TIME
+}
+
+fn default_composer_bundle_close_fraction() -> f64 {
+    0.9
 }
 
 /// Parse the BOOTSTRAP_ACCOUNTS string into a list of (address, wei) pairs.
@@ -315,6 +336,13 @@ impl RollupConfig {
         if self.block_time == 0 {
             return Err(eyre::eyre!(
                 "BLOCK_TIME must be > 0 (got 0), which would cause division by zero"
+            ));
+        }
+        if !(0.0 < self.composer_bundle_close_fraction && self.composer_bundle_close_fraction < 1.0)
+        {
+            return Err(eyre::eyre!(
+                "COMPOSER_BUNDLE_CLOSE_FRACTION must be in (0, 1), got {}",
+                self.composer_bundle_close_fraction
             ));
         }
         if self.deployment_timestamp == 0 {

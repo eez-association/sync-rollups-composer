@@ -110,9 +110,33 @@ pub struct ContinuationEntries {
 /// `compute_l2tx_action_hash`), or through the `from_*_boundary`
 /// constructors.
 pub fn compute_action_hash(action: &CrossChainAction) -> ActionHash {
-    ActionHash::new(keccak256(ICrossChainManagerL2::Action::abi_encode(
-        &action.to_sol_action(),
-    )))
+    let sol_action = action.to_sol_action();
+    let preimage = ICrossChainManagerL2::Action::abi_encode(&sol_action);
+    let hash = ActionHash::new(keccak256(&preimage));
+    // INSTRUMENTATION (issue #41): log the exact bytes that go into the actionHash
+    // so we can byte-compare against runtime's CCM.executeCrossChainCall hash.
+    tracing::info!(
+        target: "based_rollup::actionhash_trace",
+        hash = %hash,
+        action_type = ?action.action_type,
+        rollup_id = %action.rollup_id,
+        destination = %action.destination,
+        value = %action.value,
+        data_len = action.data.len(),
+        data_hex = %alloy_primitives::hex::encode(&action.data),
+        failed = action.failed,
+        source_address = %action.source_address,
+        source_rollup = %action.source_rollup,
+        scope_len = action.scope.as_slice().len(),
+        scope_hex = %{
+            let parts: Vec<String> = action.scope.as_slice().iter().map(|u| format!("{:#x}", u)).collect();
+            format!("[{}]", parts.join(","))
+        },
+        preimage_len = preimage.len(),
+        preimage_hex = %alloy_primitives::hex::encode(&preimage),
+        "actionHash preimage"
+    );
+    hash
 }
 
 /// Reorder entries within same-`action_hash` groups so that Solidity's

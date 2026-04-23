@@ -159,9 +159,22 @@ pub(crate) async fn discover_until_stable<D: Direction, S: SimulationClient>(
 
             // Extract user tx trace from the bundle response.
             // Bundle format: result[0] = array of per-tx traces.
-            // Tx[0] = entry loading (loadTable/postBatch), Tx[1] = user tx.
+            // Tx[0] is always the entry-loading tx; for L1→L2 there may be
+            // additional prior raw txs before the user tx, so the user trace
+            // is always the last element.
             let user_trace = match traces.get(0).and_then(|b| b.as_array()) {
-                Some(arr) if arr.len() >= 2 => &arr[1],
+                Some(arr) if arr.len() >= 2 => match arr.last() {
+                    Some(last) => last,
+                    None => {
+                        tracing::warn!(
+                            target: "based_rollup::discover",
+                            direction = D::name(),
+                            iteration,
+                            "unexpected empty trace bundle — stopping discovery"
+                        );
+                        break;
+                    }
+                },
                 _ => {
                     tracing::warn!(
                         target: "based_rollup::discover",

@@ -113,6 +113,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
             raw_l1_tx: Bytes::from(vec![0x01]),
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
+            trace_meta: None,
         });
         q.push(QueuedCrossChainCall::Simple {
             call_entry: make_entry(0x03),
@@ -121,6 +122,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
             raw_l1_tx: Bytes::from(vec![0x02]),
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
+            trace_meta: None,
         });
         q.push(QueuedCrossChainCall::Simple {
             call_entry: make_entry(0x05),
@@ -129,6 +131,7 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
             raw_l1_tx: Bytes::from(vec![0x03]),
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
+            trace_meta: None,
         });
     }
 
@@ -146,6 +149,23 @@ fn test_queued_cross_chain_call_push_drain_and_sort() {
 
     // Queue is now empty
     assert!(queue.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_forward_only_queue_item_behaves_like_ordered_raw_tx() {
+    let tx_hash = crate::cross_chain::ActionHash::new(B256::with_last_byte(0xAB));
+    let raw = Bytes::from(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    let queued = QueuedCrossChainCall::ForwardOnly {
+        tx_hash,
+        effective_gas_price: 777,
+        raw_l1_tx: raw.clone(),
+    };
+
+    assert_eq!(queued.effective_gas_price(), 777);
+    assert_eq!(queued.raw_l1_tx(), &raw);
+    assert_eq!(queued.tracking_action_hash(), tx_hash);
+    assert!(!queued.is_continuation());
+    assert_eq!(queued.tx_reverts(), crate::cross_chain::TxOutcome::Success);
 }
 
 // ──────────────────────────────────────────────────────────────────

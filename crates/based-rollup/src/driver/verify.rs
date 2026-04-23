@@ -401,7 +401,69 @@ where
         &mut self,
         derived: &crate::derivation::DerivedBlock,
     ) -> Result<()> {
-        let decision = self.classify_and_apply_verification(derived)?;
+        use serde_json::json;
+
+        if let Some(traces) = self.arb_trace_by_l2_block.get(&derived.l2_block_number) {
+            for trace in traces {
+                crate::arb_trace::emit_with_meta(
+                    "l1_derived",
+                    trace,
+                    trace.state_delta_before,
+                    trace.state_delta_after,
+                    json!({
+                        "l2_block_number": derived.l2_block_number,
+                        "derived_state_root": format!("{}", derived.state_root),
+                        "filtering_present": derived.filtering.is_some(),
+                        "derived_entry_count": derived
+                            .filtering
+                            .as_ref()
+                            .map(|f| f.all_l2_entries.len())
+                            .unwrap_or(0),
+                    }),
+                );
+            }
+        }
+
+        let decision = match self.classify_and_apply_verification(derived) {
+            Ok(decision) => decision,
+            Err(err) => {
+                if let Some(traces) = self.arb_trace_by_l2_block.get(&derived.l2_block_number) {
+                    for trace in traces {
+                        crate::arb_trace::emit_with_meta(
+                            "verify_outcome",
+                            trace,
+                            trace.state_delta_before,
+                            trace.state_delta_after,
+                            json!({
+                                "l2_block_number": derived.l2_block_number,
+                                "decision": "error",
+                                "error": err.to_string(),
+                                "filtering_present": derived.filtering.is_some(),
+                            }),
+                        );
+                    }
+                }
+                return Err(err);
+            }
+        };
+        if let Some(traces) = self.arb_trace_by_l2_block.get(&derived.l2_block_number) {
+            for trace in traces {
+                crate::arb_trace::emit_with_meta(
+                    "verify_outcome",
+                    trace,
+                    trace.state_delta_before,
+                    trace.state_delta_after,
+                    json!({
+                        "l2_block_number": derived.l2_block_number,
+                        "decision": format!("{decision:?}"),
+                        "filtering_present": derived.filtering.is_some(),
+                        "deferrals": self.hold.deferrals(),
+                        "pending_rewind_target": self.pending_rewind_target,
+                        "pending_sibling_reorg": self.pending_sibling_reorg.map(|r| r.target_l2_block),
+                    }),
+                );
+            }
+        }
         trace!(
             target: "based_rollup::driver",
             l2_block = derived.l2_block_number,
@@ -559,14 +621,41 @@ where
         block: &crate::derivation::DerivedBlock,
         filtering: &crate::derivation::DeferredFiltering,
     ) -> Result<Bytes> {
+        use reth_provider::AccountReader;
         let l2_block_number = block.l2_block_number;
         let timestamp = block.l2_timestamp;
         let l1_block_hash = block.l1_info.l1_block_hash;
         let l1_block_number = block.l1_info.l1_block_number;
         let parent_block_number = l2_block_number.saturating_sub(1);
 
-        // Step 1: Save nonce so we can restore it if we need to rebuild.
+        // Step 1: Save current nonce so we can restore it after this rebuild
+        // call, AND set `self.builder_l2_nonce` to the builder's account nonce
+        // AT THE PARENT STATE of `l2_block_number`. The sibling-reorg path
+        // calls this function with `l2_block_number <= self.l2_head_number`,
+        // so the cached `self.builder_l2_nonce` reflects the head state — too
+        // high for a rebuild of an earlier block. Without this override,
+        // `build_builder_protocol_txs` signs protocol txs with a too-high
+        // nonce and the EVM rejects with "nonce too high". Observed
+        // 2026-04-21 on devnet after the gas-price fix landed and the
+        // sibling-reorg path became reachable.
         let saved_nonce = self.builder_l2_nonce;
+        if !self.config.builder_address.is_zero() {
+            let parent_hash = self
+                .l2_provider
+                .block_hash(parent_block_number)
+                .wrap_err("failed to read parent block hash for nonce recovery")?
+                .ok_or_eyre("parent block hash not found for nonce recovery")?;
+            let parent_state = self
+                .l2_provider
+                .state_by_block_hash(parent_hash)
+                .wrap_err("failed to read parent state for nonce recovery")?;
+            let parent_nonce = parent_state
+                .basic_account(&self.config.builder_address)
+                .wrap_err("failed to read builder account at parent state")?
+                .map(|a| a.nonce)
+                .unwrap_or(0);
+            self.builder_l2_nonce = parent_nonce;
+        }
 
         // Step 2: Build full block with ALL triggers.
         let full_txs = match self.build_builder_protocol_txs(
@@ -735,13 +824,23 @@ where
                 alloy_rlp::Decodable::decode(&mut encoded_transactions.as_ref())
                     .wrap_err("failed to RLP-decode transactions for state root computation")?;
 
-            for tx in txs {
+            for (tx_idx, tx) in txs.into_iter().enumerate() {
+                let tx_hash = *tx.tx_hash();
                 let recovered = SignedTransaction::try_into_recovered(tx).map_err(|_| {
                     eyre::eyre!("failed to recover signer for state root computation tx")
                 })?;
-                builder
-                    .execute_transaction(recovered)
-                    .wrap_err("failed to execute tx for state root computation")?;
+                let signer = recovered.signer();
+                if let Err(err) = builder.execute_transaction(recovered) {
+                    tracing::error!(
+                        target: "based_rollup::driver",
+                        tx_idx,
+                        %tx_hash,
+                        %signer,
+                        err = %format!("{err:#}"),
+                        "speculative tx failed in compute_state_root_with_entries"
+                    );
+                    return Err(err).wrap_err("failed to execute tx for state root computation");
+                }
             }
         }
 

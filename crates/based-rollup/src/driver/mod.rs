@@ -110,14 +110,22 @@ pub struct Driver<P, Pool> {
     /// Shared sync status flag (true when caught up, readable by RPC handlers).
     synced: Arc<std::sync::atomic::AtomicBool>,
     /// Unified queue for cross-chain calls (entry pairs + gas price + raw L1 tx).
-    /// The RPC pushes here; the driver drains, sorts by gas price, then submits.
+    /// The RPC / composer pushes sealed-bundle items here; the driver drains,
+    /// sorts by gas price, then submits / forwards them in one order.
     queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
+    /// Shared barrier between the composer bundle finalizer and the driver
+    /// queue drain. Prevents the driver from observing a half-materialized
+    /// sealed bundle.
+    composer_bundle_materialization_lock: Arc<tokio::sync::Mutex<()>>,
     /// Legacy queue for raw signed L1 transactions to forward after `postBatch`.
     /// Kept for backward compatibility with `queueL1ForwardTx` RPC method.
     pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
     /// Queue for L2→L1 calls. The RPC pushes here; the driver drains
     /// into builder_execution_entries alongside L1→L2 entries (unified intermediate roots).
     queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedL2ToL1Call>>>,
+    /// Instrumentation-only map from L2 block number to the user tx traces
+    /// whose L1→L2 entries were present when that local block was built.
+    arb_trace_by_l2_block: HashMap<u64, Vec<crate::arb_trace::ArbTraceMeta>>,
     /// Pending L1 deferred entries + their trigger groups, as a
     /// single atomic unit. See [`PendingL1SubmissionQueue`] for the
     /// structural rationale (closes invariant #11).
@@ -243,6 +251,7 @@ where
         pool: Pool,
         synced: Arc<std::sync::atomic::AtomicBool>,
         queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
+        composer_bundle_materialization_lock: Arc<tokio::sync::Mutex<()>>,
         pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>>,
         queued_l2_to_l1_calls: Arc<std::sync::Mutex<Vec<crate::rpc::QueuedL2ToL1Call>>>,
     ) -> (Self, watch::Receiver<HealthStatus>) {
@@ -325,8 +334,10 @@ where
             last_balance_check: std::time::Instant::now(),
             synced,
             queued_cross_chain_calls,
+            composer_bundle_materialization_lock,
             pending_l1_forward_txs,
             queued_l2_to_l1_calls,
+            arb_trace_by_l2_block: HashMap::new(),
             pending_l1: PendingL1SubmissionQueue::default(),
             prev_health_l2_head: 0,
             last_l2_head_advance: std::time::Instant::now(),
@@ -739,7 +750,7 @@ where
                             let backoff_secs = (1u64 << consecutive_errors.min(6)).min(MAX_BACKOFF_SECS);
                             error!(
                                 target: "based_rollup::driver",
-                                %err,
+                                err_chain = %format!("{err:#}"),
                                 consecutive_errors,
                                 backoff_secs,
                                 "driver step failed, backing off"
@@ -1135,6 +1146,16 @@ where
                     && block.l2_block_number <= self.l2_head_number
                 {
                     let effective_transactions = self.apply_deferred_filtering(block)?;
+                    info!(
+                        target: "based_rollup::driver",
+                        l2_block = block.l2_block_number,
+                        expected_root = %req.expected_root,
+                        derived_tx_bytes = block.transactions.len(),
+                        effective_tx_bytes = effective_transactions.len(),
+                        filtering_is_some = block.filtering.is_some(),
+                        execution_entries = block.execution_entries.len(),
+                        "sibling reorg rebuild: feeding build_derived_block"
+                    );
                     match self
                         .rebuild_block_as_sibling(
                             block.l2_block_number,
@@ -1172,7 +1193,7 @@ where
                             error!(
                                 target: "based_rollup::driver",
                                 l2_block = block.l2_block_number,
-                                %err,
+                                err_chain = %format!("{err:#}"),
                                 "sibling reorg rebuild failed — leaving request in place for retry"
                             );
                             return Err(err);

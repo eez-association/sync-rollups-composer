@@ -12,7 +12,7 @@
 //! stubs (`todo!()`) and are filled in by steps 3.4-3.7 as the shared engine
 //! is built.
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use serde_json::Value;
 
 use super::model::DiscoveredCall;
@@ -151,6 +151,10 @@ pub(crate) struct L1ToL2 {
     pub client: reqwest::Client,
     /// L1 RPC URL for view calls.
     pub l1_rpc_url: String,
+    /// Entries produced by earlier txs in the sealed composer bundle.
+    pub prior_entries: Vec<crate::cross_chain::CrossChainExecutionEntry>,
+    /// Raw L1 txs that must execute before the current user tx in retraces.
+    pub prior_raw_txs: Vec<Bytes>,
 }
 
 impl sealed::Sealed for L1ToL2 {}
@@ -186,7 +190,7 @@ impl Direction for L1ToL2 {
         user_tx: &UserTxContext,
         _iteration: usize,
     ) -> Option<Value> {
-        use super::common::{get_l1_block_context, get_rollup_state_root, get_verification_key};
+        use super::common::{get_l1_block_context, get_verification_key};
         use crate::cross_chain;
 
         let rollup_id = self.rollup_id;
@@ -247,20 +251,14 @@ impl Direction for L1ToL2 {
             cont.l1_entries
         };
 
-        if entries.is_empty() {
-            return None;
-        }
+        let current_entry_count = entries.len();
+        let mut combined_entries =
+            Vec::with_capacity(self.prior_entries.len() + current_entry_count);
+        combined_entries.extend_from_slice(&self.prior_entries);
+        combined_entries.append(&mut entries);
 
-        // Fix placeholder state deltas with real on-chain root.
-        let on_chain_root =
-            get_rollup_state_root(&self.client, &self.l1_rpc_url, self.l1_ccm, rollup_id)
-                .await
-                .unwrap_or(alloy_primitives::B256::ZERO);
-        for e in &mut entries {
-            for d in &mut e.state_deltas {
-                d.current_state = on_chain_root;
-                d.new_state = on_chain_root;
-            }
+        if combined_entries.is_empty() {
+            return None;
         }
 
         // Get L1 block context + verification key for proof.
@@ -277,7 +275,7 @@ impl Direction for L1ToL2 {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let call_data_bytes = alloy_primitives::Bytes::new();
-        let entry_hashes = cross_chain::compute_entry_hashes(&entries, vk);
+        let entry_hashes = cross_chain::compute_entry_hashes(&combined_entries, vk);
         let public_inputs_hash = cross_chain::compute_public_inputs_hash(
             &entry_hashes,
             &call_data_bytes,
@@ -296,28 +294,51 @@ impl Direction for L1ToL2 {
 
         // Encode postBatch calldata.
         let post_batch_calldata =
-            cross_chain::encode_post_batch_calldata(&entries, call_data_bytes, proof);
+            cross_chain::encode_post_batch_calldata(&combined_entries, call_data_bytes, proof);
         let post_batch_hex = format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
         let builder_addr = format!("{}", self.builder_key.address());
         let rollups_hex = format!("{}", self.l1_ccm);
         let next_block = format!("{:#x}", block_number + 1);
 
-        Some(serde_json::json!({
-            "transactions": [
-                {
-                    "from": builder_addr,
-                    "to": rollups_hex,
-                    "data": post_batch_hex,
-                    "gas": "0x1c9c380"
-                },
-                {
-                    "from": user_tx.from,
-                    "to": user_tx.to,
-                    "data": user_tx.data,
-                    "value": user_tx.value,
-                    "gas": "0x2faf080"
+        let mut transactions = Vec::with_capacity(self.prior_raw_txs.len() + 2);
+        transactions.push(serde_json::json!({
+            "from": builder_addr,
+            "to": rollups_hex,
+            "data": post_batch_hex,
+            "gas": "0x1c9c380"
+        }));
+        for raw_tx in &self.prior_raw_txs {
+            let raw_hex = format!("0x{}", hex::encode(raw_tx.as_ref()));
+            let tx_obj = match super::l1_to_l2::decode_raw_tx_for_trace(&raw_hex) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "based_rollup::discover",
+                        direction = Self::name(),
+                        %e,
+                        "failed to decode prior raw tx for L1 retrace bundle"
+                    );
+                    return None;
                 }
-            ],
+            };
+            transactions.push(serde_json::json!({
+                "from": tx_obj.get("from").and_then(|value| value.as_str()).unwrap_or(""),
+                "to": tx_obj.get("to").and_then(|value| value.as_str()).unwrap_or(""),
+                "data": tx_obj.get("data").and_then(|value| value.as_str()).unwrap_or("0x"),
+                "value": tx_obj.get("value").and_then(|value| value.as_str()).unwrap_or("0x0"),
+                "gas": "0x2faf080"
+            }));
+        }
+        transactions.push(serde_json::json!({
+            "from": user_tx.from,
+            "to": user_tx.to,
+            "data": user_tx.data,
+            "value": user_tx.value,
+            "gas": "0x2faf080"
+        }));
+
+        Some(serde_json::json!({
+            "transactions": transactions,
             "blockOverride": {
                 "number": next_block,
                 "time": format!("{:#x}", timestamp)

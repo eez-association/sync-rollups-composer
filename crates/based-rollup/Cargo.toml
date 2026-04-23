@@ -56,6 +56,9 @@ alloy-trie.workspace = true
 # RLP encoding
 alloy-rlp.workspace = true
 
+# EIP-2718 tx envelope decoding (composer bundle manager)
+alloy-eips.workspace = true
+
 # JSON-RPC
 jsonrpsee.workspace = true
 
@@ -100,7 +103,6 @@ test-utils = [
 
 [dev-dependencies]
 based-rollup = { path = ".", features = ["test-utils"] }
-alloy-eips.workspace = true
 alloy-signer.workspace = true
 reth-evm = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }

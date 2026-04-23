@@ -7,6 +7,7 @@ fn test_config() -> RollupConfig {
         deployment_l1_block: 1000,
         deployment_timestamp: 1_700_000_000,
         block_time: 12,
+        composer_bundle_close_fraction: 0.7,
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
@@ -117,6 +118,7 @@ fn test_deployment_at_zero() {
         deployment_l1_block: 0,
         deployment_timestamp: 0,
         block_time: 1,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     assert_eq!(config.l2_block_number(0), 0);
@@ -129,6 +131,7 @@ fn test_deployment_at_zero() {
 fn test_validate_rejects_zero_block_time() {
     let mut config = RollupConfig {
         block_time: 0,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     assert!(config.validate().is_err());
@@ -261,6 +264,7 @@ fn test_l2_timestamp_checked_zero_block() {
 fn test_l2_timestamp_checked_with_block_time_1() {
     let config = RollupConfig {
         block_time: 1,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     // With block_time=1, overflow happens much later
@@ -279,6 +283,7 @@ fn test_validate_warns_on_zero_deployment_timestamp() {
     let mut config = RollupConfig {
         deployment_timestamp: 0,
         block_time: 12,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     config.validate().unwrap();
@@ -288,6 +293,7 @@ fn test_validate_warns_on_zero_deployment_timestamp() {
 fn test_validate_accepts_block_time_one() {
     let mut config = RollupConfig {
         block_time: 1,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     config.validate().unwrap();
@@ -297,6 +303,7 @@ fn test_validate_accepts_block_time_one() {
 fn test_validate_accepts_large_block_time() {
     let mut config = RollupConfig {
         block_time: u64::MAX,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     config.validate().unwrap();
@@ -309,6 +316,7 @@ fn test_l2_timestamp_checked_overflow_add_phase() {
     let config = RollupConfig {
         deployment_timestamp: u64::MAX - 5,
         block_time: 12,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     assert_eq!(config.l2_timestamp_checked(0), None);
@@ -321,6 +329,7 @@ fn test_l2_timestamp_checked_overflow_mul_phase() {
     let config = RollupConfig {
         deployment_timestamp: 0,
         block_time: u64::MAX,
+        composer_bundle_close_fraction: 0.7,
         ..test_config()
     };
     // (1+1) * u64::MAX overflows
@@ -384,6 +393,7 @@ fn test_validate_without_fallback_url() {
 fn test_l2_block_number_from_timestamp_block_time_1() {
     let config = RollupConfig {
         block_time: 1,
+        composer_bundle_close_fraction: 0.7,
         deployment_timestamp: 100,
         ..test_config()
     };
@@ -398,6 +408,7 @@ fn test_l2_block_number_from_timestamp_block_time_1() {
 fn test_l2_timestamp_block_time_1_sequential() {
     let config = RollupConfig {
         block_time: 1,
+        composer_bundle_close_fraction: 0.7,
         deployment_timestamp: 0,
         ..test_config()
     };
@@ -439,6 +450,7 @@ fn test_validate_all_constraints_simultaneously() {
         deployment_l1_block: 19_000_000,
         deployment_timestamp: 1_710_000_000,
         block_time: 2,
+        composer_bundle_close_fraction: 0.7,
         builder_mode: true,
         builder_private_key: Some(
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
@@ -606,6 +618,7 @@ fn test_l2_block_number_from_timestamp_defensive_zero_block_time() {
     // defensive early return of 0 for this case.
     let config = RollupConfig {
         block_time: 0,
+        composer_bundle_close_fraction: 0.7,
         deployment_timestamp: 100,
         ..test_config()
     };

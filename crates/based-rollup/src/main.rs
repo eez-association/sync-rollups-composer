@@ -64,12 +64,22 @@ fn main() -> Result<()> {
         let queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let calls_for_rpc = queued_cross_chain_calls.clone();
+        let composer_bundle_materialization_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let composer_lock_for_proxy = composer_bundle_materialization_lock.clone();
 
         // Shared queue for raw signed L1 txs to forward after postBatch.
         // The L1 proxy queues user txs here; the driver forwards them to L1.
         let pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<alloy_primitives::Bytes>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let forward_txs_for_rpc = pending_l1_forward_txs.clone();
+        // Separate clone for the L1 composer's BundleManager so it can read
+        // pending user txs when constructing debug_traceCallMany bundles.
+        // See docs/DERIVATION.md §15 (Composer Bundling).
+        let forward_txs_for_composer = pending_l1_forward_txs.clone();
+        // Separate clone of the unified cross-chain queue so the bundler's
+        // finalizer can snapshot entries produced by each user tx and use
+        // them as priors for subsequent txs in the same bundle (§15.1).
+        let queued_calls_for_composer = queued_cross_chain_calls.clone();
 
         // Shared queue for L2→L1 calls.
         // The L2 composer RPC detects cross-chain calls and queues here;
@@ -173,6 +183,8 @@ fn main() -> Result<()> {
             let builder_private_key = rollup_config.builder_private_key.clone();
             let rollup_id = rollup_config.rollup_id;
             let cross_chain_manager_address = rollup_config.cross_chain_manager_address;
+            let l1_block_time_ms = rollup_config.block_time.saturating_mul(1000);
+            let bundle_close_fraction = rollup_config.composer_bundle_close_fraction;
             tokio::spawn(async move {
                 if let Err(e) = based_rollup::composer_rpc::l1_to_l2::run_l1_rpc_proxy(
                     l1_proxy_port,
@@ -183,6 +195,11 @@ fn main() -> Result<()> {
                     builder_private_key,
                     rollup_id,
                     cross_chain_manager_address,
+                    forward_txs_for_composer,
+                    queued_calls_for_composer,
+                    composer_lock_for_proxy,
+                    l1_block_time_ms,
+                    bundle_close_fraction,
                 )
                 .await
                 {
@@ -225,6 +242,7 @@ fn main() -> Result<()> {
                     pool,
                     synced,
                     queued_cross_chain_calls,
+                    composer_bundle_materialization_lock,
                     pending_l1_forward_txs,
                     queued_l2_to_l1_calls,
                 );

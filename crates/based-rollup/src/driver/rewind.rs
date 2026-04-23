@@ -83,6 +83,7 @@ where
     pub(super) fn clear_internal_state(&mut self) {
         self.preconfirmed_hashes.clear();
         self.pending_submissions.clear();
+        self.arb_trace_by_l2_block.clear();
         self.pending_l1.clear();
         clear_recovery_state(&mut self.pending_sibling_reorg, &mut self.hold);
         {

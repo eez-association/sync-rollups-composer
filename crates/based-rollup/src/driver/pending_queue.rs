@@ -73,6 +73,8 @@ pub struct PendingL1Group {
     /// (withdrawals, multi-call L2→L1); `None` for
     /// protocol-triggered groups (deposits, L1→L2 continuations).
     pub trigger: Option<TriggerMetadata>,
+    /// Structured trace metadata for composer-originated L1→L2 user txs.
+    pub trace: Option<crate::arb_trace::ArbTraceMeta>,
 }
 
 /// Classification of the entry mix in a
@@ -137,6 +139,7 @@ impl PendingL1SubmissionQueue {
         group_entries: impl IntoIterator<Item = CrossChainExecutionEntry>,
         mode: crate::cross_chain::EntryGroupMode,
         trigger: Option<TriggerMetadata>,
+        trace: Option<crate::arb_trace::ArbTraceMeta>,
     ) {
         let start = self.entries.len();
         self.entries.extend(group_entries);
@@ -144,6 +147,7 @@ impl PendingL1SubmissionQueue {
             start,
             mode,
             trigger,
+            trace,
         });
     }
 
