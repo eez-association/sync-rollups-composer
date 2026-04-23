@@ -47,6 +47,7 @@ fn test_rollup_config() -> RollupConfig {
         builder_address: Address::ZERO,
         bridge_l2_address: Address::ZERO,
         bridge_l1_address: Address::ZERO,
+        composer_bundle_close_fraction: 0.7,
         bootstrap_accounts_raw: String::new(),
         bootstrap_accounts: vec![],
     }

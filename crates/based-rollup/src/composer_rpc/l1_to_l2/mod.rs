@@ -220,13 +220,13 @@ pub async fn run_l1_rpc_proxy(
 /// 2. For each tx in order:
 ///    a. Snapshot `queued_cross_chain_calls.len()` BEFORE.
 ///    b. Call `handle_cross_chain_tx(..., prior_entries, prior_raw_txs)` with
-///       the accumulated context. The initial `debug_traceCall` becomes a
-///       `debug_traceCallMany([postBatch(prior_entries), prior_raw_txs..., tx])`
-///       so tx's trace sees prior txs' state effects.
+///    the accumulated context. The initial `debug_traceCall` becomes a
+///    `debug_traceCallMany([postBatch(prior_entries), prior_raw_txs..., tx])`
+///    so tx's trace sees prior txs' state effects.
 ///    c. After: new items `queue[before_len..]` are THIS tx's produced entries.
-///       Extract L1 entries from each (Simple: [call,result]; WithContinuations:
-///       l1_entries) and append to `prior_entries`. Append raw tx to
-///       `prior_raw_txs`.
+///    Extract L1 entries from each (Simple: [call,result]; WithContinuations:
+///    l1_entries) and append to `prior_entries`. Append raw tx to
+///    `prior_raw_txs`.
 /// 3. On per-tx error: log ERROR, skip the tx, continue with remaining — that
 ///    tx's bot sees a 60s timeout but subsequent txs still benefit from
 ///    prior-bundle context of the preceding successful ones.
@@ -856,18 +856,18 @@ async fn build_and_run_bundled_initial_trace(
         // immediate-path), so the Action fields only need to be a valid shape.
         let immediate_action = crate::cross_chain::CrossChainAction {
             action_type: crate::cross_chain::CrossChainActionType::L2Tx,
-            rollup_id: rollup_id_typed.clone(),
+            rollup_id: rollup_id_typed,
             destination: alloy_primitives::Address::ZERO,
             value: alloy_primitives::U256::ZERO,
             data: vec![],
             failed: false,
             source_address: alloy_primitives::Address::ZERO,
-            source_rollup: rollup_id_typed.clone(),
+            source_rollup: rollup_id_typed,
             scope: crate::cross_chain::ScopePath::root(),
         };
         entries_with_immediate.push(crate::cross_chain::CrossChainExecutionEntry {
             state_deltas: vec![crate::cross_chain::CrossChainStateDelta {
-                rollup_id: rollup_id_typed.clone(),
+                rollup_id: rollup_id_typed,
                 current_state: current_state_root,
                 new_state: deferred_chain_start,
                 ether_delta: alloy_primitives::I256::ZERO,

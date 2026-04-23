@@ -1,7 +1,5 @@
 //! Unit tests for the bundle manager state machine + helpers.
 
-#![cfg(test)]
-
 use super::*;
 
 use alloy_consensus::{SignableTransaction, TxEip1559, TxLegacy};
@@ -253,7 +251,7 @@ fn bundle_id_invariant_under_tx_ordering() {
 #[test]
 fn bundle_id_differs_by_cycle_start() {
     let a = mock_tx(100, 0xA1);
-    let id_1 = compute_bundle_id(1_000_000, &[a.clone()]);
+    let id_1 = compute_bundle_id(1_000_000, std::slice::from_ref(&a));
     let id_2 = compute_bundle_id(1_000_012, &[a]);
     assert_ne!(id_1, id_2);
 }

@@ -37,6 +37,14 @@ use tracing::{debug, error, info, warn};
 /// Maximum number of blocks to build in one tick during catch-up.
 const MAX_CATCHUP_BLOCKS: u64 = 10_000;
 
+#[derive(Debug, Clone, Copy)]
+struct FinalizeBlockContext {
+    l2_block: u64,
+    timestamp: u64,
+    l1_hash: B256,
+    l1_block: u64,
+}
+
 /// Pre-computed context for a single builder tick, determined before
 /// queue drains and the block building loop.
 pub(super) struct BuilderTickContext {
@@ -353,11 +361,14 @@ where
             }
 
             // Compute intermediate state roots and attach entry deltas.
-            let (clean_state_root, intermediate_roots) = match self.finalize_block_entries(
-                next_l2_block,
-                next_timestamp,
+            let finalize_ctx = FinalizeBlockContext {
+                l2_block: next_l2_block,
+                timestamp: next_timestamp,
                 l1_hash,
-                current_l1_block,
+                l1_block: current_l1_block,
+            };
+            let (clean_state_root, intermediate_roots) = match self.finalize_block_entries(
+                finalize_ctx,
                 &built,
                 &rpc_entries_for_block,
                 &block_arb_traces,
@@ -438,10 +449,7 @@ where
     /// the `pub(crate)` constructor.
     fn finalize_block_entries(
         &mut self,
-        l2_block: u64,
-        timestamp: u64,
-        l1_hash: B256,
-        l1_block: u64,
+        ctx: FinalizeBlockContext,
         built: &super::types::BuiltBlock,
         rpc_entries: &[CrossChainExecutionEntry],
         block_arb_traces: &[crate::arb_trace::ArbTraceMeta],
@@ -474,10 +482,10 @@ where
         let mut intermediate_roots = Vec::new();
         let clean_state_root = if has_entries {
             match self.compute_intermediate_roots(
-                l2_block.saturating_sub(1),
-                timestamp,
-                l1_hash,
-                l1_block,
+                ctx.l2_block.saturating_sub(1),
+                ctx.timestamp,
+                ctx.l1_hash,
+                ctx.l1_block,
                 built.state_root,
                 &built.encoded_transactions,
             ) {
@@ -485,7 +493,7 @@ where
                     let clean = roots[0];
                     info!(
                         target: "based_rollup::driver",
-                        l2_block,
+                        l2_block = ctx.l2_block,
                         speculative = %built.state_root,
                         clean = %clean,
                         num_protocol_triggers,
@@ -610,7 +618,7 @@ where
                     updated.state_delta_before,
                     updated.state_delta_after,
                     serde_json::json!({
-                        "l2_block_number": l2_block,
+                        "l2_block_number": ctx.l2_block,
                         "speculative_state_root": format!("{}", built.state_root),
                         "clean_state_root": format!("{}", clean_root),
                         "entry_count": end.saturating_sub(start),

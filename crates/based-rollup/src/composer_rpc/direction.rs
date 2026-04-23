@@ -255,7 +255,7 @@ impl Direction for L1ToL2 {
         let mut combined_entries =
             Vec::with_capacity(self.prior_entries.len() + current_entry_count);
         combined_entries.extend_from_slice(&self.prior_entries);
-        combined_entries.extend(entries.drain(..));
+        combined_entries.append(&mut entries);
 
         if combined_entries.is_empty() {
             return None;
