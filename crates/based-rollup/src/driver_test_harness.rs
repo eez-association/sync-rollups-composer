@@ -137,6 +137,7 @@ impl DriverTestHarness {
         // Empty queues. The Driver only drains from these on user-tx paths
         // we don't exercise.
         let queued_cross_chain_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let composer_bundle_materialization_lock = Arc::new(tokio::sync::Mutex::new(()));
         let pending_l1_forward_txs: Arc<std::sync::Mutex<Vec<Bytes>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let queued_l2_to_l1_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -159,6 +160,7 @@ impl DriverTestHarness {
             pool,
             synced.clone(),
             queued_cross_chain_calls,
+            composer_bundle_materialization_lock,
             pending_l1_forward_txs,
             queued_l2_to_l1_calls,
         );

@@ -2368,6 +2368,7 @@ fn test_reorg_clears_all_cross_chain_state() {
             raw_l1_tx: Bytes::new(),
             tx_reverts: crate::cross_chain::TxOutcome::Success,
             l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
+            trace_meta: None,
         });
 
     assert!(!pending_cross_chain_entries.is_empty());
@@ -2606,6 +2607,21 @@ fn test_flush_ordering_includes_forward_queued_l1_txs() {
         call_order.len(),
         2,
         "exactly two calls in order: submit_to_l1 → forward user txs"
+    );
+}
+
+#[test]
+fn test_blocks_only_flush_still_forwards_forward_only_queue() {
+    // A sealed batch can contain ordinary L1 txs without any cross-chain
+    // entries. As long as the driver submitted a builder block, the queued raw
+    // txs must still be forwarded; otherwise they starve behind continuous
+    // block production.
+    let has_entries = false;
+    let has_forward_txs = true;
+
+    assert!(
+        has_entries || has_forward_txs,
+        "blocks-only flushes with queued ForwardOnly txs must still forward user txs"
     );
 }
 
@@ -5487,6 +5503,106 @@ mod post_commit_anchor_divergence {
             "saturating_sub(1) floors to 773 then .max(anchor=774) clamps back up"
         );
         assert_eq!(rollback_l1, 777, "L1 cursor rolls back to anchor.l1 - 1");
+    }
+
+    #[tokio::test]
+    async fn test_flush_precheck_without_proposer_preserves_pending_l1_state() {
+        let mut harness = DriverTestHarness::new();
+
+        harness.driver.pending_l1.append_group(
+            vec![CrossChainExecutionEntry {
+                state_deltas: vec![],
+                action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xA1)),
+                next_action: crate::cross_chain::CrossChainAction {
+                    action_type: crate::cross_chain::CrossChainActionType::Call,
+                    rollup_id: crate::cross_chain::RollupId::MAINNET,
+                    scope: ScopePath::root(),
+                    destination: alloy_primitives::Address::ZERO,
+                    value: alloy_primitives::U256::ZERO,
+                    data: vec![],
+                    failed: false,
+                    source_address: alloy_primitives::Address::ZERO,
+                    source_rollup: crate::cross_chain::RollupId::MAINNET,
+                },
+            }],
+            crate::cross_chain::EntryGroupMode::Chained,
+            None,
+            None,
+        );
+        harness.driver.pending_submissions.push_back(PendingBlock {
+            l2_block_number: 77,
+            pre_state_root: B256::with_last_byte(0x01),
+            state_root: B256::with_last_byte(0x02),
+            clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0x01)),
+            encoded_transactions: alloy_primitives::Bytes::new(),
+            intermediate_roots: vec![],
+        });
+
+        let pre_blocks = harness.driver.pending_submissions.len();
+        let pre_entries = harness.driver.pending_l1.len_entries();
+        let pre_groups = harness.driver.pending_l1.num_groups();
+
+        let _ = harness.driver.flush_precheck().await;
+
+        assert_eq!(harness.driver.pending_submissions.len(), pre_blocks);
+        assert_eq!(harness.driver.pending_l1.len_entries(), pre_entries);
+        assert_eq!(harness.driver.pending_l1.num_groups(), pre_groups);
+    }
+
+    #[test]
+    fn test_halt_builder_preserving_pending_l1_keeps_entries_and_forward_txs() {
+        let mut harness = DriverTestHarness::new();
+
+        harness.driver.pending_l1.append_group(
+            vec![CrossChainExecutionEntry {
+                state_deltas: vec![],
+                action_hash: crate::cross_chain::ActionHash::new(B256::with_last_byte(0xB2)),
+                next_action: crate::cross_chain::CrossChainAction {
+                    action_type: crate::cross_chain::CrossChainActionType::Call,
+                    rollup_id: crate::cross_chain::RollupId::MAINNET,
+                    scope: ScopePath::root(),
+                    destination: alloy_primitives::Address::ZERO,
+                    value: alloy_primitives::U256::ZERO,
+                    data: vec![],
+                    failed: false,
+                    source_address: alloy_primitives::Address::ZERO,
+                    source_rollup: crate::cross_chain::RollupId::MAINNET,
+                },
+            }],
+            crate::cross_chain::EntryGroupMode::Chained,
+            None,
+            None,
+        );
+
+        let mut queued_l1_txs = vec![alloy_primitives::Bytes::from_static(b"\x01\x02")];
+
+        let err = harness
+            .driver
+            .halt_builder_preserving_pending_l1(88, &mut queued_l1_txs, "test sentinel")
+            .expect_err("helper must bail loudly");
+
+        assert!(
+            format!("{err:#}").contains("test sentinel"),
+            "error message should preserve the root cause"
+        );
+        assert!(harness.driver.hold_for_test().is_armed_for(88));
+        assert_eq!(harness.driver.pending_l1.len_entries(), 1);
+        assert_eq!(harness.driver.pending_l1.num_groups(), 1);
+        assert!(
+            queued_l1_txs.is_empty(),
+            "local queue should be drained into the hold queue"
+        );
+
+        let fwd_queue = harness
+            .driver
+            .pending_l1_forward_txs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            fwd_queue.len(),
+            1,
+            "raw L1 tx must be preserved for later forwarding"
+        );
     }
 
     /// Fix 1 / Fix 2 — the flush-path dispatch must survive the

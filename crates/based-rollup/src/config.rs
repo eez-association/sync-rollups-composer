@@ -338,8 +338,7 @@ impl RollupConfig {
                 "BLOCK_TIME must be > 0 (got 0), which would cause division by zero"
             ));
         }
-        if !(0.0 < self.composer_bundle_close_fraction
-            && self.composer_bundle_close_fraction < 1.0)
+        if !(0.0 < self.composer_bundle_close_fraction && self.composer_bundle_close_fraction < 1.0)
         {
             return Err(eyre::eyre!(
                 "COMPOSER_BUNDLE_CLOSE_FRACTION must be in (0, 1), got {}",

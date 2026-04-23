@@ -64,6 +64,8 @@ fn main() -> Result<()> {
         let queued_cross_chain_calls: Arc<std::sync::Mutex<Vec<QueuedCrossChainCall>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let calls_for_rpc = queued_cross_chain_calls.clone();
+        let composer_bundle_materialization_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let composer_lock_for_proxy = composer_bundle_materialization_lock.clone();
 
         // Shared queue for raw signed L1 txs to forward after postBatch.
         // The L1 proxy queues user txs here; the driver forwards them to L1.
@@ -195,6 +197,7 @@ fn main() -> Result<()> {
                     cross_chain_manager_address,
                     forward_txs_for_composer,
                     queued_calls_for_composer,
+                    composer_lock_for_proxy,
                     l1_block_time_ms,
                     bundle_close_fraction,
                 )
@@ -239,6 +242,7 @@ fn main() -> Result<()> {
                     pool,
                     synced,
                     queued_cross_chain_calls,
+                    composer_bundle_materialization_lock,
                     pending_l1_forward_txs,
                     queued_l2_to_l1_calls,
                 );

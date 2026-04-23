@@ -5,7 +5,7 @@
 //! child L2→L1 calls, runs iterative discovery, and queues the execution table.
 
 use crate::cross_chain::{RollupId, ScopePath, filter_new_by_count};
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -353,6 +353,8 @@ pub(super) async fn process_l1_to_l2_calls(
     to: &str,
     data: &str,
     value: &str,
+    prior_entries: &[crate::cross_chain::CrossChainExecutionEntry],
+    prior_raw_txs: &[Bytes],
     top_level_error: bool,
     detected_calls: &mut Vec<DiscoveredCall>,
     proxy_cache: &mut HashMap<Address, Option<super::super::trace::ProxyInfo>>,
@@ -718,6 +720,8 @@ pub(super) async fn process_l1_to_l2_calls(
                         rollup_id,
                         &builder_key,
                         &all_calls,
+                        prior_entries,
+                        prior_raw_txs,
                         from,
                         to,
                         data,
@@ -1523,6 +1527,8 @@ pub(super) async fn process_l1_to_l2_calls(
                                     rollup_id,
                                     &builder_key,
                                     detected_calls,
+                                    prior_entries,
+                                    prior_raw_txs,
                                     from,
                                     to,
                                     data,

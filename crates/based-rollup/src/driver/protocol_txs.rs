@@ -164,10 +164,25 @@ where
 
         let chain_id = self.evm_config.chain_spec().chain().id();
 
-        // Use next block's base fee (not parent's) for protocol tx gas_price.
+        // Use next block's base fee (the base fee of `l2_block_number` itself,
+        // derived from its parent) for protocol tx gas_price.
+        //
+        // Important: read the parent of `l2_block_number` (= l2_block_number - 1),
+        // NOT `self.l2_head_number`. In builder mode these are equal
+        // (`l2_block_number == self.l2_head_number + 1`), but in the
+        // sibling-reorg rebuild path (verify.rs::apply_generic_filtering_via_rebuild)
+        // `self.l2_head_number` has already advanced past `l2_block_number`, so
+        // reading the head's header computes a base fee for a later block. When
+        // that base fee is lower than the real base fee at `l2_block_number`
+        // (e.g. gas use decayed between target and head), the protocol tx is
+        // signed with `gas_price < actual_basefee` and the re-execution fails
+        // with `EVM reported invalid transaction: gas price is less than basefee`.
+        // Regression observed 2026-04-21 on devnet during a partial-consumption
+        // recovery loop after the `had_continuation` guard was removed.
+        let parent_of_target = l2_block_number.saturating_sub(1);
         let parent_header = self
             .l2_provider
-            .sealed_header(self.l2_head_number)
+            .sealed_header(parent_of_target)
             .wrap_err("failed to get parent header for gas price")?
             .ok_or_eyre("parent header not found for gas price")?;
         let gas_price = parent_header

@@ -77,6 +77,11 @@ pub struct PendingUserTx {
     /// Effective gas price used for bundle ordering. Matches reth mempool semantics:
     /// legacy / EIP-2930 → `gasPrice`; EIP-1559 → `maxPriorityFeePerGas` (tip).
     pub effective_gas_price: u128,
+    /// Lightweight request-time hint: `true` when the initial standalone trace
+    /// already looked like a cross-chain tx. Used only to choose the safest
+    /// fallback on bundle-finalization errors; the final classification still
+    /// happens during finalization.
+    pub cross_chain_hint: bool,
     /// When this tx landed in the bundle (wall-clock ms).
     pub arrived_at_ms: u64,
 }
@@ -146,7 +151,9 @@ impl BundleManager {
         if s.current.iter().any(|p| p.tx_hash == tx.tx_hash)
             || s.next.iter().any(|p| p.tx_hash == tx.tx_hash)
         {
-            self.metrics.tx_deduped_total.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .tx_deduped_total
+                .fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
@@ -170,7 +177,9 @@ impl BundleManager {
         } else {
             s.next.push(tx);
         }
-        self.metrics.tx_accepted_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .tx_accepted_total
+            .fetch_add(1, Ordering::Relaxed);
         true
     }
 
@@ -195,7 +204,10 @@ impl BundleManager {
 
     /// Current cycle start time in wall-clock ms. For instrumentation.
     pub fn cycle_start_ms(&self) -> u64 {
-        self.state.lock().expect("bundle state poisoned").cycle_start_ms
+        self.state
+            .lock()
+            .expect("bundle state poisoned")
+            .cycle_start_ms
     }
 
     /// Main cycle loop — drives rotation event-driven on L1 block arrival.
@@ -210,10 +222,14 @@ impl BundleManager {
     /// 1. Wait `window_ms` (accept txs into `current`).
     /// 2. Drain `current`, spawn `finalize` in a sibling task (so we can start
     ///    polling while the finalize runs concurrently).
-    /// 3. Poll L1 `eth_blockNumber` every `L1_POLL_INTERVAL_MS` (default 200ms)
-    ///    until the number advances, or until `grace_ms` elapses as a hard
-    ///    timeout — whichever comes first.
-    /// 4. Rotate: `current` ← `next`; `cycle_start_ms = now`.
+    /// 3. If the bundle is non-empty, wait for finalize completion and then for
+    ///    every drained tx hash to have an L1 receipt before rotating. This
+    ///    prevents inter-bundle drift from earlier composer txs that are
+    ///    forwarded but not yet reflected in `latest`.
+    /// 4. If the bundle is empty, poll L1 `eth_blockNumber` every
+    ///    `L1_POLL_INTERVAL_MS` (default 200ms) until the number advances, or
+    ///    until `grace_ms` elapses as a hard timeout.
+    /// 5. Rotate: `current` ← `next`; `cycle_start_ms = now`.
     ///
     /// Takes an `l1_poll_url` for the observation. If `None`, falls back to
     /// timer-based rotation (used by unit tests).
@@ -261,7 +277,8 @@ impl BundleManager {
             sleep(window).await;
 
             let drained = self.drain_current();
-            if !drained.txs.is_empty() {
+            let drained_tx_hashes: Vec<B256> = drained.txs.iter().map(|tx| tx.tx_hash).collect();
+            let finalize_handle = if !drained.txs.is_empty() {
                 tracing::info!(
                     target: "based_rollup::composer_bundle",
                     bundle_id = %drained.bundle_id,
@@ -270,7 +287,7 @@ impl BundleManager {
                 );
                 let this = self.clone();
                 let fin = finalizer.clone();
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     if let Err(e) = (fin)(this.clone(), drained).await {
                         tracing::error!(
                             target: "based_rollup::composer_bundle",
@@ -281,69 +298,142 @@ impl BundleManager {
                             .finalize_failures_total
                             .fetch_add(1, Ordering::Relaxed);
                     }
-                });
-            }
+                }))
+            } else {
+                None
+            };
 
-            // Wait for L1 to advance PAST the cycle's baseline — not the
-            // number observed at grace start. L1 may have advanced during
-            // the window (10.8s is nearly a full L1 block cycle), so the
-            // baseline captured at cycle start is the correct reference.
-            let rotation_reason = match (&l1_poll_url, current_cycle_l1_baseline) {
-                (Some(url), Some(baseline)) => {
-                    match wait_for_l1_block_past(
-                        &client,
-                        url,
-                        baseline,
-                        grace_timeout,
-                        Duration::from_millis(L1_POLL_INTERVAL_MS),
-                    )
-                    .await
-                    {
-                        Ok(Some(new_block)) => {
-                            tracing::info!(
-                                target: "based_rollup::composer_bundle",
-                                cycle_l1_baseline = baseline,
-                                new_l1_block = new_block,
-                                "cycle_rotation: new L1 block past baseline"
-                            );
-                            current_cycle_l1_baseline = Some(new_block);
-                            "l1_block_advance"
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                target: "based_rollup::composer_bundle",
-                                cycle_l1_baseline = baseline,
-                                grace_timeout_ms = grace_timeout.as_millis() as u64,
-                                "cycle_rotation: grace timeout without L1 advance past baseline"
-                            );
-                            // Refresh baseline anyway so we don't repeatedly
-                            // time out against the same stale value.
-                            if let Ok(n) = fetch_l1_block_number(&client, url).await {
-                                current_cycle_l1_baseline = Some(n);
+            let rotation_reason = if drained_tx_hashes.is_empty() {
+                // Wait for L1 to advance PAST the cycle's baseline — not the
+                // number observed at grace start. L1 may have advanced during
+                // the window, so the baseline captured at cycle start is the
+                // correct reference.
+                match (&l1_poll_url, current_cycle_l1_baseline) {
+                    (Some(url), Some(baseline)) => {
+                        match wait_for_l1_block_past(
+                            &client,
+                            url,
+                            baseline,
+                            grace_timeout,
+                            Duration::from_millis(L1_POLL_INTERVAL_MS),
+                        )
+                        .await
+                        {
+                            Ok(Some(new_block)) => {
+                                tracing::info!(
+                                    target: "based_rollup::composer_bundle",
+                                    cycle_l1_baseline = baseline,
+                                    new_l1_block = new_block,
+                                    "cycle_rotation: new L1 block past baseline"
+                                );
+                                current_cycle_l1_baseline = Some(new_block);
+                                "l1_block_advance"
                             }
-                            "grace_timeout"
+                            Ok(None) => {
+                                tracing::warn!(
+                                    target: "based_rollup::composer_bundle",
+                                    cycle_l1_baseline = baseline,
+                                    grace_timeout_ms = grace_timeout.as_millis() as u64,
+                                    "cycle_rotation: grace timeout without L1 advance past baseline"
+                                );
+                                if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                                    current_cycle_l1_baseline = Some(n);
+                                }
+                                "grace_timeout"
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "based_rollup::composer_bundle",
+                                    %e,
+                                    "cycle_rotation: L1 poll error — rotating by timer"
+                                );
+                                "poll_error"
+                            }
                         }
-                        Err(e) => {
+                    }
+                    (Some(url), None) => {
+                        if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                            current_cycle_l1_baseline = Some(n);
+                        }
+                        sleep(grace_timeout).await;
+                        "poll_not_initialized"
+                    }
+                    (None, _) => {
+                        sleep(grace_timeout).await;
+                        "timer_only"
+                    }
+                }
+            } else {
+                if let Some(handle) = finalize_handle {
+                    let finalize_timeout =
+                        Duration::from_millis(self.config.l1_block_time_ms.saturating_mul(6));
+                    match tokio::time::timeout(finalize_timeout, handle).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
                             tracing::warn!(
                                 target: "based_rollup::composer_bundle",
                                 %e,
-                                "cycle_rotation: L1 poll error — rotating by timer"
+                                "cycle_rotation: finalize task join error"
                             );
-                            "poll_error"
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                target: "based_rollup::composer_bundle",
+                                timeout_ms = finalize_timeout.as_millis() as u64,
+                                "cycle_rotation: finalize timeout before receipts"
+                            );
                         }
                     }
                 }
-                (Some(url), None) => {
-                    // Initial baseline read failed in init; try again now.
-                    if let Ok(n) = fetch_l1_block_number(&client, url).await {
-                        current_cycle_l1_baseline = Some(n);
+
+                match &l1_poll_url {
+                    Some(url) => {
+                        let receipt_timeout =
+                            Duration::from_millis(self.config.l1_block_time_ms.saturating_mul(6));
+                        match wait_for_l1_receipts(
+                            &client,
+                            url,
+                            &drained_tx_hashes,
+                            receipt_timeout,
+                            Duration::from_millis(L1_POLL_INTERVAL_MS),
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                                    current_cycle_l1_baseline = Some(n);
+                                }
+                                "bundle_receipts"
+                            }
+                            Ok(false) => {
+                                tracing::warn!(
+                                    target: "based_rollup::composer_bundle",
+                                    tx_count = drained_tx_hashes.len(),
+                                    timeout_ms = receipt_timeout.as_millis() as u64,
+                                    "cycle_rotation: timed out waiting for drained bundle receipts"
+                                );
+                                if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                                    current_cycle_l1_baseline = Some(n);
+                                }
+                                "receipt_timeout"
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "based_rollup::composer_bundle",
+                                    %e,
+                                    "cycle_rotation: receipt polling error — rotating anyway"
+                                );
+                                if let Ok(n) = fetch_l1_block_number(&client, url).await {
+                                    current_cycle_l1_baseline = Some(n);
+                                }
+                                "receipt_poll_error"
+                            }
+                        }
                     }
-                    sleep(grace_timeout).await;
-                    "poll_not_initialized"
-                }
-                (None, _) => {
-                    sleep(grace_timeout).await;
-                    "timer_only"
+                    None => {
+                        sleep(grace_timeout).await;
+                        "timer_only_nonempty"
+                    }
                 }
             };
 
@@ -401,10 +491,7 @@ pub async fn wait_for_l1_block_past(
     }
 }
 
-async fn fetch_l1_block_number(
-    client: &reqwest::Client,
-    l1_rpc_url: &str,
-) -> eyre::Result<u64> {
+async fn fetch_l1_block_number(client: &reqwest::Client, l1_rpc_url: &str) -> eyre::Result<u64> {
     let req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "eth_blockNumber",
@@ -419,6 +506,51 @@ async fn fetch_l1_block_number(
         .ok_or_else(|| eyre::eyre!("missing result"))?;
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
     Ok(u64::from_str_radix(hex, 16)?)
+}
+
+async fn has_l1_receipt(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    tx_hash: B256,
+) -> eyre::Result<bool> {
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getTransactionReceipt",
+        "params": [format!("{tx_hash:#x}")],
+        "id": 1
+    });
+    let resp = client.post(l1_rpc_url).json(&req).send().await?;
+    let body: serde_json::Value = resp.json().await?;
+    Ok(!body
+        .get("result")
+        .unwrap_or(&serde_json::Value::Null)
+        .is_null())
+}
+
+async fn wait_for_l1_receipts(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    tx_hashes: &[B256],
+    timeout: Duration,
+    poll_interval: Duration,
+) -> eyre::Result<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut all_present = true;
+        for tx_hash in tx_hashes {
+            if !has_l1_receipt(client, l1_rpc_url, *tx_hash).await? {
+                all_present = false;
+                break;
+            }
+        }
+        if all_present {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        sleep(poll_interval).await;
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

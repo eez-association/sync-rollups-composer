@@ -3,6 +3,7 @@
 //! This crate provides custom consensus, EVM execution with builder protocol transactions,
 //! L1 derivation, block building, and proposer logic for a based rollup architecture.
 
+pub mod arb_trace;
 pub mod builder_sync;
 pub mod composer_rpc;
 pub mod config;

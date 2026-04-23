@@ -16,6 +16,7 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use reth_provider::{BlockNumReader, HeaderProvider, StateProviderFactory};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 
 // ──────────────────────────────────────────────
@@ -236,6 +237,8 @@ pub enum QueuedCrossChainCall {
         /// `Independent` is only used by partial-revert multi-call
         /// continuations (which live in the other variant).
         l1_independent_entries: crate::cross_chain::EntryGroupMode,
+        /// Structured tracing metadata keyed by the user's raw L1 tx hash.
+        trace_meta: Option<crate::arb_trace::ArbTraceMeta>,
     },
     /// Multi-call continuation pattern (flash loans, nested cross-chain
     /// calls). The L2 table is loaded via `loadExecutionTable` with a
@@ -269,6 +272,19 @@ pub enum QueuedCrossChainCall {
         /// `Independent` for partial-revert patterns where L1
         /// try/catch rolls back the reverted call's state.
         l1_independent_entries: crate::cross_chain::EntryGroupMode,
+        /// Structured tracing metadata keyed by the user's raw L1 tx hash.
+        trace_meta: Option<crate::arb_trace::ArbTraceMeta>,
+    },
+    /// A plain L1 transaction that the composer held in the sealed bundle so
+    /// later cross-chain simulations can observe its state effects, but which
+    /// does not contribute any execution-table entries of its own.
+    ForwardOnly {
+        /// Keccak of the raw tx bytes. Used for logging / rollback correlation.
+        tx_hash: crate::cross_chain::ActionHash,
+        /// Effective gas price of the user's L1 tx (for bundle ordering).
+        effective_gas_price: u128,
+        /// Raw signed L1 transaction to forward after the bundle's `postBatch`.
+        raw_l1_tx: Bytes,
     },
 }
 
@@ -284,6 +300,10 @@ impl QueuedCrossChainCall {
             | Self::WithContinuations {
                 effective_gas_price,
                 ..
+            }
+            | Self::ForwardOnly {
+                effective_gas_price,
+                ..
             } => *effective_gas_price,
         }
     }
@@ -293,7 +313,9 @@ impl QueuedCrossChainCall {
     /// entries that never forward a user tx.
     pub fn raw_l1_tx(&self) -> &Bytes {
         match self {
-            Self::Simple { raw_l1_tx, .. } | Self::WithContinuations { raw_l1_tx, .. } => raw_l1_tx,
+            Self::Simple { raw_l1_tx, .. }
+            | Self::WithContinuations { raw_l1_tx, .. }
+            | Self::ForwardOnly { raw_l1_tx, .. } => raw_l1_tx,
         }
     }
 
@@ -304,6 +326,7 @@ impl QueuedCrossChainCall {
             Self::Simple { tx_reverts, .. } | Self::WithContinuations { tx_reverts, .. } => {
                 *tx_reverts
             }
+            Self::ForwardOnly { .. } => crate::cross_chain::TxOutcome::Success,
         }
     }
 
@@ -318,6 +341,18 @@ impl QueuedCrossChainCall {
                 l1_independent_entries,
                 ..
             } => *l1_independent_entries,
+            Self::ForwardOnly { .. } => crate::cross_chain::EntryGroupMode::Chained,
+        }
+    }
+
+    /// Structured trace metadata, when this queue item originated from a user
+    /// L1 tx intercepted by the composer proxy.
+    pub fn trace_meta(&self) -> Option<&crate::arb_trace::ArbTraceMeta> {
+        match self {
+            Self::Simple { trace_meta, .. } | Self::WithContinuations { trace_meta, .. } => {
+                trace_meta.as_ref()
+            }
+            Self::ForwardOnly { .. } => None,
         }
     }
 
@@ -327,9 +362,8 @@ impl QueuedCrossChainCall {
         matches!(self, Self::WithContinuations { .. })
     }
 
-    /// Action hash used for tracking and logging. For `Simple` this
-    /// is the CALL entry's hash; for `WithContinuations` it is the
-    /// first table entry's hash (the continuation chain's root).
+    /// Tracking hash used for logging. For cross-chain variants this is the
+    /// root action hash; for [`Self::ForwardOnly`] it is the raw tx hash.
     pub fn tracking_action_hash(&self) -> crate::cross_chain::ActionHash {
         match self {
             Self::Simple { call_entry, .. } => call_entry.action_hash,
@@ -339,6 +373,7 @@ impl QueuedCrossChainCall {
                 .first()
                 .map(|e| e.action_hash)
                 .unwrap_or(crate::cross_chain::ActionHash::ZERO),
+            Self::ForwardOnly { tx_hash, .. } => *tx_hash,
         }
     }
 }
@@ -789,6 +824,22 @@ where
 
         // Compute a deterministic ID for this cross-chain call (for tracking)
         let call_id = call_entry.action_hash;
+        let trace_meta = crate::arb_trace::build_trace_meta(
+            params.raw_l1_tx.as_ref(),
+            params.source_address,
+            params.destination,
+            params.data.as_ref(),
+            params.value,
+        )
+        .map(|meta| {
+            crate::arb_trace::with_entry_action_hashes(
+                &meta,
+                &crate::cross_chain::convert_pairs_to_l1_entries(&[
+                    call_entry.clone(),
+                    result_entry.clone(),
+                ]),
+            )
+        });
 
         tracing::info!(
             target: "based_rollup::rpc",
@@ -798,6 +849,21 @@ where
             %call_id,
             "queued cross-chain call entries for L1 submission"
         );
+        if let Some(meta) = &trace_meta {
+            crate::arb_trace::emit_with_meta(
+                "entries_built",
+                meta,
+                None,
+                None,
+                json!({
+                    "call_action_hash": format!("{}", call_entry.action_hash),
+                    "result_action_hash": format!("{}", result_entry.action_hash),
+                    "queue_variant": "simple",
+                    "l2_call_success": call_success,
+                    "l2_return_data_hex": format!("0x{}", hex::encode(&result_entry.next_action.data)),
+                }),
+            );
+        }
 
         // Push into the unified queue; the driver will drain, sort by gas price,
         // then build entries with correctly-ordered chained state deltas.
@@ -827,7 +893,21 @@ where
                 raw_l1_tx: params.raw_l1_tx.clone(),
                 tx_reverts: crate::cross_chain::TxOutcome::Success,
                 l1_independent_entries: crate::cross_chain::EntryGroupMode::Chained,
+                trace_meta: trace_meta.clone(),
             });
+            if let Some(meta) = &trace_meta {
+                crate::arb_trace::emit_with_meta(
+                    "entries_queued",
+                    meta,
+                    None,
+                    None,
+                    json!({
+                        "queue_len_after": queue.len(),
+                        "queue_variant": "simple",
+                        "gas_price": params.gas_price.to_string(),
+                    }),
+                );
+            }
         }
 
         // Return the CALL action hash as a tracking identifier.
@@ -1075,6 +1155,14 @@ where
         );
 
         let call_id = call_entry.action_hash;
+        let trace_meta = crate::arb_trace::build_trace_meta(
+            params.raw_l1_tx.as_ref(),
+            first_call.source_address,
+            first_call.destination,
+            first_call.data.as_ref(),
+            first_call.value,
+        )
+        .map(|meta| crate::arb_trace::with_entry_action_hashes(&meta, &continuation.l1_entries));
 
         tracing::info!(
             target: "based_rollup::rpc",
@@ -1084,6 +1172,29 @@ where
             %call_id,
             "built execution table for continuation pattern"
         );
+        if let Some(meta) = &trace_meta {
+            crate::arb_trace::emit_with_meta(
+                "entries_built",
+                meta,
+                None,
+                None,
+                json!({
+                    "queue_variant": "with_continuations",
+                    "call_count": params.calls.len(),
+                    "l1_entry_count": l1_count,
+                    "l2_entry_count": l2_count,
+                    "call_action_hash": format!("{}", call_id),
+                    "calls": params.calls.iter().map(|call| {
+                        crate::arb_trace::call_summary_json(
+                            call.source_address,
+                            call.destination,
+                            call.data.as_ref(),
+                            call.value,
+                        )
+                    }).collect::<Vec<_>>(),
+                }),
+            );
+        }
 
         // Queue as a single atomic unit with extra_l2_entries and l1_entries
         {
@@ -1122,7 +1233,21 @@ where
                 raw_l1_tx: params.raw_l1_tx.clone(),
                 tx_reverts: crate::cross_chain::TxOutcome::Success,
                 l1_independent_entries: continuation.l1_independent_entries,
+                trace_meta: trace_meta.clone(),
             });
+            if let Some(meta) = &trace_meta {
+                crate::arb_trace::emit_with_meta(
+                    "entries_queued",
+                    meta,
+                    None,
+                    None,
+                    json!({
+                        "queue_len_after": queue.len(),
+                        "queue_variant": "with_continuations",
+                        "gas_price": params.gas_price.to_string(),
+                    }),
+                );
+            }
         }
 
         Ok(BuildExecutionTableResult {

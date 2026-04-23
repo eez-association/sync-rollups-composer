@@ -1,14 +1,16 @@
 //! L1 RPC proxy for transparent cross-chain call detection.
 //!
 //! Sits in front of the L1 RPC and transparently forwards all requests.
-//! Intercepts `eth_sendRawTransaction` to detect cross-chain calls:
+//! Intercepts `eth_sendRawTransaction` to batch all L1 txs seen by the
+//! composer into a sealed simulation/forwarding cycle:
 //!
-//! 1. **Detect**: Check if tx targets a CrossChainProxy (via `authorizedProxies`
-//!    mapping on Rollups.sol — returns `ProxyInfo(originalAddress, originalRollupId)`)
-//! 2. **Queue**: Call `syncrollups_initiateCrossChainCall` on the builder's L2 RPC
-//!    with the gas price and raw L1 tx bundled atomically. The driver sorts entries
-//!    by gas price descending (matching L1 miner ordering) before computing chained
-//!    state deltas, then forwards the L1 txs after `postBatch`.
+//! 1. **Seal**: decode any CALL-style raw tx and place it into the current
+//!    bundle window. New arrivals during finalization flip to the next bundle.
+//! 2. **Classify**: during finalization, detect which bundled txs are really
+//!    cross-chain and build their entries with prior-bundle context.
+//! 3. **Forward**: drain the whole sealed order through the driver so
+//!    cross-chain and ordinary txs reach L1 in the same order they were
+//!    simulated.
 //!
 //! The driver batches all entries into a single `postBatch`, then forwards queued
 //! L1 txs — no nonce contention with the proposer's `submitBatch`.
@@ -18,16 +20,16 @@
 mod process;
 mod simulation;
 
-use alloy_primitives::{Address, Bytes};
 #[cfg(test)]
 use alloy_primitives::U256;
+use alloy_primitives::{Address, Bytes};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes as HyperBytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -53,17 +55,19 @@ use process::parse_u256_from_return;
 /// Creates a `BundleManager` and spawns its cycle loop to enforce the
 /// sim-runtime determinism invariant (docs/DERIVATION.md §15.1).
 ///
-/// Cross-chain user txs are intercepted by `handle_request`, decoded into
-/// [`PendingUserTx`] entries, and submitted to the bundler. The bundler's
+/// User txs intercepted by `handle_request` are decoded into
+/// [`PendingUserTx`] entries and submitted to the bundler. The bundler's
 /// background cycle loop closes the window every
 /// `l1_block_time_ms * bundle_close_fraction` ms and dispatches the drained
 /// bundle to the finalizer, which processes each tx with prior-bundle context
 /// (Phase 3.C: each tx's trace sees effects of prior txs in the bundle).
 ///
 /// `queued_cross_chain_calls` is shared with the driver; the finalizer
-/// snapshots `queue.len()` before each tx and reads the delta after, so it
-/// can use each prior tx's produced L1 entries as the postBatch for the next
-/// tx's simulation bundle.
+/// snapshots `queue.len()` before each cross-chain tx and reads the delta
+/// after, so it can use each prior tx's produced L1 entries as the postBatch
+/// for the next tx's simulation bundle. A shared async mutex prevents the
+/// driver from draining the queue while the finalizer is materializing the
+/// sealed bundle.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_l1_rpc_proxy(
     l1_proxy_port: u16,
@@ -76,6 +80,7 @@ pub async fn run_l1_rpc_proxy(
     cross_chain_manager_address: Address,
     pending_l1_forward_txs: Arc<Mutex<Vec<Bytes>>>,
     queued_cross_chain_calls: Arc<Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
+    bundle_materialization_lock: Arc<tokio::sync::Mutex<()>>,
     l1_block_time_ms: u64,
     bundle_close_fraction: f64,
 ) -> eyre::Result<()> {
@@ -125,6 +130,7 @@ pub async fn run_l1_rpc_proxy(
         let builder_private_key = builder_private_key.clone();
         let bundle_manager_clone = bundle_manager.clone();
         let queued_calls = queued_cross_chain_calls.clone();
+        let bundle_materialization_lock = bundle_materialization_lock.clone();
 
         let poll_client = client.clone();
         let poll_url = Some(l1_rpc_url.clone());
@@ -143,6 +149,7 @@ pub async fn run_l1_rpc_proxy(
                         rollup_id,
                         cross_chain_manager_address,
                         queued_calls.clone(),
+                        bundle_materialization_lock.clone(),
                     )
                 })
                 .await;
@@ -205,7 +212,6 @@ pub async fn run_l1_rpc_proxy(
     }
 }
 
-
 /// Bundle-aware finalizer (Phase 3.C): process each queued user tx sequentially
 /// with **prior-bundle context** so each tx's `actionHash` matches runtime.
 ///
@@ -241,6 +247,7 @@ async fn finalize_bundle_with_context(
     rollup_id: u64,
     cross_chain_manager_address: Address,
     queued_cross_chain_calls: Arc<Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
+    bundle_materialization_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> eyre::Result<()> {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
@@ -263,7 +270,11 @@ async fn finalize_bundle_with_context(
     let mut prior_raw_txs: Vec<Bytes> = Vec::new();
 
     let start = Instant::now();
-    let sim_source = if txs.len() > 1 { "bundle" } else { "standalone" };
+    let sim_source = if txs.len() > 1 {
+        "bundle"
+    } else {
+        "standalone"
+    };
     tracing::info!(
         target: "based_rollup::composer_bundle",
         %bundle_id,
@@ -271,6 +282,11 @@ async fn finalize_bundle_with_context(
         sim_source,
         "bundle_finalize_start"
     );
+
+    // The driver must never observe a half-materialized sealed bundle. Hold a
+    // shared barrier across the entire publish phase so `drain_rpc_queues`
+    // either sees the bundle before publication or after it is complete.
+    let _materialization_guard = bundle_materialization_lock.lock().await;
 
     for tx in &txs {
         let raw_tx_hex = format!("0x{}", alloy_primitives::hex::encode(&tx.raw_tx));
@@ -311,21 +327,36 @@ async fn finalize_bundle_with_context(
                 prior_raw_txs.push(tx.raw_tx.clone());
             }
             Ok(None) => {
-                tracing::warn!(
+                queue_forward_only_tx(&queued_cross_chain_calls, tx);
+                prior_raw_txs.push(tx.raw_tx.clone());
+                tracing::info!(
                     target: "based_rollup::composer_bundle",
                     %bundle_id,
                     tx_hash = %tx.tx_hash,
-                    "bundle_tx_not_cross_chain — detection mismatch, skipping"
+                    gas_price = tx.effective_gas_price,
+                    "bundle_tx_forward_only"
                 );
             }
             Err(e) => {
-                tracing::error!(
-                    target: "based_rollup::composer_bundle",
-                    %bundle_id,
-                    tx_hash = %tx.tx_hash,
-                    %e,
-                    "bundle_tx_finalize_error"
-                );
+                if tx.cross_chain_hint {
+                    tracing::error!(
+                        target: "based_rollup::composer_bundle",
+                        %bundle_id,
+                        tx_hash = %tx.tx_hash,
+                        %e,
+                        "bundle_tx_finalize_error"
+                    );
+                } else {
+                    queue_forward_only_tx(&queued_cross_chain_calls, tx);
+                    prior_raw_txs.push(tx.raw_tx.clone());
+                    tracing::warn!(
+                        target: "based_rollup::composer_bundle",
+                        %bundle_id,
+                        tx_hash = %tx.tx_hash,
+                        %e,
+                        "bundle_tx_finalize_error_non_cross_chain_hint — forwarding raw tx only"
+                    );
+                }
             }
         }
     }
@@ -347,6 +378,21 @@ async fn finalize_bundle_with_context(
         .fetch_add(txs.len() as u64, Ordering::Relaxed);
 
     Ok(())
+}
+
+fn queue_forward_only_tx(
+    queue: &Arc<Mutex<Vec<crate::rpc::QueuedCrossChainCall>>>,
+    tx: &super::bundle_manager::PendingUserTx,
+) {
+    let mut guard = match queue.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    guard.push(crate::rpc::QueuedCrossChainCall::ForwardOnly {
+        tx_hash: crate::cross_chain::ActionHash::new(tx.tx_hash),
+        effective_gas_price: tx.effective_gas_price,
+        raw_l1_tx: tx.raw_tx.clone(),
+    });
 }
 
 /// Extract the L1 deferred entries stored inside a `QueuedCrossChainCall`.
@@ -377,6 +423,7 @@ fn extract_l1_entries_for_call(
         crate::rpc::QueuedCrossChainCall::WithContinuations { l1_entries, .. } => {
             l1_entries.clone()
         }
+        crate::rpc::QueuedCrossChainCall::ForwardOnly { .. } => Vec::new(),
     }
 }
 
@@ -453,7 +500,10 @@ async fn quick_detect_cross_chain(
 ///
 /// Returns `None` for CREATE txs (no `to`) or any decode failure —
 /// those txs fall through to regular forwarding, not the bundler.
-fn build_pending_user_tx(raw_tx_hex: &str) -> Option<super::bundle_manager::PendingUserTx> {
+fn build_pending_user_tx(
+    raw_tx_hex: &str,
+    cross_chain_hint: bool,
+) -> Option<super::bundle_manager::PendingUserTx> {
     use alloy_consensus::Transaction;
     use alloy_consensus::transaction::TxEnvelope;
     use alloy_primitives::keccak256;
@@ -477,6 +527,7 @@ fn build_pending_user_tx(raw_tx_hex: &str) -> Option<super::bundle_manager::Pend
         data: Bytes::from(envelope.input().to_vec()),
         value: envelope.value(),
         effective_gas_price: super::bundle_manager::effective_gas_price(&raw_bytes),
+        cross_chain_hint,
         arrived_at_ms: super::bundle_manager::now_ms(),
     })
 }
@@ -557,6 +608,21 @@ async fn handle_request(
         for (method, params) in &methods {
             if method == "eth_sendRawTransaction" {
                 if let Some(raw_tx) = params.and_then(|p| p.first()).and_then(|v| v.as_str()) {
+                    if let Some(raw_bytes) = hex_decode(raw_tx.strip_prefix("0x").unwrap_or(raw_tx))
+                    {
+                        if let Some(trace_id) =
+                            crate::arb_trace::trace_id_from_raw_tx_bytes(&raw_bytes)
+                        {
+                            crate::arb_trace::emit_phase(
+                                "composer_rx",
+                                trace_id,
+                                json!({
+                                    "raw_tx_len": raw_bytes.len(),
+                                    "raw_tx_prefix": format!("0x{}", hex::encode(&raw_bytes[..raw_bytes.len().min(16)])),
+                                }),
+                            );
+                        }
+                    }
                     tracing::info!(
                         target: "based_rollup::l1_proxy",
                         raw_tx_prefix = %&raw_tx[..raw_tx.len().min(42)],
@@ -564,10 +630,7 @@ async fn handle_request(
                         "L1 compositor: intercepted eth_sendRawTransaction"
                     );
 
-                    // Phase 3.B: quick-detect cross-chain, then submit to the
-                    // bundler and return tx_hash immediately (fire-and-forget).
-                    // Non-cross-chain txs fall through to direct L1 forwarding.
-                    let is_cross_chain = match decode_raw_tx_for_trace(raw_tx) {
+                    let cross_chain_hint = match decode_raw_tx_for_trace(raw_tx) {
                         Ok(tx_obj) => {
                             quick_detect_cross_chain(&client, &l1_rpc_url, &tx_obj, rollups_address)
                                 .await
@@ -575,41 +638,42 @@ async fn handle_request(
                         Err(_) => false,
                     };
 
-                    if is_cross_chain {
-                        match build_pending_user_tx(raw_tx) {
-                            Some(pending_tx) => {
-                                let tx_hash_hex = format!("{:#x}", pending_tx.tx_hash);
-                                bundle_manager.submit(pending_tx);
-                                tracing::info!(
-                                    target: "based_rollup::l1_proxy",
-                                    tx_hash = %tx_hash_hex,
-                                    "cross-chain tx submitted to bundler"
-                                );
-                                let json_id = json.get("id").cloned().unwrap_or(Value::Null);
-                                let response_body = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "result": tx_hash_hex,
-                                    "id": json_id
-                                });
-                                return Ok(cors_response(
-                                    Response::builder()
-                                        .status(StatusCode::OK)
-                                        .header("Content-Type", "application/json")
-                                        .body(Full::new(HyperBytes::from(
-                                            response_body.to_string(),
-                                        )))
-                                        .expect("valid response"),
-                                ));
-                            }
-                            None => {
-                                tracing::warn!(
-                                    target: "based_rollup::l1_proxy",
-                                    "failed to build PendingUserTx from raw — forwarding to L1"
-                                );
-                            }
+                    match build_pending_user_tx(raw_tx, cross_chain_hint) {
+                        Some(pending_tx) => {
+                            let tx_hash_hex = format!("{:#x}", pending_tx.tx_hash);
+                            let classification_hint = if pending_tx.cross_chain_hint {
+                                "cross_chain_candidate"
+                            } else {
+                                "forward_only_candidate"
+                            };
+                            bundle_manager.submit(pending_tx);
+                            tracing::info!(
+                                target: "based_rollup::l1_proxy",
+                                tx_hash = %tx_hash_hex,
+                                classification_hint,
+                                "tx submitted to sealed composer bundle"
+                            );
+                            let json_id = json.get("id").cloned().unwrap_or(Value::Null);
+                            let response_body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "result": tx_hash_hex,
+                                "id": json_id
+                            });
+                            return Ok(cors_response(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(HyperBytes::from(response_body.to_string())))
+                                    .expect("valid response"),
+                            ));
+                        }
+                        None => {
+                            tracing::warn!(
+                                target: "based_rollup::l1_proxy",
+                                "failed to build PendingUserTx from raw — forwarding to L1"
+                            );
                         }
                     }
-                    // Not a cross-chain tx (or decode/build failed), forward normally.
                 }
             }
 
@@ -699,8 +763,13 @@ async fn run_standalone_initial_trace(
         ],
         "id": 1
     });
-    let resp: super::common::JsonRpcResponse =
-        client.post(l1_rpc_url).json(&trace_req).send().await?.json().await?;
+    let resp: super::common::JsonRpcResponse = client
+        .post(l1_rpc_url)
+        .json(&trace_req)
+        .send()
+        .await?
+        .json()
+        .await?;
     match resp.into_result() {
         Ok(t) => Ok(Some(t)),
         Err(e) => {
@@ -755,17 +824,67 @@ async fn build_and_run_bundled_initial_trace(
         .parse()
         .map_err(|e| eyre::eyre!("bad builder key: {e}"))?;
 
-    let (block_number, block_hash, _) =
-        get_l1_block_context(client, l1_rpc_url).await?;
-    let vk = get_verification_key(client, l1_rpc_url, rollups_address, rollup_id)
-        .await?;
+    let (block_number, block_hash, _) = get_l1_block_context(client, l1_rpc_url).await?;
+    let vk = get_verification_key(client, l1_rpc_url, rollups_address, rollup_id).await?;
+
+    // Query current on-chain rollup stateRoot. We need it as the
+    // `currentState` of the immediate entry that advances state to where
+    // the deferred entries' stateDeltas chain starts. Without this
+    // immediate, `_findAndApplyExecution` fails because rollups[].stateRoot
+    // doesn't match the deferred entries' currentState.
+    let current_state_root =
+        super::common::get_rollup_state_root(client, l1_rpc_url, rollups_address, rollup_id)
+            .await
+            .unwrap_or(alloy_primitives::B256::ZERO);
+
+    // Prepend an immediate entry that transitions rollups[rollup_id].stateRoot
+    // from its CURRENT on-chain value to the FIRST deferred entry's
+    // `currentState`. After this, the deferred entries' chain can be consumed
+    // normally. If no deferred entries (edge case), skip the immediate.
+    let rollup_id_typed =
+        crate::cross_chain::RollupId::new(alloy_primitives::U256::from(rollup_id));
+    let deferred_chain_start = prior_entries
+        .first()
+        .and_then(|e| e.state_deltas.first())
+        .map(|d| d.current_state)
+        .unwrap_or(current_state_root);
+
+    let mut entries_with_immediate: Vec<crate::cross_chain::CrossChainExecutionEntry> =
+        Vec::with_capacity(prior_entries.len() + 1);
+    if !prior_entries.is_empty() && current_state_root != deferred_chain_start {
+        // Fabricate an immediate entry. Its Action isn't consumed (actionHash=0
+        // immediate-path), so the Action fields only need to be a valid shape.
+        let immediate_action = crate::cross_chain::CrossChainAction {
+            action_type: crate::cross_chain::CrossChainActionType::L2Tx,
+            rollup_id: rollup_id_typed.clone(),
+            destination: alloy_primitives::Address::ZERO,
+            value: alloy_primitives::U256::ZERO,
+            data: vec![],
+            failed: false,
+            source_address: alloy_primitives::Address::ZERO,
+            source_rollup: rollup_id_typed.clone(),
+            scope: crate::cross_chain::ScopePath::root(),
+        };
+        entries_with_immediate.push(crate::cross_chain::CrossChainExecutionEntry {
+            state_deltas: vec![crate::cross_chain::CrossChainStateDelta {
+                rollup_id: rollup_id_typed.clone(),
+                current_state: current_state_root,
+                new_state: deferred_chain_start,
+                ether_delta: alloy_primitives::I256::ZERO,
+            }],
+            action_hash: crate::cross_chain::ActionHash::new(alloy_primitives::B256::ZERO),
+            next_action: immediate_action,
+        });
+    }
+    entries_with_immediate.extend(prior_entries.iter().cloned());
+    let entries_for_postbatch = &entries_with_immediate;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let call_data_bytes = alloy_primitives::Bytes::new();
-    let entry_hashes = crate::cross_chain::compute_entry_hashes(prior_entries, vk);
+    let entry_hashes = crate::cross_chain::compute_entry_hashes(entries_for_postbatch, vk);
     let public_inputs_hash = crate::cross_chain::compute_public_inputs_hash(
         &entry_hashes,
         &call_data_bytes,
@@ -782,8 +901,11 @@ async fn build_and_run_bundled_initial_trace(
     }
     let proof = alloy_primitives::Bytes::from(proof_bytes);
 
-    let post_batch_calldata =
-        crate::cross_chain::encode_post_batch_calldata(prior_entries, call_data_bytes, proof);
+    let post_batch_calldata = crate::cross_chain::encode_post_batch_calldata(
+        entries_for_postbatch,
+        call_data_bytes,
+        proof,
+    );
     let post_batch_hex = format!("0x{}", hex::encode(post_batch_calldata.as_ref()));
     let builder_addr_hex = format!("{}", builder_key.address());
     let rollups_hex = format!("{}", rollups_address);
@@ -805,7 +927,10 @@ async fn build_and_run_bundled_initial_trace(
             tx_obj.get("from").and_then(|v| v.as_str()).unwrap_or(""),
             tx_obj.get("to").and_then(|v| v.as_str()).unwrap_or(""),
             tx_obj.get("data").and_then(|v| v.as_str()).unwrap_or("0x"),
-            tx_obj.get("value").and_then(|v| v.as_str()).unwrap_or("0x0"),
+            tx_obj
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0x0"),
         );
         transactions.push(serde_json::json!({
             "from": p_from,
@@ -849,8 +974,13 @@ async fn build_and_run_bundled_initial_trace(
         "id": 1
     });
 
-    let resp: super::common::JsonRpcResponse =
-        client.post(l1_rpc_url).json(&trace_req).send().await?.json().await?;
+    let resp: super::common::JsonRpcResponse = client
+        .post(l1_rpc_url)
+        .json(&trace_req)
+        .send()
+        .await?
+        .json()
+        .await?;
     let result_val = resp.into_result()?;
 
     // Expected shape: [[trace_postBatch, trace_prior_0, ..., trace_prior_N-1, trace_subject]]
@@ -883,10 +1013,7 @@ async fn build_and_run_bundled_initial_trace(
         };
         let err = t.get("error").and_then(|v| v.as_str()).unwrap_or("none");
         let out = t.get("output").and_then(|v| v.as_str()).unwrap_or("");
-        let revert_reason = t
-            .get("revertReason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let revert_reason = t.get("revertReason").and_then(|v| v.as_str()).unwrap_or("");
         tracing::info!(
             target: "based_rollup::l1_proxy",
             slot = slot_name,
@@ -1022,7 +1149,9 @@ async fn trace_and_detect_internal_calls(
                     target: "based_rollup::l1_proxy",
                     "bundled initial trace returned unexpected shape — falling back to standalone traceCall"
                 );
-                match run_standalone_initial_trace(client, l1_rpc_url, from, to, data, value).await? {
+                match run_standalone_initial_trace(client, l1_rpc_url, from, to, data, value)
+                    .await?
+                {
                     Some(t) => t,
                     None => return Ok(None),
                 }
@@ -1033,7 +1162,9 @@ async fn trace_and_detect_internal_calls(
                     %e,
                     "bundled initial trace error — falling back to standalone"
                 );
-                match run_standalone_initial_trace(client, l1_rpc_url, from, to, data, value).await? {
+                match run_standalone_initial_trace(client, l1_rpc_url, from, to, data, value)
+                    .await?
+                {
                     Some(t) => t,
                     None => return Ok(None),
                 }
@@ -1093,6 +1224,8 @@ async fn trace_and_detect_internal_calls(
             },
             client: client.clone(),
             l1_rpc_url: l1_rpc_url.to_string(),
+            prior_entries: prior_entries.to_vec(),
+            prior_raw_txs: prior_raw_txs.to_vec(),
         };
         let sim = HttpSimClient::new(
             client.clone(),
@@ -1147,6 +1280,8 @@ async fn trace_and_detect_internal_calls(
         to,
         data,
         value,
+        prior_entries,
+        prior_raw_txs,
         top_level_error,
         &mut detected_calls,
         &mut proxy_cache,
@@ -1154,8 +1289,25 @@ async fn trace_and_detect_internal_calls(
     .await
 }
 
+pub(crate) async fn detect_l1_to_l2_calls_in_trace(
+    client: &reqwest::Client,
+    l1_rpc_url: &str,
+    rollups_address: Address,
+    trace_node: &Value,
+) -> Vec<super::model::DiscoveredCall> {
+    let mut proxy_cache: HashMap<Address, Option<super::trace::ProxyInfo>> = HashMap::new();
+    walk_l1_trace_generic(
+        client,
+        l1_rpc_url,
+        rollups_address,
+        trace_node,
+        &mut proxy_cache,
+    )
+    .await
+}
+
 /// Decode a raw signed transaction into a JSON object suitable for tracing.
-fn decode_raw_tx_for_trace(raw_tx: &str) -> eyre::Result<Value> {
+pub(super) fn decode_raw_tx_for_trace(raw_tx: &str) -> eyre::Result<Value> {
     let raw_hex = raw_tx.strip_prefix("0x").unwrap_or(raw_tx);
     let raw_bytes =
         hex_decode(raw_hex).ok_or_else(|| eyre::eyre!("invalid hex in raw transaction"))?;

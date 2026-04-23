@@ -5,7 +5,7 @@
 use super::*;
 
 use alloy_consensus::{SignableTransaction, TxEip1559, TxLegacy};
-use alloy_primitives::{Address, B256, Bytes, U256, TxKind};
+use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 
@@ -60,6 +60,7 @@ fn mock_tx(gas_price: u128, hash_byte: u8) -> PendingUserTx {
         data: Bytes::new(),
         value: U256::ZERO,
         effective_gas_price: gas_price,
+        cross_chain_hint: false,
         arrived_at_ms: now_ms(),
     }
 }

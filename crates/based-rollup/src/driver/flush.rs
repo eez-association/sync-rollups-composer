@@ -27,7 +27,7 @@ use super::types::{
     reorg_depth_exceeded,
 };
 use crate::proposer::{GasPriceHint, PendingBlock};
-use alloy_primitives::{B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 
 /// Outcome of the flush pre-check phase (refactor PLAN step 2.6).
 ///
@@ -39,17 +39,18 @@ use alloy_primitives::{B256, Bytes, U256};
 /// - `Skip` — one of the preconditions failed but no rewind is needed
 ///   (e.g., nothing to submit, hold active, cooldown, proposer absent).
 /// - `Rewind` — the on-chain root check triggered a rewind (already applied).
-enum FlushPrecheckResult {
+pub(super) enum FlushPrecheckResult {
     Proceed { on_chain_root: B256 },
     Skip,
 }
-use alloy_provider::Provider;
+use alloy_provider::{Provider, RootProvider};
 use alloy_sol_types::SolCall;
 use eyre::Result;
 use reth_provider::{
     BlockHashReader, BlockNumReader, DatabaseProviderFactory, HeaderProvider,
     StageCheckpointReader, StageCheckpointWriter, StateProviderFactory, TransactionsProvider,
 };
+use serde_json::json;
 use tracing::{error, info, warn};
 
 impl<P, Pool> Driver<P, Pool>
@@ -81,21 +82,29 @@ where
     ///
     /// Refactor PLAN step 2.6 — makes the early-return sequence in
     /// `flush_to_l1` explicit and testable in isolation.
-    async fn flush_precheck(&mut self) -> FlushPrecheckResult {
+    pub(super) async fn flush_precheck(&mut self) -> FlushPrecheckResult {
         let Some(proposer) = &self.proposer else {
-            if !self.pending_submissions.is_empty() {
+            if !self.pending_submissions.is_empty() || !self.pending_l1.is_empty() {
                 warn!(
                     target: "based_rollup::driver",
-                    count = self.pending_submissions.len(),
-                    "discarding pending blocks — proposer not available (no private key?)"
+                    pending_blocks = self.pending_submissions.len(),
+                    pending_l1_entries = self.pending_l1.len_entries(),
+                    pending_l1_groups = self.pending_l1.num_groups(),
+                    "preserving pending L1 state — proposer not available (no private key?)"
                 );
-                self.pending_submissions.clear();
             }
-            self.pending_l1.clear();
             return FlushPrecheckResult::Skip;
         };
 
-        if self.pending_submissions.is_empty() && self.pending_l1.is_empty() {
+        let has_forward_txs = {
+            let queue = self
+                .pending_l1_forward_txs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            !queue.is_empty()
+        };
+
+        if self.pending_submissions.is_empty() && self.pending_l1.is_empty() && !has_forward_txs {
             return FlushPrecheckResult::Skip;
         }
 
@@ -555,6 +564,7 @@ where
             .iter()
             .map(|g| g.trigger.clone())
             .collect();
+        let pending_l1_groups = pending_l1_owned.groups.clone();
 
         // Clone the entries separately from the plan. The plan will
         // own the authoritative copy and return it via
@@ -563,12 +573,40 @@ where
         // consumption-event filtering, logging, and entry counting.
         let l1_entries = pending_l1_owned.entries.clone();
         let has_entries = !l1_entries.is_empty();
+        let has_forward_txs = {
+            let queue = self
+                .pending_l1_forward_txs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            !queue.is_empty()
+        };
+
+        // Sealed bundles can legitimately contain only ordinary L1 txs. In
+        // that case there is no `postBatch` to send and no block/entry state to
+        // arm a hold for; just forward the queued raw txs now.
+        if blocks.is_empty() && !has_entries {
+            self.forward_queued_l1_txs().await?;
+            return Ok(());
+        }
 
         // Clone the block numbers we need for logging and anchor
         // updates after the submit consumes the plan. Blocks
         // themselves still live inside the plan until either
         // success (dropped) or failure (returned via rollback).
         let block_l2_numbers: Vec<u64> = blocks.iter().map(|b| b.l2_block_number).collect();
+        let postbatch_call_data_keccak = {
+            let call_data = if blocks.is_empty() {
+                Bytes::new()
+            } else {
+                let numbers: Vec<u64> = blocks.iter().map(|b| b.l2_block_number).collect();
+                let txs: Vec<Bytes> = blocks
+                    .iter()
+                    .map(|b| b.encoded_transactions.clone())
+                    .collect();
+                crate::cross_chain::encode_block_calldata(&numbers, &txs)
+            };
+            format!("{}", keccak256(&call_data))
+        };
 
         // Clone the full blocks + queue for the post-Ok receipt
         // failure path. That path (receipt timeout or RPC error
@@ -625,6 +663,16 @@ where
         };
         match send_result {
             Ok(tx_hash) => {
+                let batch_entry_hashes = if has_entries {
+                    proposer
+                        .verification_key()
+                        .await
+                        .ok()
+                        .map(|vk| crate::cross_chain::compute_entry_hashes(&l1_entries, vk))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 if let (Some(&first), Some(&last)) =
                     (block_l2_numbers.first(), block_l2_numbers.last())
                 {
@@ -642,9 +690,41 @@ where
                         "submitted cross-chain entries to L1 (awaiting confirmation)"
                     );
                 }
-                // Forward queued L1 txs BEFORE waiting for receipt — they must land
-                // in the same L1 block as postBatch for consumption to work.
                 if has_entries {
+                    for (idx, group) in pending_l1_groups.iter().enumerate() {
+                        let Some(trace) = group.trace.as_ref() else {
+                            continue;
+                        };
+                        let start = group.start;
+                        let end = if idx + 1 < pending_l1_groups.len() {
+                            pending_l1_groups[idx + 1].start
+                        } else {
+                            l1_entries.len()
+                        };
+                        crate::arb_trace::emit_with_meta(
+                            "postbatch_submitted",
+                            trace,
+                            trace.state_delta_before,
+                            trace.state_delta_after,
+                            json!({
+                                "l1_tx_hash": format!("{tx_hash}"),
+                                "entry_hashes": batch_entry_hashes[start..end]
+                                    .iter()
+                                    .map(|h| format!("{h}"))
+                                    .collect::<Vec<_>>(),
+                                "group_entry_count": end.saturating_sub(start),
+                                "batch_call_data_keccak": postbatch_call_data_keccak.clone(),
+                                "l2_block_numbers": block_l2_numbers.clone(),
+                            }),
+                        );
+                    }
+                }
+                // Forward queued L1 txs BEFORE waiting for receipt. Entry-bearing
+                // batches need the user txs in the same block for consumption to
+                // work; ForwardOnly-only sealed batches still need this send or
+                // the queued ordinary L1 txs will starve behind continuous block
+                // production.
+                if has_entries || has_forward_txs {
                     self.forward_queued_l1_txs().await?;
                 }
                 // Send L1 trigger txs (executeL2TX) BEFORE waiting for receipt —
@@ -800,6 +880,45 @@ where
                                         && e.action_hash != revert_continue_hash
                                 })
                                 .count();
+                            for (idx, group) in pending_l1_groups.iter().enumerate() {
+                                let Some(trace) = group.trace.as_ref() else {
+                                    continue;
+                                };
+                                let start = group.start;
+                                let end = if idx + 1 < pending_l1_groups.len() {
+                                    pending_l1_groups[idx + 1].start
+                                } else {
+                                    l1_entries.len()
+                                };
+                                let group_hashes = l1_entries[start..end]
+                                    .iter()
+                                    .map(|e| e.action_hash)
+                                    .filter(|h| *h != crate::cross_chain::ActionHash::ZERO)
+                                    .map(|h| format!("{h}"))
+                                    .collect::<Vec<_>>();
+                                let consumed_for_group = l1_entries[start..end]
+                                    .iter()
+                                    .map(|e| e.action_hash)
+                                    .filter(|h| {
+                                        *h != crate::cross_chain::ActionHash::ZERO
+                                            && consumed_hashes.contains_key(h)
+                                    })
+                                    .map(|h| format!("{h}"))
+                                    .collect::<Vec<_>>();
+                                crate::arb_trace::emit_with_meta(
+                                    "postbatch_receipt",
+                                    trace,
+                                    trace.state_delta_before,
+                                    trace.state_delta_after,
+                                    json!({
+                                        "l1_block_number": l1_block_number,
+                                        "group_action_hashes": group_hashes,
+                                        "consumed_action_hashes": consumed_for_group,
+                                        "consumed_event_groups": consumed_hashes.len(),
+                                        "real_entry_count": real_entry_count,
+                                    }),
+                                );
+                            }
 
                             if !consumed_hashes.is_empty() {
                                 // Count how many entries we need per hash.
@@ -1298,9 +1417,34 @@ where
         }
 
         let provider = self.get_l1_provider().clone();
+        let l1_rpc_url = self.config.l1_rpc_url.clone();
+        let rollups_address = self.config.rollups_address;
         for raw_tx in &txs {
+            let trace_id = crate::arb_trace::trace_id_from_raw_tx_bytes(raw_tx.as_ref());
             match provider.send_raw_transaction(raw_tx).await {
                 Ok(pending) => {
+                    if let Some(trace_id) = trace_id {
+                        crate::arb_trace::emit_phase(
+                            "raw_tx_forwarded",
+                            trace_id,
+                            json!({
+                                "l1_tx_hash": format!("{}", pending.tx_hash()),
+                            }),
+                        );
+                        let receipt_provider = provider.clone();
+                        let receipt_rpc_url = l1_rpc_url.clone();
+                        let forwarded_hash = *pending.tx_hash();
+                        tokio::spawn(async move {
+                            trace_raw_tx_receipt(
+                                receipt_provider,
+                                receipt_rpc_url,
+                                rollups_address,
+                                trace_id,
+                                forwarded_hash,
+                            )
+                            .await;
+                        });
+                    }
                     info!(
                         target: "based_rollup::driver",
                         tx_hash = %pending.tx_hash(),
@@ -1434,4 +1578,131 @@ where
 
         Some(hint)
     }
+}
+
+async fn trace_raw_tx_receipt(
+    provider: RootProvider,
+    l1_rpc_url: String,
+    rollups_address: Address,
+    trace_id: B256,
+    tx_hash: B256,
+) {
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match provider.get_transaction_receipt(tx_hash).await {
+            Ok(Some(receipt)) => {
+                let status = receipt.status();
+                let l1_block_number = receipt.block_number.unwrap_or(0);
+                let mut payload = json!({
+                    "l1_tx_hash": format!("{tx_hash}"),
+                    "l1_block_number": l1_block_number,
+                    "status": status,
+                });
+                if let Some(trace_result) =
+                    fetch_debug_trace_transaction(&l1_rpc_url, tx_hash).await
+                {
+                    if let Some(output_hex) = extract_trace_output_hex(&trace_result) {
+                        payload["runtime_output"] = json!(output_hex.clone());
+                        let summary = crate::arb_trace::parse_revert_summary(&output_hex);
+                        payload["revert_selector"] = summary
+                            .selector
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null);
+                        payload["outer_revert_selector"] = summary
+                            .outer_selector
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null);
+                        payload["execution_not_found_arg"] = summary
+                            .execution_not_found_arg
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null);
+                    }
+                    let trace_client = reqwest::Client::new();
+                    let runtime_calls =
+                        crate::composer_rpc::l1_to_l2::detect_l1_to_l2_calls_in_trace(
+                            &trace_client,
+                            &l1_rpc_url,
+                            rollups_address,
+                            &trace_result,
+                        )
+                        .await;
+                    payload["runtime_call_count"] = json!(runtime_calls.len());
+                    payload["runtime_calls"] = json!(
+                        runtime_calls
+                            .iter()
+                            .map(|call| crate::arb_trace::call_summary_json(
+                                call.source_address,
+                                call.destination,
+                                &call.calldata,
+                                call.value,
+                            ))
+                            .collect::<Vec<_>>()
+                    );
+                    if runtime_calls.len() == 1 {
+                        if let serde_json::Value::Object(map) = crate::arb_trace::call_summary_json(
+                            runtime_calls[0].source_address,
+                            runtime_calls[0].destination,
+                            &runtime_calls[0].calldata,
+                            runtime_calls[0].value,
+                        ) {
+                            for (key, value) in map {
+                                payload[key] = value;
+                            }
+                        }
+                    }
+                }
+                crate::arb_trace::emit_phase("raw_tx_receipt", trace_id, payload);
+                return;
+            }
+            Ok(None) => continue,
+            Err(_) => continue,
+        }
+    }
+
+    crate::arb_trace::emit_phase(
+        "raw_tx_receipt",
+        trace_id,
+        json!({
+            "l1_tx_hash": format!("{tx_hash}"),
+            "status": "missing",
+        }),
+    );
+}
+
+async fn fetch_debug_trace_transaction(
+    l1_rpc_url: &str,
+    tx_hash: B256,
+) -> Option<serde_json::Value> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "debug_traceTransaction",
+        "params": [
+            format!("{tx_hash}"),
+            { "tracer": "callTracer" }
+        ],
+        "id": 1
+    });
+    let response: serde_json::Value = reqwest::Client::new()
+        .post(l1_rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    response.get("result").cloned()
+}
+
+fn extract_trace_output_hex(trace_result: &serde_json::Value) -> Option<String> {
+    trace_result
+        .get("output")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            trace_result
+                .get("returnValue")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("0x{s}"))
+        })
 }

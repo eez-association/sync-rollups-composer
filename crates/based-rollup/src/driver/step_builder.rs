@@ -57,6 +57,8 @@ pub(super) struct QueueDrainResult {
     pub rpc_entry_count: usize,
     /// L1 transactions to forward after successful postBatch.
     pub queued_l1_txs: Vec<Bytes>,
+    /// Per-user trace metadata for the L1→L2 calls drained into this block.
+    pub arb_traces_for_block: Vec<crate::arb_trace::ArbTraceMeta>,
     /// State needed to undo the drain if block building fails.
     pub rollback: QueueDrainRollback,
 }
@@ -149,11 +151,19 @@ where
         let mut l1_hash = tick.l1_hash;
         let provider = self.get_l1_provider().clone();
 
-        // Phase 3: Drain cross-chain queues, fetch L1 entries, inject held L2 txs.
-        let drain = self.drain_rpc_queues(current_l1_block).await?;
+        // Phase 3: Drain the composer queues. This is serialized against the
+        // bundle finalizer so we never observe a half-materialized sealed
+        // bundle.
+        let composer_bundle_materialization_lock =
+            self.composer_bundle_materialization_lock.clone();
+        let drain = {
+            let _composer_bundle_guard = composer_bundle_materialization_lock.lock().await;
+            self.drain_rpc_queues(current_l1_block).await?
+        };
         let mut builder_execution_entries = drain.builder_execution_entries;
         let mut rpc_entry_count_in_builder = drain.rpc_entry_count;
-        let queued_l1_txs_for_block = drain.queued_l1_txs;
+        let mut queued_l1_txs_for_block = drain.queued_l1_txs;
+        let mut arb_traces_waiting_for_assignment = drain.arb_traces_for_block;
         let drain_rollback = drain.rollback;
 
         // During catch-up, refresh L1 context every N blocks to avoid all catch-up
@@ -223,6 +233,11 @@ where
                 std::mem::take(&mut builder_execution_entries)
             } else {
                 vec![]
+            };
+            let block_arb_traces = if assign_entries {
+                std::mem::take(&mut arb_traces_waiting_for_assignment)
+            } else {
+                Vec::new()
             };
             let had_execution_entries = !execution_entries.is_empty();
 
@@ -325,30 +340,55 @@ where
             // sequentially, so after the aggregate entry updates the on-chain root,
             // per-block entries' currentState would mismatch.
             if self.pending_l1.len_entries() > MAX_PENDING_CROSS_CHAIN_ENTRIES {
-                warn!(target: "based_rollup::driver",
+                error!(target: "based_rollup::driver",
                     count = self.pending_l1.len_entries(),
                     max = MAX_PENDING_CROSS_CHAIN_ENTRIES,
-                    "pending cross-chain entries exceeded cap, dropping oldest"
+                    "pending cross-chain entries exceeded cap — preserving queue and halting builder"
                 );
-                self.pending_l1
-                    .trim_entries_from_front(MAX_PENDING_CROSS_CHAIN_ENTRIES);
+                return self.halt_builder_preserving_pending_l1(
+                    next_l2_block,
+                    &mut queued_l1_txs_for_block,
+                    "pending cross-chain entries exceeded cap",
+                );
             }
 
             // Compute intermediate state roots and attach entry deltas.
-            let (clean_state_root, intermediate_roots) = self.finalize_block_entries(
+            let (clean_state_root, intermediate_roots) = match self.finalize_block_entries(
                 next_l2_block,
                 next_timestamp,
                 l1_hash,
                 current_l1_block,
                 &built,
                 &rpc_entries_for_block,
-            );
+                &block_arb_traces,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    error!(
+                        target: "based_rollup::driver",
+                        l2_block = next_l2_block,
+                        pending_l1_entries = self.pending_l1.len_entries(),
+                        pending_l1_groups = self.pending_l1.num_groups(),
+                        %err,
+                        "failed to compute intermediate state roots — preserving pending L1 state and halting builder"
+                    );
+                    return self.halt_builder_preserving_pending_l1(
+                        next_l2_block,
+                        &mut queued_l1_txs_for_block,
+                        "failed to compute intermediate state roots",
+                    );
+                }
+            };
 
             // Queue ALL blocks for L1 submission (including empty ones).
             // The aggregate state root entry spans the entire batch so empty
             // blocks add only callData cost (block number + empty tx bytes).
             // Submitting all blocks avoids gap-fill complexity and ensures
             // deterministic L1 context across builder/fullnodes.
+            if !block_arb_traces.is_empty() {
+                self.arb_trace_by_l2_block
+                    .insert(next_l2_block, block_arb_traces.clone());
+            }
             if self.pending_submissions.len() < MAX_PENDING_SUBMISSIONS {
                 self.pending_submissions.push_back(PendingBlock {
                     l2_block_number: next_l2_block,
@@ -404,7 +444,8 @@ where
         l1_block: u64,
         built: &super::types::BuiltBlock,
         rpc_entries: &[CrossChainExecutionEntry],
-    ) -> (crate::cross_chain::CleanStateRoot, Vec<B256>) {
+        block_arb_traces: &[crate::arb_trace::ArbTraceMeta],
+    ) -> Result<(crate::cross_chain::CleanStateRoot, Vec<B256>)> {
         // Count true triggers (not continuation table entries).
         let our_rollup_id =
             crate::cross_chain::RollupId::new(alloy_primitives::U256::from(self.config.rollup_id));
@@ -454,17 +495,7 @@ where
                     intermediate_roots = roots;
                     crate::cross_chain::CleanStateRoot::new(clean)
                 }
-                Err(err) => {
-                    error!(
-                        target: "based_rollup::driver",
-                        l2_block,
-                        %err,
-                        "failed to compute intermediate state roots — \
-                         discarding cross-chain entries for this block"
-                    );
-                    self.pending_l1.clear();
-                    crate::cross_chain::CleanStateRoot::new(built.state_root)
-                }
+                Err(err) => return Err(err.wrap_err("failed to compute intermediate state roots")),
             }
         } else {
             crate::cross_chain::CleanStateRoot::new(built.state_root)
@@ -546,9 +577,74 @@ where
                     "L1 entry [byte-level] for VerifyL1Batch comparison"
                 );
             }
+
+            let clean_root = intermediate_roots
+                .first()
+                .copied()
+                .unwrap_or(built.state_root);
+            let block_trace_ids: std::collections::HashSet<_> = block_arb_traces
+                .iter()
+                .map(|trace| trace.trace_id)
+                .collect();
+            for k in 0..num_groups {
+                let start = self.pending_l1.groups[k].start;
+                let end = if k + 1 < num_groups {
+                    self.pending_l1.groups[k + 1].start
+                } else {
+                    self.pending_l1.len_entries()
+                };
+                let Some(trace) = self.pending_l1.groups[k].trace.clone() else {
+                    continue;
+                };
+                if !block_trace_ids.contains(&trace.trace_id) {
+                    continue;
+                }
+                let updated = crate::arb_trace::with_entry_action_hashes(
+                    &trace,
+                    &self.pending_l1.entries[start..end],
+                );
+                self.pending_l1.groups[k].trace = Some(updated.clone());
+                crate::arb_trace::emit_with_meta(
+                    "local_block_built",
+                    &updated,
+                    updated.state_delta_before,
+                    updated.state_delta_after,
+                    serde_json::json!({
+                        "l2_block_number": l2_block,
+                        "speculative_state_root": format!("{}", built.state_root),
+                        "clean_state_root": format!("{}", clean_root),
+                        "entry_count": end.saturating_sub(start),
+                    }),
+                );
+            }
         }
 
-        (clean_state_root, intermediate_roots)
+        Ok((clean_state_root, intermediate_roots))
+    }
+
+    pub(super) fn halt_builder_preserving_pending_l1(
+        &mut self,
+        l2_block: u64,
+        queued_l1_txs_for_block: &mut Vec<Bytes>,
+        reason: &str,
+    ) -> Result<()> {
+        let queued_l1_txs = queued_l1_txs_for_block.len();
+        if queued_l1_txs > 0 {
+            let mut fwd_queue = self
+                .pending_l1_forward_txs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            fwd_queue.append(queued_l1_txs_for_block);
+        }
+
+        self.hold.arm(l2_block);
+
+        eyre::bail!(
+            "{reason}; pending_l1 entries={}, groups={}, forwarded_l1_txs_preserved={}, hold_block={l2_block}",
+            self.pending_l1.len_entries(),
+            self.pending_l1.num_groups(),
+            queued_l1_txs,
+        );
     }
 
     /// Catch up with L1: derive the next batch, verify local blocks against
@@ -747,6 +843,7 @@ where
 
         let mut queued_l1_txs: Vec<Bytes> = Vec::new();
         let mut calls_for_repush: Vec<crate::rpc::QueuedCrossChainCall> = Vec::new();
+        let mut arb_traces_for_block: Vec<crate::arb_trace::ArbTraceMeta> = Vec::new();
 
         // --- L1→L2 queue (deposits, cross-chain calls) ---
         {
@@ -766,8 +863,8 @@ where
                     "merging RPC cross-chain entries (sorted by gas price)"
                 );
 
-                // One continuation per cycle: only process the FIRST
-                // continuation call to prevent mixing entries.
+                // Keep at most one continuation in a cycle so chained entries
+                // are not interleaved with later continuation roots.
                 let mut had_continuation = false;
                 let mut rpc_entries: Vec<CrossChainExecutionEntry> = Vec::new();
                 for call in calls {
@@ -843,13 +940,26 @@ where
                             // L1 entries always posted (state commitment).
                             l1_entries.clone()
                         }
+                        crate::rpc::QueuedCrossChainCall::ForwardOnly { .. } => Vec::new(),
                     };
 
                     if !raw_l1_tx_for_forward.is_empty() {
                         queued_l1_txs.push(raw_l1_tx_for_forward);
                     }
-                    self.pending_l1
-                        .append_group(group_l1_entries, group_mode, None);
+                    if !group_l1_entries.is_empty() {
+                        let group_trace = call.trace_meta().map(|meta| {
+                            crate::arb_trace::with_entry_action_hashes(meta, &group_l1_entries)
+                        });
+                        if let Some(meta) = &group_trace {
+                            arb_traces_for_block.push(meta.clone());
+                        }
+                        self.pending_l1.append_group(
+                            group_l1_entries,
+                            group_mode,
+                            None,
+                            group_trace,
+                        );
+                    }
                     calls_for_repush.push(call);
                 }
                 rpc_entry_count = rpc_entries.len();
@@ -891,6 +1001,7 @@ where
                             rlp_encoded_tx: w.rlp_encoded_tx.clone(),
                             trigger_count: w.trigger_count,
                         }),
+                        None,
                     );
                 }
             }
@@ -905,6 +1016,7 @@ where
             builder_execution_entries,
             rpc_entry_count,
             queued_l1_txs,
+            arb_traces_for_block,
             rollback: QueueDrainRollback {
                 pre_drain_l1_len,
                 pre_drain_l1_groups,
