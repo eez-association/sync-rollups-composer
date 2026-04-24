@@ -159,7 +159,12 @@ where
         // During catch-up, refresh L1 context every N blocks to avoid all catch-up
         // blocks sharing the same L1 context (which causes mass rewind if the batch
         // submission lands in a different L1 block).
-        const L1_REFRESH_INTERVAL: u64 = 100;
+        //
+        // Must be kept aligned with `MAX_BATCH_SIZE` in driver/types.rs: every batch
+        // submitted to L1 must contain only blocks that share the same `mix_hash`,
+        // because derivation assigns one `l1_context` per batch. See the comment on
+        // `MAX_BATCH_SIZE` for the full constraint derivation.
+        const L1_REFRESH_INTERVAL: u64 = 50;
         let mut blocks_since_l1_refresh: u64 = 0;
 
         while self.l2_head_number < tick.effective_target {

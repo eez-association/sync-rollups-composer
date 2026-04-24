@@ -11,6 +11,7 @@ fn test_config() -> Arc<RollupConfig> {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: Address::ZERO,

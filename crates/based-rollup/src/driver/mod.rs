@@ -1219,6 +1219,44 @@ where
             self.maybe_save_checkpoint()?;
         }
 
+        // Advance the L1-confirmed anchor to the last derived block.
+        //
+        // Without this, the anchor only moves on successful `flush_to_l1` /
+        // `wait_for_l1_receipt` completions. Any postBatch whose receipt poll
+        // times out locally (e.g. a brief L1 hiccup) but actually confirms on
+        // L1 in the background is "lost" — its L2 blocks are on L1, but our
+        // anchor still points at the last tx we observed confirming. On the
+        // next flush attempt, the builder's `first_pre` (derived from the
+        // stale anchor + locally-built blocks past it) no longer matches the
+        // on-chain `stateRoot` (which advanced via the silently-confirmed
+        // batches), and the driver enters a `pre_state_root mismatch` rewind
+        // loop that can't resolve itself.
+        //
+        // Re-deriving those batches from L1 is the authoritative source of
+        // truth for what's confirmed, so treat the last derived block as the
+        // new anchor. The l1_block_number on the derived block is the L1
+        // block that contained its postBatch event.
+
+        // if let Some(last) = batch.blocks.last() {
+        //     let new_anchor = L1ConfirmedAnchor {
+        //         l2_block_number: last.l2_block_number,
+        //         l1_block_number: last.l1_info.l1_block_number,
+        //     };
+        //     let should_update = self
+        //         .l1_confirmed_anchor
+        //         .map_or(true, |a| a.l2_block_number < new_anchor.l2_block_number);
+        //     if should_update {
+        //         self.l1_confirmed_anchor = Some(new_anchor);
+        //         self.save_l1_confirmed_anchor();
+        //         info!(
+        //             target: "based_rollup::driver",
+        //             l2_block = new_anchor.l2_block_number,
+        //             l1_block = new_anchor.l1_block_number,
+        //             "advanced L1-confirmed anchor via L1 derivation"
+        //         );
+        //     }
+        // }
+
         Ok(())
     }
 

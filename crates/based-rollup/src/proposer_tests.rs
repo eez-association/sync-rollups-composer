@@ -32,6 +32,7 @@ fn test_config() -> RollupConfig {
         builder_mode: true,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: Address::ZERO,
@@ -659,6 +660,7 @@ fn test_switch_l1_url_valid() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: Some("http://localhost:9545".to_string()),
+        l1_builder_rpc_url: None,
         ..test_config()
     });
     let mut proposer = Proposer::new(config).unwrap();
