@@ -76,6 +76,20 @@ pub struct RollupConfig {
     #[arg(long, env = "L1_RPC_URL_FALLBACK")]
     pub l1_rpc_url_fallback: Option<String>,
 
+    /// Optional block-builder RPC URL for `eth_sendBundle` submissions
+    /// with block targeting. When set, the proposer routes postBatch
+    /// transactions through this endpoint instead of `eth_sendRawTransaction`,
+    /// including a target L1 block number so the bundle is either included
+    /// in that exact block or dropped. This closes the timing race where a
+    /// postBatch's signed `blockhash(block.number-1)` / `block.timestamp`
+    /// don't match inclusion context because the tx landed 1+ blocks later
+    /// than the builder predicted. Reads (latest block, receipts, gas price,
+    /// contract calls) continue to go to `l1_rpc_url`.
+    ///
+    /// Compatible with Flashbots-style / rbuilder endpoints.
+    #[arg(long, env = "L1_BUILDER_RPC_URL")]
+    pub l1_builder_rpc_url: Option<String>,
+
     /// WebSocket URL of the builder node for preconfirmation sync.
     /// Fullnodes connect here to receive blocks before L1 confirmation.
     /// Example: ws://builder:8546
@@ -203,6 +217,7 @@ impl std::fmt::Debug for RollupConfig {
                 &self.builder_private_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("l1_rpc_url_fallback", &self.l1_rpc_url_fallback)
+            .field("l1_builder_rpc_url", &self.l1_builder_rpc_url)
             .field("builder_ws_url", &self.builder_ws_url)
             .field("health_port", &self.health_port)
             .field("rollups_address", &self.rollups_address)

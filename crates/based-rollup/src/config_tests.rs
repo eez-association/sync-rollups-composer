@@ -10,6 +10,7 @@ fn test_config() -> RollupConfig {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: Address::ZERO,
@@ -366,6 +367,7 @@ fn test_validate_builder_with_ws_url() {
 fn test_validate_with_fallback_url() {
     let mut config = RollupConfig {
         l1_rpc_url_fallback: Some("http://fallback:8545".to_string()),
+        l1_builder_rpc_url: None,
         ..test_config()
     };
     config.validate().unwrap();
@@ -375,6 +377,7 @@ fn test_validate_with_fallback_url() {
 fn test_validate_without_fallback_url() {
     let mut config = RollupConfig {
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         ..test_config()
     };
     config.validate().unwrap();
@@ -444,6 +447,7 @@ fn test_validate_all_constraints_simultaneously() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: Some("http://fallback.example.com:8545".to_string()),
+        l1_builder_rpc_url: None,
         builder_ws_url: Some("ws://builder.example.com:8546".to_string()),
         health_port: 9100,
         rollups_address: Address::with_last_byte(0x55),

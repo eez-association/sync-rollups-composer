@@ -882,7 +882,33 @@ pub(super) const MAX_BACKOFF_SECS: u64 = 60;
 pub(super) const SUBMISSION_COOLDOWN_SECS: u64 = 5;
 
 /// Maximum number of blocks to submit in a single L1 batch transaction.
-pub(super) const MAX_BATCH_SIZE: usize = 100;
+///
+/// Sizing constraint on public L1s (e.g., Chiado):
+///
+/// `publicInputsHash` commits to `block.timestamp` and `blockhash(block.number - 1)`,
+/// and derivation assigns every block in a batch the SAME `l1_context = containing_L1 - 1`.
+/// For all N L2 blocks in a batch to pass on-chain proof verification, all N must have
+/// `mix_hash` equal to that single derivation-assigned value. The builder stamps
+/// `mix_hash` at build time from `latest_l1_block`, so the constraint is: build time
+/// for the batch + submission propagation must stay inside **one L1 slot** — otherwise
+/// `latest_l1_block` has advanced and `mix_hash` no longer matches what derivation will
+/// assign when the tx eventually lands.
+///
+/// On a 5s-slot Chiado validator, building and submitting ≤ ~5 blocks reliably fits
+/// in one slot. Larger batches (e.g., 100) during catch-up span many L1 blocks and
+/// trigger persistent `pre_state_root mismatch` loops post-confirmation.
+///
+/// For `reth --dev` with fixed block time and no external mempool contention, larger
+/// values are safe, but 5 is harmless there.
+///
+/// On public Chiado with a bundle RPC (eth_sendBundle): bundles are submitted
+/// with an explicit target block and drop on miss, so the mix_hash constraint
+/// only requires that all blocks in one batch were built in the same catch-up
+/// tick (which happens in well under 1s). Raised to 50 so one successful bundle
+/// during catch-up advances L1 state by 50 blocks — without this, at typical
+/// builder drop rates the chain falls behind wall-clock faster than it catches
+/// up.
+pub(super) const MAX_BATCH_SIZE: usize = 50;
 
 /// Maximum pending submissions queue size. Prevents unbounded memory growth
 /// when L1 transactions are not confirming (e.g., gas too low, stuck nonce).

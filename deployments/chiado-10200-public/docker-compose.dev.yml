@@ -1,0 +1,37 @@
+# deployments/chiado-10200-public/docker-compose.dev.yml — Dev overlay
+#
+# Mounts the locally compiled binary for fast iteration without rebuilding the
+# Docker image on every change.
+#
+# First time:
+#   cargo build --release
+#   docker compose \
+#     -f deployments/chiado-10200-public/docker-compose.yml \
+#     -f deployments/chiado-10200-public/docker-compose.dev.yml \
+#     --env-file deployments/chiado-10200-public/.env up -d
+#
+# Iterate (no rebuild, no down):
+#   cargo build --release
+#   docker compose \
+#     -f deployments/chiado-10200-public/docker-compose.yml \
+#     -f deployments/chiado-10200-public/docker-compose.dev.yml \
+#     --env-file deployments/chiado-10200-public/.env restart builder fullnode1
+#
+# NOTE: Do NOT override `GENESIS` here. The baseline compose already sets it to
+# `/shared/genesis.json` (seeded by init-config from the generated genesis.json
+# which includes CCM + builder pre-mints).
+
+services:
+  builder:
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile.dev
+      target: runtime
+    image: based-rollup:dev
+    volumes:
+      - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup
+
+  fullnode1:
+    image: based-rollup:dev
+    volumes:
+      - ../../target/${BUILD_PROFILE:-release}/based-rollup:/usr/local/bin/based-rollup

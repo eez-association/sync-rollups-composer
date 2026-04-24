@@ -184,8 +184,51 @@ where
                             }
                         }
 
+                        // Capture the trimmed block's L2 number BEFORE popping,
+                        // so we can advance `l1_confirmed_anchor` to match.
+                        let trimmed_l2_block =
+                            self.pending_submissions[pos].l2_block_number;
+
                         for _ in 0..=pos {
                             self.pending_submissions.pop_front();
+                        }
+
+                        // Advance the L1-confirmed anchor to the block we just
+                        // trimmed: the trim proves the corresponding postBatch
+                        // confirmed on L1 (its state root is the current
+                        // `rollup.stateRoot`). Without this, a postBatch whose
+                        // `wait_for_l1_receipt` poll timed out — but whose tx
+                        // actually confirmed in the background — would be
+                        // detected here via the state-root trim, but the anchor
+                        // would remain stale. On the next tick the driver's
+                        // rewind logic compares `first_pre` (from post-trim
+                        // pending, which starts *after* the confirmed block)
+                        // to the stale anchor and enters a permanent
+                        // `pre_state_root mismatch` rewind loop that reth
+                        // cannot unwind through (Ethereum-engine FCU-to-ancestor
+                        // is a silent no-op).
+                        //
+                        // `last_seen_l1_block` is the freshest L1 head the
+                        // driver has observed — safe upper bound for the
+                        // anchor's L1 block (the real containing L1 block is
+                        // ≤ this).
+                        let should_update = self
+                            .l1_confirmed_anchor
+                            .map_or(true, |a| a.l2_block_number < trimmed_l2_block);
+                        if should_update {
+                            let new_anchor = L1ConfirmedAnchor {
+                                l2_block_number: trimmed_l2_block,
+                                l1_block_number: self.last_seen_l1_block,
+                            };
+                            self.l1_confirmed_anchor = Some(new_anchor);
+                            self.save_l1_confirmed_anchor();
+                            info!(
+                                target: "based_rollup::driver",
+                                l2_block = trimmed_l2_block,
+                                l1_block = self.last_seen_l1_block,
+                                "advanced L1-confirmed anchor via flush-precheck \
+                                 on-chain root trim (silent-confirmation recovery)"
+                            );
                         }
                     }
                 }
@@ -482,10 +525,14 @@ where
                                 );
                                 (target, l1_rollback)
                             } else {
-                                (
-                                    earliest_block.saturating_sub(1),
-                                    self.config.deployment_l1_block,
-                                )
+                                // No batch has ever been confirmed on L1: on-chain state
+                                // is still the genesis root, so NOTHING local below
+                                // `earliest_block` has been committed. Rewind all the
+                                // way to genesis — otherwise we retain local blocks
+                                // whose post-state doesn't correspond to anything on
+                                // L1 and the next flush loops on the same mismatch.
+                                // Matches the sibling branches at :358-364 and :1028-1037.
+                                (0, self.config.deployment_l1_block)
                             };
 
                         error!(

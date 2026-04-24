@@ -1,0 +1,10 @@
+services:
+  l2-frontend:
+    environment:
+      NEXT_PUBLIC_API_HOST: "localhost"
+      NEXT_PUBLIC_API_PORT: "4103"
+      NEXT_PUBLIC_API_PROTOCOL: http
+      NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL: ws
+      NEXT_PUBLIC_APP_HOST: "localhost"
+      NEXT_PUBLIC_APP_PORT: "4101"
+      NEXT_PUBLIC_APP_PROTOCOL: http
