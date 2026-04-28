@@ -429,22 +429,21 @@ impl Direction for L2ToL1 {
                         .and_then(|arr| arr.first())
                     {
                         let has_error = trace.get("error").is_some();
-                        if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
+                        if has_error {
+                            // Step 1's `from` is the raw L2 source_address. L1 contracts
+                            // that gate by proxy identity (e.g. Bridge.receiveTokens
+                            // onlyBridgeProxy) revert with UnauthorizedCaller in this
+                            // call frame — that's a Step-1 artifact, not a true delivery
+                            // failure. Always fall through to simulate_l1_delivery,
+                            // which models the L1 proxy traversal correctly. (issue #46)
+                            needs_full_sim = true;
+                        } else if let Some(output) = trace.get("output").and_then(|v| v.as_str())
+                        {
                             let hex_clean = output.strip_prefix("0x").unwrap_or(output);
                             if let Ok(bytes) = hex::decode(hex_clean) {
-                                let is_protocol_error = has_error
-                                    && bytes.len() == 4
-                                    && (bytes == [0xf9, 0xd3, 0x30, 0xad]
-                                        || bytes == [0xed, 0x6b, 0xc7, 0x50]);
-                                if is_protocol_error {
-                                    needs_full_sim = true;
-                                } else {
-                                    call.delivery_return_data = bytes;
-                                    call.delivery_failed = has_error;
-                                }
+                                call.delivery_return_data = bytes;
+                                call.delivery_failed = false;
                             }
-                        } else if has_error {
-                            call.delivery_failed = true;
                         }
                     }
                 }
