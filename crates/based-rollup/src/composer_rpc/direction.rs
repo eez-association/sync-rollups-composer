@@ -437,8 +437,7 @@ impl Direction for L2ToL1 {
                             // failure. Always fall through to simulate_l1_delivery,
                             // which models the L1 proxy traversal correctly. (issue #46)
                             needs_full_sim = true;
-                        } else if let Some(output) = trace.get("output").and_then(|v| v.as_str())
-                        {
+                        } else if let Some(output) = trace.get("output").and_then(|v| v.as_str()) {
                             let hex_clean = output.strip_prefix("0x").unwrap_or(output);
                             if let Ok(bytes) = hex::decode(hex_clean) {
                                 call.delivery_return_data = bytes;
