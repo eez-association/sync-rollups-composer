@@ -39,6 +39,15 @@ pub struct PendingBlock {
     /// clean root (state without any cross-chain entry txs) and the last root is the
     /// speculative root.
     pub intermediate_roots: Vec<B256>,
+    /// L1 block number stamped into this L2 block's header `mix_hash` at build
+    /// time. Used by the proposer to compute `target_block_number` for bundle
+    /// submission so that the signed `(parent_hash, timestamp)` matches the
+    /// inclusion context of the L1 block where derivation will assign
+    /// `l1_context = l1_context_block`. Without this, `build_proof_context`
+    /// reads a fresh `latest_l1_block` at flush time which has typically
+    /// drifted past the build-time `mix_hash`, producing post-confirmation
+    /// L1-context mismatches.
+    pub l1_context_block: u64,
 }
 
 /// Gas price hint for the postBatch transaction.
@@ -292,12 +301,39 @@ impl Proposer {
     /// "what goes into the hash" from "how the hash is signed".
     /// Introduced in PLAN §8 step 1.8 so that `sign_proof` has a
     /// named, typed input struct (closes invariant #22).
+    ///
+    /// `anchor_l1_block_hint`: if `Some(N)`, build the proof targeting
+    /// L1 block `N + 1` and fetch hash/timestamp of block `N` directly,
+    /// rather than reading the current L1 latest. Used when submitting
+    /// a batch whose blocks were stamped with `mix_hash = N` at build
+    /// time — keeps the signed `(parent_hash, timestamp)` consistent
+    /// with what derivation will assign as `l1_context = N` once the
+    /// batch lands at L1 block `N + 1`. Without this hint, fresh
+    /// `latest_l1_block` would have drifted past `N` (especially during
+    /// catchup), the bundle would target `latest+1 ≠ N+1`, and the
+    /// post-confirmation verify path would detect an L1-context
+    /// mismatch and force a sibling reorg.
     async fn build_proof_context(
         &self,
         entries: &[CrossChainExecutionEntry],
+        anchor_l1_block_hint: Option<u64>,
     ) -> Result<ProofContext> {
         let vk = self.verification_key().await?;
-        let (latest_number, latest_hash, latest_timestamp) = self.latest_l1_block().await?;
+        let (latest_number, latest_hash, latest_timestamp) = match anchor_l1_block_hint {
+            Some(n) => {
+                let block = self
+                    .provider
+                    .get_block_by_number(n.into())
+                    .await?
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "anchor L1 block {n} not yet available on RPC for proof context"
+                        )
+                    })?;
+                (n, block.header.hash, block.header.timestamp)
+            }
+            None => self.latest_l1_block().await?,
+        };
         // Predict the next block's timestamp.
         // On L1 with fixed block time (e.g., reth --dev.block-time=12s):
         //   next_ts = latest_ts + block_time
@@ -533,7 +569,19 @@ impl Proposer {
         // next timestamp, computes entry hashes) and sign. The
         // `ProofContext` separation closes invariant #22 by giving
         // `block_timestamp` a named field on the input struct.
-        let proof_ctx = self.build_proof_context(&all_entries).await?;
+        //
+        // When the first pending block carries an `l1_context_block` (set at
+        // build time to the `mix_hash` L1 block number it was stamped with),
+        // anchor the proof context to that block: target = anchor + 1, parent
+        // hash and timestamp fetched for `anchor`. This keeps the signed
+        // `(parent_hash, timestamp)` consistent with the L1 context that
+        // derivation will assign when the batch lands. Falls back to fresh
+        // `latest_l1_block` for tests / single-pending-cross-chain-only paths
+        // where no `PendingBlock` is involved.
+        let anchor_hint = blocks.first().map(|b| b.l1_context_block);
+        let proof_ctx = self
+            .build_proof_context(&all_entries, anchor_hint)
+            .await?;
         let proof = self.sign_proof(&proof_ctx, &call_data)?;
 
         let calldata =
@@ -646,16 +694,36 @@ impl Proposer {
             .pending()
             .await?;
 
+        // Cap on `max_priority_fee_per_gas`. EIP-1559 validation requires the
+        // sender's balance to cover `gas_limit * max_fee_per_gas + value`
+        // BEFORE the tx executes — even if `gas_used` and the actual base fee
+        // would charge a fraction of that. With our `gas_limit = 10_000_000`,
+        // any priority fee above ~50 gwei pushes the budget past 0.5 xDAI; on
+        // Chiado, `eth_maxPriorityFeePerGas` has been observed returning
+        // ~230 gwei, which forces a 2.3 xDAI minimum balance just to be
+        // accepted by the L1 mempool / bundle relay. Builder wallets
+        // typically hold ≤2 xDAI, so the tx is silently rejected as invalid
+        // by validators (no error returned to us by the relay's `result:null`
+        // ack).
+        //
+        // 5 gwei is well above the practical Chiado floor (probes land with
+        // 2 gwei) and keeps the worst-case fee budget at
+        // `10_000_000 * 5 gwei = 0.05 xDAI`, two orders of magnitude under
+        // any reasonable builder balance. base_fee is ~0 on Chiado so this
+        // dominates `max_fee`.
+        const PRIORITY_FEE_CAP: u128 = 5_000_000_000; // 5 gwei
+
         // Gas price: prefer caller's hint, else fetch latest from node.
         let (max_fee_per_gas, max_priority_fee_per_gas) =
             match (tx.max_fee_per_gas, tx.max_priority_fee_per_gas) {
-                (Some(m), Some(p)) => (m, p),
+                (Some(m), Some(p)) => (m.min(PRIORITY_FEE_CAP * 2), p.min(PRIORITY_FEE_CAP)),
                 _ => {
                     let max_priority_fee = self
                         .provider
                         .get_max_priority_fee_per_gas()
                         .await
-                        .unwrap_or(1_000_000_000);
+                        .unwrap_or(1_000_000_000)
+                        .min(PRIORITY_FEE_CAP);
                     let latest = self
                         .provider
                         .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Latest)

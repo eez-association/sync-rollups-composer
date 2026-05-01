@@ -165,9 +165,25 @@ where
         let chain_id = self.evm_config.chain_spec().chain().id();
 
         // Use next block's base fee (not parent's) for protocol tx gas_price.
+        //
+        // The parent of the block being built is `l2_block_number - 1`, NOT
+        // necessarily `self.l2_head_number`. They are equal in the normal
+        // builder path (target = head + 1) but differ when:
+        //   - `apply_deferred_filtering` rebuilds an existing block in place
+        //     (verify path) — `l2_block_number <= self.l2_head_number`.
+        //   - `rebuild_with_fresh_l1_context` rebuilds a stale-anchor block as
+        //     a sibling — `l2_block_number < self.l2_head_number`.
+        //
+        // Reading the wrong parent makes the gas price computation drift by
+        // however many empty blocks separate target from head. Under EIP-1559
+        // a small drift is enough to put the protocol tx's `gas_price` below
+        // the actual `base_fee_per_gas` of the rebuilt block; the EVM then
+        // rejects it as `gas price is less than basefee` and the rebuild
+        // bails before it can submit a sibling payload.
+        let parent_block_number = l2_block_number.saturating_sub(1);
         let parent_header = self
             .l2_provider
-            .sealed_header(self.l2_head_number)
+            .sealed_header(parent_block_number)
             .wrap_err("failed to get parent header for gas price")?
             .ok_or_eyre("parent header not found for gas price")?;
         let gas_price = parent_header

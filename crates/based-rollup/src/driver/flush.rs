@@ -214,7 +214,7 @@ where
                         // ≤ this).
                         let should_update = self
                             .l1_confirmed_anchor
-                            .map_or(true, |a| a.l2_block_number < trimmed_l2_block);
+                            .is_none_or(|a| a.l2_block_number < trimmed_l2_block);
                         if should_update {
                             let new_anchor = L1ConfirmedAnchor {
                                 l2_block_number: trimmed_l2_block,
@@ -302,6 +302,76 @@ where
             return FlushPrecheckResult::Skip;
         }
 
+        // Stale-anchor detection: when the front of `pending_submissions` was
+        // built against an L1 head that we have since observed advance past,
+        // its `mix_hash` (= `l1_context_block`) commits the proof to a
+        // `target_block = l1_context_block + 1` that is now in the past. Any
+        // bundle submitted to a block-builder RPC against that target drops on
+        // miss the moment it is relayed (the target slot has already been
+        // produced). The block's `mix_hash` is a header field — we cannot
+        // restamp it without rebuilding the block, so the only path forward is
+        // to rebuild the block as a sibling with the *current* L1 head as
+        // `mix_hash` and let reth wipe everything past it. See
+        // `Driver::rebuild_with_fresh_l1_context`.
+        //
+        // Mutually exclusive with the issue-#36 sibling-reorg path above —
+        // that one expects an `expected_root` derived from a confirmed L1
+        // batch, while this path explicitly does not have one. If a
+        // sibling-reorg request is already pending, defer to it.
+        //
+        // `pending_anchor_refresh` is consumed at the top of `step()` before
+        // any mode-specific dispatch (analogous to `pending_rewind_target`).
+        if self.pending_anchor_refresh.is_none() {
+            if let Some(first) = self.pending_submissions.front() {
+                let stale_target_l1 = first.l1_context_block.saturating_add(1);
+                if stale_target_l1 <= self.last_seen_l1_block {
+                    let depth = self
+                        .l2_head_number
+                        .saturating_sub(first.l2_block_number);
+                    if reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD) {
+                        // Beyond `REORG_SAFETY_THRESHOLD` (75% of reth's
+                        // `MAX_REORG_DEPTH = 64`) the wipe would push reth
+                        // past its `CHANGESET_CACHE_RETENTION_BLOCKS`
+                        // window, after which no recovery primitive
+                        // (sibling reorg, anchor refresh, anything) can
+                        // restore consensus. Surface the wedge with a
+                        // structured ERROR for operator intervention; do
+                        // NOT auto-rebuild.
+                        error!(
+                            target: "based_rollup::driver",
+                            target_l2_block = first.l2_block_number,
+                            stale_target_l1,
+                            last_seen_l1 = self.last_seen_l1_block,
+                            depth,
+                            threshold = REORG_SAFETY_THRESHOLD,
+                            "stale bundle anchor detected but rebuild depth exceeds \
+                             safety threshold — bundle target is unreachable and \
+                             auto-recovery would push reth past its changeset \
+                             eviction window. Operator intervention required."
+                        );
+                        return FlushPrecheckResult::Skip;
+                    }
+                    warn!(
+                        target: "based_rollup::driver",
+                        target_l2_block = first.l2_block_number,
+                        stale_l1_context = first.l1_context_block,
+                        stale_target_l1,
+                        last_seen_l1 = self.last_seen_l1_block,
+                        depth,
+                        "stale bundle anchor — front of pending_submissions targets \
+                         a past L1 block; queuing anchor refresh to rebuild with \
+                         current L1 head as mix_hash"
+                    );
+                    self.pending_anchor_refresh = Some(first.l2_block_number);
+                    return FlushPrecheckResult::Skip;
+                }
+            }
+        } else {
+            // An anchor refresh is already queued — wait for `step()` to
+            // consume it on the next iteration.
+            return FlushPrecheckResult::Skip;
+        }
+
         if self.pending_submissions.is_empty() && self.pending_l1.is_empty() {
             return FlushPrecheckResult::Skip;
         }
@@ -333,6 +403,30 @@ where
         // subsequent blocks from this batch, we ensure they are held until
         // derivation confirms the entry-bearing block.
         let has_pending_entries = !self.pending_l1.is_empty();
+
+        // Per-anchor batch slicing: every block in a single bundle must share
+        // the same `l1_context_block` (= `mix_hash`), because on-chain proof
+        // verification compares each block's `mix_hash` to `blockhash(target_l1
+        // - 1)` and there is exactly one `target_l1` per bundle. Pending
+        // submissions accumulated across multiple builder ticks can carry
+        // different `l1_context_block` values; mixing them in one bundle would
+        // make the proof invalid for every block past the first anchor's run.
+        //
+        // Take only the contiguous run from the front whose `l1_context_block`
+        // matches `pending.front().l1_context_block`. The rest stays in the
+        // queue and lands in a subsequent bundle anchored at its own L1 block.
+        let front_anchor = self
+            .pending_submissions
+            .front()
+            .map(|b| b.l1_context_block);
+        let same_anchor_run = match front_anchor {
+            Some(a) => self
+                .pending_submissions
+                .iter()
+                .take_while(|b| b.l1_context_block == a)
+                .count(),
+            None => 0,
+        };
         let batch_size = if has_pending_entries {
             // Include ALL pending blocks when entries are present.
             // The entry block is the last one (just built). Earlier blocks are
@@ -344,17 +438,11 @@ where
             //   Entry[0] immediate: pre_first → clean_last(=clean_entry_block)
             //   Entry[1..N] deferred: clean_entry_block → intermediates
             //
-            // Previously, simple entries used batch_size=1, which sent the FIRST
-            // pending block without entries but WITH entry state deltas computed
-            // for the LAST block. This caused ExecutionNotFound when intermediate
-            // blocks existed (the deferred entry's currentState didn't match the
-            // on-chain stateRoot after the immediate entry for the wrong block).
-            //
             // §4f nonce safety is preserved: entry protocol txs are only in the
             // LAST block, and earlier blocks don't depend on entry nonces.
-            self.pending_submissions.len().min(MAX_BATCH_SIZE)
+            same_anchor_run.min(MAX_BATCH_SIZE)
         } else {
-            self.pending_submissions.len().min(MAX_BATCH_SIZE)
+            same_anchor_run.min(MAX_BATCH_SIZE)
         };
         let blocks: Vec<PendingBlock> = self.pending_submissions.drain(..batch_size).collect();
 

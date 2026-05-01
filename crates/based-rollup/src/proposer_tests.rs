@@ -14,6 +14,8 @@ impl Proposer {
             provider,
             signer,
             signer_address,
+            builder_http: None,
+            last_bundle_target: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -58,6 +60,7 @@ fn test_pending_block_struct() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0xBB)),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
     assert_eq!(block.l2_block_number, 42);
     assert_eq!(block.pre_state_root, B256::with_last_byte(0xAA));
@@ -121,8 +124,9 @@ fn test_calldata_gas_calculation() {
     assert!(gas < Proposer::MAX_CALLDATA_GAS);
     assert!(gas > 0, "calldata gas must be positive");
 
-    // Verify constant is reasonable (12M is well under L1 block limit of ~30M)
-    assert_eq!(Proposer::MAX_CALLDATA_GAS, 12_000_000);
+    // Verify constant is reasonable (7M leaves headroom under POST_BATCH_GAS_LIMIT
+    // of 10M for execution overhead, while still well under L1 block gas limits).
+    assert_eq!(Proposer::MAX_CALLDATA_GAS, 7_000_000);
 }
 
 #[test]
@@ -785,6 +789,7 @@ fn test_build_block_entries_produces_correct_state_deltas() {
             clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0x01)),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
         PendingBlock {
             l2_block_number: 2,
@@ -793,6 +798,7 @@ fn test_build_block_entries_produces_correct_state_deltas() {
             clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0x02)),
             encoded_transactions: Bytes::from(vec![0xc1, 0x80]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
     ];
 

@@ -1158,6 +1158,7 @@ async fn test_proposer_submits_to_l1() {
         ),
         encoded_transactions: payload.clone(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
     proposer.submit_to_l1(&[pending_block], &[]).await.unwrap();
 
@@ -1263,6 +1264,7 @@ async fn test_proposer_batch_submit() {
             ),
             encoded_transactions: Bytes::from_static(b"batch1"),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
         PendingBlock {
             l2_block_number: 2,
@@ -1273,6 +1275,7 @@ async fn test_proposer_batch_submit() {
             ),
             encoded_transactions: Bytes::from_static(b"batch2"),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
         PendingBlock {
             l2_block_number: 3,
@@ -1283,6 +1286,7 @@ async fn test_proposer_batch_submit() {
             ),
             encoded_transactions: Bytes::from_static(b"batch3"),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
     ];
     proposer.submit_to_l1(&batch, &[]).await.unwrap();
@@ -2356,6 +2360,7 @@ async fn test_proposer_reads_state_root_after_submissions() {
             ),
             encoded_transactions: Bytes::new(),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
 
@@ -2756,6 +2761,7 @@ async fn test_concurrent_proposer_submissions() {
         ),
         encoded_transactions: Bytes::from_static(b"race"),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     // Disable automine so both txs land in the same block
@@ -2873,6 +2879,7 @@ async fn test_large_batch_chunking() {
                 ),
                 encoded_transactions: Bytes::from(format!("chunk_{n}").into_bytes()),
                 intermediate_roots: vec![],
+                l1_context_block: 0,
             })
             .collect();
         proposer.submit_to_l1(&chunk, &[]).await.unwrap();
@@ -3094,6 +3101,7 @@ async fn test_proposer_backfill_from_local_chain() {
             ),
             encoded_transactions: Bytes::from(format!("p1_block_{n}").into_bytes()),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
     proposer1.submit_to_l1(&batch1, &[]).await.unwrap();
@@ -3133,6 +3141,7 @@ async fn test_proposer_backfill_from_local_chain() {
             ),
             encoded_transactions: Bytes::from(format!("p2_block_{n}").into_bytes()),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
     proposer2.submit_to_l1(&batch2, &[]).await.unwrap();
@@ -3708,6 +3717,7 @@ async fn test_proposer_max_batch_size() {
             ),
             encoded_transactions: Bytes::from(format!("prop_max_{n}").into_bytes()),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
 

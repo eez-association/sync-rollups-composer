@@ -125,30 +125,36 @@ where
             // used a newer L1 block than derivation's `last_l1_info`. For submitted
             // blocks this happens when the tx landed in a later L1 block than expected.
             //
-            // Set a rewind target so the block will be re-built with the correct L1
-            // context on the next step. Stay in Builder mode to minimize disruption.
+            // Use sibling-reorg (newPayloadV3 + FCU on a sibling hash) instead of
+            // a bare FCU rewind. On reth Ethereum engine kind, FCU-to-ancestor is
+            // a silent no-op — the canonical tip never unwinds. The sibling-reorg
+            // path installs a new block at the divergent height with the correct
+            // L1 context as a forked branch, then advances the head to it; reth
+            // honors that as a normal reorg and wipes the speculative branch.
+            //
+            // `step_sync` consumes `pending_sibling_reorg` and runs
+            // `rebuild_block_as_sibling` on the next tick. The rollback of the
+            // derivation cursor + L1 context is done by `apply_sibling_reorg_plan`.
             info!(
                 target: "based_rollup::driver",
                 l2_block = derived.l2_block_number,
                 local_l1_context = local_l1_number,
                 derived_l1_context = derived_l1_number,
                 is_gap_fill,
-                "L1 context mismatch — will re-derive block with correct context"
+                "L1 context mismatch — queuing sibling reorg to install canonical \
+                 version (bare FCU rewind is a silent no-op on Ethereum engine kind)"
             );
-            // Roll back derivation so re-derive starts from the correct L1 block.
-            // Only roll back if we haven't already rolled back to an earlier point
-            // (rollback_to is idempotent but we avoid unnecessary work).
-            if self.pending_rewind_target.is_none() {
-                self.derivation.rollback_to(derived_l1_number);
-            }
-            // Clear all pending state — submissions contain state roots from the
-            // wrong L1 context, and preconfirmed/deposit data may be stale.
-            self.clear_internal_state();
-            // Soft rewind: invariant #10 lives right here — re-derive the block
-            // itself, not the one after it.
-            let target_l2 = derived.l2_block_number.saturating_sub(1);
-            self.set_rewind_target(target_l2);
-            return Ok(VerificationDecision::L1ContextMismatchRewound { target_l2 });
+            let plan = plan_sibling_reorg_from_verify(
+                derived.l2_block_number,
+                derived.state_root,
+                self.l1_confirmed_anchor,
+                self.config.deployment_l1_block,
+            );
+            self.apply_sibling_reorg_plan(plan);
+            return Ok(VerificationDecision::SiblingReorgQueued {
+                target_l2_block: derived.l2_block_number,
+                expected_root: derived.state_root,
+            });
         }
 
         // For gap-fill blocks, L1 context match is sufficient — there's no L1 state
