@@ -186,8 +186,7 @@ where
 
                         // Capture the trimmed block's L2 number BEFORE popping,
                         // so we can advance `l1_confirmed_anchor` to match.
-                        let trimmed_l2_block =
-                            self.pending_submissions[pos].l2_block_number;
+                        let trimmed_l2_block = self.pending_submissions[pos].l2_block_number;
 
                         for _ in 0..=pos {
                             self.pending_submissions.pop_front();
@@ -325,9 +324,7 @@ where
             if let Some(first) = self.pending_submissions.front() {
                 let stale_target_l1 = first.l1_context_block.saturating_add(1);
                 if stale_target_l1 <= self.last_seen_l1_block {
-                    let depth = self
-                        .l2_head_number
-                        .saturating_sub(first.l2_block_number);
+                    let depth = self.l2_head_number.saturating_sub(first.l2_block_number);
                     if reorg_depth_exceeded(depth, REORG_SAFETY_THRESHOLD) {
                         // Beyond `REORG_SAFETY_THRESHOLD` (75% of reth's
                         // `MAX_REORG_DEPTH = 64`) the wipe would push reth
@@ -415,10 +412,7 @@ where
         // Take only the contiguous run from the front whose `l1_context_block`
         // matches `pending.front().l1_context_block`. The rest stays in the
         // queue and lands in a subsequent bundle anchored at its own L1 block.
-        let front_anchor = self
-            .pending_submissions
-            .front()
-            .map(|b| b.l1_context_block);
+        let front_anchor = self.pending_submissions.front().map(|b| b.l1_context_block);
         let same_anchor_run = match front_anchor {
             Some(a) => self
                 .pending_submissions

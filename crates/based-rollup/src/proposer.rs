@@ -579,9 +579,7 @@ impl Proposer {
         // `latest_l1_block` for tests / single-pending-cross-chain-only paths
         // where no `PendingBlock` is involved.
         let anchor_hint = blocks.first().map(|b| b.l1_context_block);
-        let proof_ctx = self
-            .build_proof_context(&all_entries, anchor_hint)
-            .await?;
+        let proof_ctx = self.build_proof_context(&all_entries, anchor_hint).await?;
         let proof = self.sign_proof(&proof_ctx, &call_data)?;
 
         let calldata =
@@ -738,12 +736,7 @@ impl Proposer {
 
         let gas_limit = tx.gas.unwrap_or(Self::POST_BATCH_GAS_LIMIT);
 
-        let input_bytes = tx
-            .input
-            .input
-            .as_ref()
-            .cloned()
-            .unwrap_or_default();
+        let input_bytes = tx.input.input.as_ref().cloned().unwrap_or_default();
 
         let to_address = match tx.to {
             Some(TxKind::Call(addr)) => addr,
@@ -802,9 +795,7 @@ impl Proposer {
             .map_err(|e| eyre::eyre!("builder RPC read body failed: {e}"))?;
 
         if !status.is_success() {
-            return Err(eyre::eyre!(
-                "builder RPC returned HTTP {status}: {text}"
-            ));
+            return Err(eyre::eyre!("builder RPC returned HTTP {status}: {text}"));
         }
 
         // Parse JSON-RPC response. An `error` field means the bundle was

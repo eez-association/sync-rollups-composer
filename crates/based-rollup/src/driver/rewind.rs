@@ -520,9 +520,7 @@ where
             .config
             .l2_timestamp_checked(target_l2_block)
             .ok_or_else(|| {
-                eyre::eyre!(
-                    "anchor refresh: timestamp overflow for L2 block {target_l2_block}"
-                )
+                eyre::eyre!("anchor refresh: timestamp overflow for L2 block {target_l2_block}")
             })?;
 
         info!(
@@ -633,15 +631,16 @@ where
         // Queue the rebuilt block for L1 submission. `clean_state_root` =
         // `state_root` because no cross-chain entries were processed.
         // `intermediate_roots` is empty for the same reason.
-        self.pending_submissions.push_back(crate::proposer::PendingBlock {
-            l2_block_number: target_l2_block,
-            pre_state_root: built.pre_state_root,
-            state_root: built.state_root,
-            clean_state_root: crate::cross_chain::CleanStateRoot::new(built.state_root),
-            encoded_transactions: built.encoded_transactions.clone(),
-            intermediate_roots: Vec::new(),
-            l1_context_block: l1_block_number,
-        });
+        self.pending_submissions
+            .push_back(crate::proposer::PendingBlock {
+                l2_block_number: target_l2_block,
+                pre_state_root: built.pre_state_root,
+                state_root: built.state_root,
+                clean_state_root: crate::cross_chain::CleanStateRoot::new(built.state_root),
+                encoded_transactions: built.encoded_transactions.clone(),
+                intermediate_roots: Vec::new(),
+                l1_context_block: l1_block_number,
+            });
 
         info!(
             target: "based_rollup::driver",
