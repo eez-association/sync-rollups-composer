@@ -93,6 +93,18 @@ pub struct Driver<P, Pool> {
     /// production halts to prevent crossing reth's `MAX_REORG_DEPTH` eviction
     /// window.
     pending_sibling_reorg: Option<SiblingReorgRequest>,
+    /// If set, an "anchor refresh" rebuild is pending for this L2 block —
+    /// the front of `pending_submissions` was built against an L1 head that
+    /// has since fallen behind `last_seen_l1_block`, so the bundle target
+    /// (`l1_context_block + 1`) is in the past and would be dropped on every
+    /// retry. The rebuild rebuilds this block with the *current* L1 head as
+    /// `mix_hash` and uses sibling-reorg to wipe everything above it. See
+    /// `Driver::rebuild_with_fresh_l1_context`.
+    ///
+    /// Mutually exclusive with `pending_sibling_reorg` — the existing issue-#36
+    /// path expects an `expected_root` derived from a prior L1 confirmation,
+    /// while this path explicitly does NOT have one (the chain never confirmed).
+    pending_anchor_refresh: Option<u64>,
     /// Entry verification hold — the state machine governing
     /// "builder halts + submissions pause while an entry-bearing
     /// block awaits derivation verification". See
@@ -318,6 +330,7 @@ where
             builder_sync_handle: None,
             pending_rewind_target: None,
             pending_sibling_reorg: None,
+            pending_anchor_refresh: None,
             hold: EntryVerificationHold::Clear,
             last_new_l1_block_time: std::time::Instant::now(),
             last_seen_l1_block: 0,
@@ -828,6 +841,44 @@ where
             }
         }
 
+        // Anchor refresh: rebuild the front-of-queue stale block as a sibling
+        // with the current L1 head as `mix_hash`, then let reth wipe every
+        // block past it. Set by `flush_precheck` when it detects that the
+        // bundle target (`l1_context_block + 1`) has fallen behind
+        // `last_seen_l1_block` and any submitted bundle would drop on miss.
+        // Consumed here before mode dispatch so the rebuilt block is the
+        // single canonical tip when `step_builder` / `step_sync` runs next.
+        if let Some(target) = self.pending_anchor_refresh.take() {
+            match self.rebuild_with_fresh_l1_context(target).await {
+                Ok(()) => {
+                    // Successful rebuild leaves us with a fresh-anchor head —
+                    // proceed normally on this same step iteration.
+                }
+                Err(err) => {
+                    // Anchor refresh is a *recovery* step, not a terminal
+                    // failure: surface the full eyre chain in the log,
+                    // re-queue the request, and let the rest of the step
+                    // proceed normally. Returning Err here would propagate
+                    // into the outer loop's exponential backoff (1s → 2s →
+                    // … → 60s) and silence subsequent flush attempts.
+                    // Submission keeps trying every tick — only the
+                    // signature target moves forward — which matches the
+                    // operator-facing behaviour expected of the bundle path.
+                    error!(
+                        target: "based_rollup::driver",
+                        target_l2_block = target,
+                        err = format!("{err:#}"),
+                        "anchor refresh rebuild failed — re-queuing, no step backoff"
+                    );
+                    self.pending_anchor_refresh = Some(target);
+                    // Continue with the rest of the step — drain WS,
+                    // refresh L1, run mode-specific dispatch. The next
+                    // flush_to_l1 will re-detect the stale anchor and
+                    // re-queue if the rebuild still hasn't succeeded.
+                }
+            }
+        }
+
         // Drain any preconfirmed blocks from the builder WS
         self.drain_preconfirmed_blocks();
 
@@ -1218,6 +1269,44 @@ where
             self.derivation.commit_batch(&batch);
             self.maybe_save_checkpoint()?;
         }
+
+        // Advance the L1-confirmed anchor to the last derived block.
+        //
+        // Without this, the anchor only moves on successful `flush_to_l1` /
+        // `wait_for_l1_receipt` completions. Any postBatch whose receipt poll
+        // times out locally (e.g. a brief L1 hiccup) but actually confirms on
+        // L1 in the background is "lost" — its L2 blocks are on L1, but our
+        // anchor still points at the last tx we observed confirming. On the
+        // next flush attempt, the builder's `first_pre` (derived from the
+        // stale anchor + locally-built blocks past it) no longer matches the
+        // on-chain `stateRoot` (which advanced via the silently-confirmed
+        // batches), and the driver enters a `pre_state_root mismatch` rewind
+        // loop that can't resolve itself.
+        //
+        // Re-deriving those batches from L1 is the authoritative source of
+        // truth for what's confirmed, so treat the last derived block as the
+        // new anchor. The l1_block_number on the derived block is the L1
+        // block that contained its postBatch event.
+
+        // if let Some(last) = batch.blocks.last() {
+        //     let new_anchor = L1ConfirmedAnchor {
+        //         l2_block_number: last.l2_block_number,
+        //         l1_block_number: last.l1_info.l1_block_number,
+        //     };
+        //     let should_update = self
+        //         .l1_confirmed_anchor
+        //         .map_or(true, |a| a.l2_block_number < new_anchor.l2_block_number);
+        //     if should_update {
+        //         self.l1_confirmed_anchor = Some(new_anchor);
+        //         self.save_l1_confirmed_anchor();
+        //         info!(
+        //             target: "based_rollup::driver",
+        //             l2_block = new_anchor.l2_block_number,
+        //             l1_block = new_anchor.l1_block_number,
+        //             "advanced L1-confirmed anchor via L1 derivation"
+        //         );
+        //     }
+        // }
 
         Ok(())
     }

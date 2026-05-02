@@ -19,9 +19,18 @@
 use super::Driver;
 use super::TriggerMetadata;
 use super::types::{
-    DriverMode, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS, MAX_REORG_DEPTH,
-    REORG_SAFETY_THRESHOLD, reorg_depth_exceeded,
+    DriverMode, MAX_BATCH_SIZE, MAX_PENDING_CROSS_CHAIN_ENTRIES, MAX_PENDING_SUBMISSIONS,
+    MAX_REORG_DEPTH, REORG_SAFETY_THRESHOLD, reorg_depth_exceeded,
 };
+
+/// Maximum pending depth allowed when running on the bundle path. With N
+/// pending blocks the rebuild depth is `N - 1` (head minus first-pending),
+/// so to keep depth STRICTLY below `REORG_SAFETY_THRESHOLD` we must cap
+/// pending count at `REORG_SAFETY_THRESHOLD - 1`. Without this leave-one-out,
+/// a fully-built batch lands at exactly `depth == threshold`, the safety
+/// gate trips, and anchor refresh is refused — wedging the chain at the
+/// boundary instead of one step shy of it.
+const BUNDLE_PATH_PENDING_CAP: u64 = REORG_SAFETY_THRESHOLD - 1;
 use crate::cross_chain::CrossChainExecutionEntry;
 use crate::proposer::PendingBlock;
 use alloy_primitives::{B256, Bytes};
@@ -141,9 +150,18 @@ where
         }
 
         // Phase 2: Compute tick context (target, L1 hash, hold check).
-        let tick = match self.compute_tick_context(latest_l1_block).await? {
-            Some(ctx) => ctx,
-            None => return Ok(()),
+        // When `compute_tick_context` returns `None` we still want to give
+        // `flush_to_l1` a chance to run, because pending blocks may need an
+        // anchor-refresh retry. Building skipped, but submission retry kept.
+        // The hold path is fine — `flush_precheck` re-checks the hold and
+        // skips itself. The "nothing to build" path matters most: under the
+        // bundle-path cap (`pending.len() == MAX_BATCH_SIZE`), the builder
+        // is correctly told not to produce more, but pending still needs the
+        // periodic flush so a stale-anchor refresh can fire.
+        let tick = self.compute_tick_context(latest_l1_block).await?;
+        let Some(tick) = tick else {
+            self.flush_to_l1().await?;
+            return Ok(());
         };
         let mut current_l1_block = tick.current_l1_block;
         let mut l1_hash = tick.l1_hash;
@@ -159,8 +177,22 @@ where
         // During catch-up, refresh L1 context every N blocks to avoid all catch-up
         // blocks sharing the same L1 context (which causes mass rewind if the batch
         // submission lands in a different L1 block).
-        const L1_REFRESH_INTERVAL: u64 = 100;
+        //
+        // Must be kept aligned with `MAX_BATCH_SIZE` in driver/types.rs: every batch
+        // submitted to L1 must contain only blocks that share the same `mix_hash`,
+        // because derivation assigns one `l1_context` per batch. See the comment on
+        // `MAX_BATCH_SIZE` for the full constraint derivation.
+        const L1_REFRESH_INTERVAL: u64 = 50;
         let mut blocks_since_l1_refresh: u64 = 0;
+
+        // Counter for in-loop flushes. During long catch-ups (thousands of
+        // blocks behind wall-clock) we MUST flush every `MAX_BATCH_SIZE`
+        // blocks instead of waiting for the catch-up to finish — otherwise
+        // the proposer would try to submit a single batch much larger than
+        // can fit in one L1 slot, every block in that batch would have a
+        // different `mix_hash` (because L1 advanced during the build), and
+        // derivation would fail. See `MAX_BATCH_SIZE` doc in driver/types.rs.
+        let mut blocks_in_pending_batch: usize = 0;
 
         while self.l2_head_number < tick.effective_target {
             // Periodically refresh L1 context during catch-up to reduce blast radius
@@ -357,7 +389,12 @@ where
                     clean_state_root,
                     encoded_transactions: built.encoded_transactions,
                     intermediate_roots,
+                    // Stamp the L1 context this block was built against so the
+                    // proposer can target the correct future L1 block when
+                    // submitting; see PendingBlock::l1_context_block doc.
+                    l1_context_block: current_l1_block,
                 });
+                blocks_in_pending_batch = blocks_in_pending_batch.saturating_add(1);
             } else {
                 warn!(
                     target: "based_rollup::driver",
@@ -371,6 +408,39 @@ where
             // When flush_to_l1 submits a batch with cross-chain entries, it sets
             // pending_entry_verification_block to hold further submissions until
             // derivation confirms the entry block. See flush_to_l1 for details.
+
+            // Catch-up flush: when we've accumulated a full batch's worth of
+            // blocks during a long catch-up, submit them now instead of after
+            // the loop ends. The proposer signs against the FIRST block's
+            // `l1_context_block` (see `PendingBlock`), so postponing the flush
+            // would let later blocks in the batch be built against a newer L1
+            // block — making them disagree with the bundle target's mix_hash
+            // and forcing derivation to reject the whole batch.
+            if blocks_in_pending_batch >= MAX_BATCH_SIZE {
+                self.flush_to_l1().await?;
+
+                // If flush triggered any state-divergence recovery, bail so
+                // the next tick can run rewind / sibling-reorg / hold /
+                // anchor-refresh logic before we build any more blocks.
+                // Continuing to build on top of an in-flight recovery would
+                // just produce more blocks that need to be discarded — and
+                // for the bundle path specifically, every additional block
+                // built while a stale-anchor refresh is queued grows
+                // `pending_submissions` toward `REORG_SAFETY_THRESHOLD`.
+                // Without the `pending_anchor_refresh` check here the catch-up
+                // loop would race past the safety gate within a single tick,
+                // wedging the chain even when the refresh path was poised to
+                // recover it.
+                if self.pending_rewind_target.is_some()
+                    || self.hold.is_armed()
+                    || self.pending_sibling_reorg.is_some()
+                    || self.pending_anchor_refresh.is_some()
+                {
+                    return Ok(());
+                }
+
+                blocks_in_pending_batch = 0;
+            }
         }
 
         // Commit L1 forward txs to the legacy queue AFTER all blocks built
@@ -689,8 +759,44 @@ where
                 MAX_CATCHUP_BLOCKS
             );
         }
-        let effective_target =
+        let mut effective_target =
             target_l2_block.min(self.l2_head_number.saturating_add(MAX_CATCHUP_BLOCKS));
+
+        // Bundle-path backpressure: when submitting via `eth_sendBundle` the
+        // builder can only land one batch per L1 slot, and a dropped bundle
+        // leaves its blocks unconfirmable forever (their `mix_hash` commits
+        // them to a specific past L1 block). The recovery primitive — anchor
+        // refresh — has a hard depth ceiling (`REORG_SAFETY_THRESHOLD = 48`,
+        // which exists because reth's `MAX_REORG_DEPTH = 64` would otherwise
+        // be exceeded). If catch-up builds faster than bundles confirm, the
+        // pending queue blows past that ceiling and we wedge unrecoverably.
+        //
+        // Cap the target so pending depth can never grow past `MAX_BATCH_SIZE`
+        // ahead of the L1-confirmed anchor. Catch-up still happens — at up to
+        // `MAX_BATCH_SIZE` blocks per L1 slot whenever the relay wins — but
+        // refusal-to-confirm is bounded; one anchor refresh always fits inside
+        // the safety window. Without this cap, even a single drop kicks off
+        // cascading builds that outpace recovery.
+        //
+        // Only applies when `l1_builder_rpc_url` is configured (bundle path).
+        // The legacy `eth_sendRawTransaction` path doesn't have drop-on-miss
+        // semantics, so unbounded catch-up there is fine.
+        if self.config.l1_builder_rpc_url.is_some() {
+            // The constraint we care about is `pending_submissions.len() <=
+            // MAX_BATCH_SIZE`. That keeps anchor refresh inside its safety
+            // window, which keeps the chain recoverable on bundle drops.
+            //
+            // Compute the cap directly off the pending queue rather than off
+            // `l1_confirmed_anchor`, because the anchor field is only updated
+            // by `flush_precheck` after a postBatch lands and it stays `None`
+            // through the entire post-fresh-sync window when the queue is
+            // already empty (head is implicitly L1-confirmed because we just
+            // re-derived from L1 calldata).
+            let pending_room =
+                BUNDLE_PATH_PENDING_CAP.saturating_sub(self.pending_submissions.len() as u64);
+            let bundle_path_cap = self.l2_head_number.saturating_add(pending_room);
+            effective_target = effective_target.min(bundle_path_cap);
+        }
 
         // Nothing to build this tick.
         if self.l2_head_number >= effective_target {

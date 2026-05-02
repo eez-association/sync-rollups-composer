@@ -1,0 +1,122 @@
+# deployments/chiado-10200-public/docker-compose.yml
+# Based Rollup on PUBLIC Chiado testnet (chain ID 10200) with a block-builder RPC
+# for postBatch submissions.
+#
+# This deployment is identical to chiado-10200 except:
+#   - L1_RPC_URL points at the public Chiado RPC (reads).
+#   - L1_BUILDER_RPC_URL points at an `eth_sendBundle`-compatible builder RPC
+#     (writes). Bundles target a specific L1 block; if the targeted block's
+#     proposer is this builder, the tx lands — otherwise the bundle is dropped.
+#     This closes the inclusion-timing race that causes `InvalidProof()` on
+#     public L1 via the standard `eth_sendRawTransaction` path.
+#   - Host ports are offset (96xx → 97xx) so it can run side-by-side with the
+#     shadowfork chiado-10200 deployment.
+#   - Volumes are prefixed `chiado-public-` for the same reason.
+#
+# Prerequisites:
+#   1. Run deploy.sh to deploy contracts and generate rollup-gnosis.env + genesis.json
+#   2. Copy .env.example to .env and fill in secrets + URLs
+#   3. Fund the builder account with Chiado xDAI (obtain from faucet)
+#
+# Usage (from repo root):
+#   docker compose -f deployments/chiado-10200-public/docker-compose.yml --env-file deployments/chiado-10200-public/.env up -d
+#   docker compose -f deployments/chiado-10200-public/docker-compose.yml --env-file deployments/chiado-10200-public/.env logs -f builder
+
+services:
+  # Config seeder — copies rollup-gnosis.env + genesis.json into the shared volume.
+  # Both files are produced by deploy.sh. The genesis.json contains CCM +
+  # builder pre-mint allocations that MUST match what was registered on L1 via
+  # createRollup(); the baseline genesis baked into the image does not.
+  init-config:
+    image: busybox:1.36
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ ! -f /config/rollup-gnosis.env ]; then
+          echo "ERROR: rollup-gnosis.env not found. Run deploy.sh first."
+          exit 1
+        fi
+        if [ ! -f /config/genesis.json ]; then
+          echo "ERROR: genesis.json not found. Run deploy.sh first."
+          exit 1
+        fi
+        if [ ! -f /shared/rollup.env ]; then
+          cp /config/rollup-gnosis.env /shared/rollup.env
+          echo "Seeded /shared/rollup.env from rollup-gnosis.env"
+        else
+          echo "rollup.env already exists in shared volume — skipping"
+        fi
+        if [ ! -f /shared/genesis.json ]; then
+          cp /config/genesis.json /shared/genesis.json
+          echo "Seeded /shared/genesis.json from genesis.json"
+        else
+          echo "genesis.json already exists in shared volume — skipping"
+        fi
+        cat /shared/rollup.env
+    volumes:
+      - ./rollup-gnosis.env:/config/rollup-gnosis.env:ro
+      - ./genesis.json:/config/genesis.json:ro
+      - chiado-public-shared:/shared
+
+  builder:
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: builder
+    build:
+      context: ../..
+      dockerfile: deployments/shared/Dockerfile
+      target: runtime
+    stop_grace_period: 30s
+    volumes:
+      - ../shared/scripts:/app/scripts:ro
+      - chiado-public-shared:/shared
+      - chiado-public-builder-data:/data
+    ports:
+      - "9645:8545"   # L2 JSON-RPC
+      - "9648:8547"   # L2 RPC Proxy
+      - "9656:9556"   # L1 RPC Proxy
+      - "9660:9100"   # Health endpoint
+      - "127.0.0.1:9650:8546"   # L2 WebSocket
+    environment:
+      BLOCK_TIME: "5"
+      BUILDER_PRIVATE_KEY: "${BUILDER_PRIVATE_KEY:?Set BUILDER_PRIVATE_KEY in .env}"
+      L1_RPC_URL: "${GNOSIS_RPC_URL:?Set GNOSIS_RPC_URL in .env — the public Chiado RPC for reads}"
+      L1_BUILDER_RPC_URL: "${L1_BUILDER_RPC_URL:?Set L1_BUILDER_RPC_URL in .env — the eth_sendBundle-compatible builder RPC}"
+      BRIDGE_L1_ADDRESS: "${BRIDGE_L1_ADDRESS:-}"
+      BRIDGE_L2_ADDRESS: "${BRIDGE_L2_ADDRESS:-}"
+      HEALTH_PORT: "${HEALTH_PORT:-9100}"
+      GENESIS: /shared/genesis.json
+    healthcheck:
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+
+  fullnode1:
+    extends:
+      file: ../shared/docker-compose.base.yml
+      service: fullnode
+    stop_grace_period: 30s
+    volumes:
+      - ../shared/scripts:/app/scripts:ro
+      - chiado-public-shared:/shared:ro
+      - chiado-public-fullnode1-data:/data
+    environment:
+      BLOCK_TIME: "5"
+      L1_RPC_URL: "${GNOSIS_RPC_URL:?Set GNOSIS_RPC_URL in .env}"
+      # Fullnode doesn't need L1_BUILDER_RPC_URL — it only reads from L1.
+      GENESIS: /shared/genesis.json
+    ports:
+      - "9646:8545"
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+      builder:
+        condition: service_healthy
+
+volumes:
+  chiado-public-shared:
+  chiado-public-builder-data:
+  chiado-public-fullnode1-data:

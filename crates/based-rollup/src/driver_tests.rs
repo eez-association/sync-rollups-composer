@@ -571,6 +571,7 @@ fn test_backfill_submits_all_blocks() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0x10)),
         encoded_transactions: Bytes::new(), // empty — still submitted
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
     assert!(block.encoded_transactions.is_empty());
     assert_eq!(block.l2_block_number, 10);
@@ -597,6 +598,7 @@ fn test_backfill_includes_deposit_only_blocks_in_sequence() {
                 Bytes::new() // deposit-only: empty body
             },
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -629,6 +631,7 @@ fn test_backfill_all_deposit_only_blocks() {
             )),
             encoded_transactions: Bytes::new(), // all deposit-only
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -655,6 +658,7 @@ fn test_backfill_empty_blocks_prepend_correctly() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(10)),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
 
     // Backfill blocks 7-9 where block 8 is deposit-only
@@ -673,6 +677,7 @@ fn test_backfill_empty_blocks_prepend_correctly() {
                 Bytes::from(vec![0xc0])
             },
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -1026,6 +1031,7 @@ fn test_backfill_prepends_before_existing_pending() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(10)),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
 
     // Simulate backfill of blocks 5-9
@@ -1040,6 +1046,7 @@ fn test_backfill_prepends_before_existing_pending() {
             )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -1169,6 +1176,7 @@ fn test_target_l2_block_from_future_timestamp() {
         builder_mode: true,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: alloy_primitives::Address::ZERO,
@@ -1223,6 +1231,7 @@ fn test_clock_before_deployment_produces_block_zero() {
         builder_mode: true,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: alloy_primitives::Address::ZERO,
@@ -1287,6 +1296,7 @@ fn test_pending_block_state_root_flows_through_submission() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(state_root),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     // State root is preserved through the struct
@@ -1319,6 +1329,7 @@ fn test_timestamp_config_used_consistently() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: alloy_primitives::Address::ZERO,
@@ -1654,6 +1665,7 @@ fn test_reorg_clears_preconfirmed_hashes_and_pending() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0xCC)),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
 
     // Simulate reorg handling
@@ -1686,15 +1698,15 @@ fn test_batch_halving_single_block_does_not_halve_to_zero() {
     );
 
     // Also verify the general halving sequence never reaches 0
-    let mut bs = MAX_BATCH_SIZE; // 100
+    let mut bs = MAX_BATCH_SIZE; // 50
     let mut halving_steps = 0;
     while bs > 1 {
         bs /= 2;
         halving_steps += 1;
     }
     assert_eq!(bs, 1, "halving sequence must terminate at 1, not 0");
-    // 100 -> 50 -> 25 -> 12 -> 6 -> 3 -> 1 = 6 steps
-    assert_eq!(halving_steps, 6);
+    // 50 -> 25 -> 12 -> 6 -> 3 -> 1 = 5 steps
+    assert_eq!(halving_steps, 5);
 }
 
 // --- Iteration 48: apply_rewind clears pending_rewind_target + no-op cases ---
@@ -1869,6 +1881,7 @@ fn test_clear_pending_state_clears_all_fields() {
             )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -1918,6 +1931,7 @@ fn test_clear_pending_state_comprehensive_all_populated() {
             )),
             encoded_transactions: Bytes::from(vec![0xc0, i as u8]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -1973,9 +1987,9 @@ fn test_batch_halving_to_single_block_no_infinite_loop() {
         break;
     }
 
-    // Halving from 100: 50 → 25 → 12 → 6 → 3 → 1 (6 halvings) + 1 final = 7 iterations
+    // Halving from MAX_BATCH_SIZE (50): 25 → 12 → 6 → 3 → 1 (5 halvings) + 1 final = 6 iterations
     assert_eq!(batch_size, 1);
-    assert_eq!(iterations, 7);
+    assert_eq!(iterations, 6);
 }
 
 #[test]
@@ -1993,6 +2007,7 @@ fn test_flush_drops_already_submitted_blocks() {
             )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -2026,6 +2041,7 @@ fn test_flush_drops_all_when_l1_ahead() {
             )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -2872,6 +2888,7 @@ fn test_two_builders_dedup_via_next_l2_block() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::ZERO),
         encoded_transactions: Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
     pending.push_back(PendingBlock {
         l2_block_number: 6,
@@ -2880,6 +2897,7 @@ fn test_two_builders_dedup_via_next_l2_block() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::ZERO),
         encoded_transactions: Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
 
     // Simulate: the other builder already submitted blocks 5 and 6
@@ -3314,6 +3332,7 @@ fn test_pre_state_root_mismatch_with_cross_chain_entries() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0xEE)),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     // On-chain root after block 103 with NO entry consumption
@@ -3335,6 +3354,7 @@ fn test_pre_state_root_mismatch_with_cross_chain_entries() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(y), // clean (without entries)
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     // The flush logic checks both state_root AND clean_state_root (line 1373)
@@ -3420,6 +3440,7 @@ fn test_clear_pending_state_before_rewind_prevents_stale_entries() {
             )),
             encoded_transactions: Bytes::from(vec![0xc0]),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
         preconfirmed_hashes.insert(i, B256::with_last_byte(i as u8));
     }
@@ -3662,6 +3683,7 @@ fn test_builder_continues_building_while_hold_active() {
             )),
             encoded_transactions: alloy_primitives::Bytes::new(),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
 
@@ -3742,6 +3764,7 @@ fn test_full_rewind_cycle_state_transitions() {
             )),
             encoded_transactions: alloy_primitives::Bytes::new(),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
     assert_eq!(pending.len(), 3);
@@ -3776,6 +3799,7 @@ fn test_full_rewind_cycle_state_transitions() {
             )),
             encoded_transactions: alloy_primitives::Bytes::new(),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         });
     }
     // No hold → all 5 blocks can be submitted
@@ -3999,6 +4023,7 @@ fn test_skip_logic_checks_state_root_and_clean_state_root() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(B256::with_last_byte(0xBB)), // clean (no entries)
         encoded_transactions: alloy_primitives::Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     // Full consumption: on-chain matches speculative root
@@ -4058,6 +4083,7 @@ fn test_sibling_reorg_resolves_speculative_divergence_after_4f_filter() {
         clean_state_root: CleanStateRoot::new(clean),
         encoded_transactions: alloy_primitives::Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     let on_chain = clean;
@@ -4094,6 +4120,7 @@ fn test_sibling_reorg_falls_back_to_fcu_rewind_when_no_4f_evidence() {
         clean_state_root: CleanStateRoot::new(root), // same — no §4f filtering possible
         encoded_transactions: alloy_primitives::Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     let on_chain = B256::with_last_byte(0xC0);
@@ -4123,6 +4150,7 @@ fn test_sibling_reorg_falls_back_when_clean_root_does_not_match_on_chain() {
         clean_state_root: CleanStateRoot::new(clean),
         encoded_transactions: alloy_primitives::Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
     let on_chain = B256::with_last_byte(0xD9);
 
@@ -4143,6 +4171,7 @@ fn test_sibling_reorg_decision_is_stable_under_repeated_calls() {
         clean_state_root: CleanStateRoot::new(clean),
         encoded_transactions: alloy_primitives::Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
     let on_chain = clean;
 
@@ -4165,6 +4194,7 @@ fn test_sibling_reorg_halts_beyond_safety_threshold() {
         clean_state_root: CleanStateRoot::new(B256::with_last_byte(0x02)),
         encoded_transactions: alloy_primitives::Bytes::new(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     let decision = decide_divergence_recovery(
@@ -4851,6 +4881,7 @@ fn test_flush_detection_targets_rposition_block_not_earliest() {
         clean_state_root: CleanStateRoot::new(on_chain_root), // MATCH 1 — earliest
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
     pending.push_back(PendingBlock {
         l2_block_number: 101,
@@ -4859,6 +4890,7 @@ fn test_flush_detection_targets_rposition_block_not_earliest() {
         clean_state_root: CleanStateRoot::new(B256::with_last_byte(0xCC)),
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
     pending.push_back(PendingBlock {
         l2_block_number: 200,
@@ -4867,6 +4899,7 @@ fn test_flush_detection_targets_rposition_block_not_earliest() {
         clean_state_root: CleanStateRoot::new(on_chain_root), // MATCH 2 — rightmost
         encoded_transactions: Bytes::from(vec![0xc0]),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     });
 
     let req = find_rightmost_sibling_reorg_target(
@@ -4936,6 +4969,7 @@ fn test_apply_sibling_reorg_plan_mutates_all_fields() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: alloy_primitives::Address::ZERO,
@@ -5003,6 +5037,7 @@ fn test_apply_sibling_reorg_plan_survives_clear_internal_state_sequence() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: alloy_primitives::Address::ZERO,

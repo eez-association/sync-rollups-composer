@@ -1749,6 +1749,7 @@ fn test_pending_block_state_root_matches_execution_entry_delta() {
         clean_state_root: crate::cross_chain::CleanStateRoot::new(post_state_root),
         encoded_transactions: alloy_primitives::Bytes::from(rlp_buf.clone()),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     let entries = build_entries_from_encoded(1, pre_state_root, post_state_root, &rlp_buf);

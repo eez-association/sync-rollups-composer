@@ -1,0 +1,27 @@
+# deployments/chiado-10200-public/docker-compose.explorer.yml — Chiado (public) explorer overrides
+#
+# Ports and volume name are offset from chiado-10200 so both deployments can
+# run simultaneously on the same host.
+#
+# Use together with the shared explorer overlay:
+#
+#   docker compose -f deployments/chiado-10200-public/docker-compose.yml \
+#                  -f deployments/shared/docker-compose.explorer.yml \
+#                  -f deployments/chiado-10200-public/docker-compose.explorer.yml \
+#                  --env-file deployments/chiado-10200-public/.env up -d
+
+services:
+  l2-db:
+    volumes:
+      - chiado-public-l2-db-data:/var/lib/postgresql/data
+
+  l2-explorer:
+    ports:
+      - "4103:4000"   # L2 Explorer API (backend)
+
+  l2-frontend:
+    ports:
+      - "4101:3000"   # L2 Explorer Frontend
+
+volumes:
+  chiado-public-l2-db-data:

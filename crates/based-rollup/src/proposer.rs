@@ -6,8 +6,10 @@
 
 use crate::config::RollupConfig;
 use crate::cross_chain::{CleanStateRoot, CrossChainExecutionEntry};
+use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_network::EthereumWallet;
-use alloy_primitives::Address;
+use alloy_network::eip2718::Encodable2718;
+use alloy_primitives::{Address, TxKind};
 use alloy_primitives::{B256, Bytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer::SignerSync;
@@ -37,6 +39,15 @@ pub struct PendingBlock {
     /// clean root (state without any cross-chain entry txs) and the last root is the
     /// speculative root.
     pub intermediate_roots: Vec<B256>,
+    /// L1 block number stamped into this L2 block's header `mix_hash` at build
+    /// time. Used by the proposer to compute `target_block_number` for bundle
+    /// submission so that the signed `(parent_hash, timestamp)` matches the
+    /// inclusion context of the L1 block where derivation will assign
+    /// `l1_context = l1_context_block`. Without this, `build_proof_context`
+    /// reads a fresh `latest_l1_block` at flush time which has typically
+    /// drifted past the build-time `mix_hash`, producing post-confirmation
+    /// L1-context mismatches.
+    pub l1_context_block: u64,
 }
 
 /// Gas price hint for the postBatch transaction.
@@ -151,12 +162,32 @@ const LOW_BALANCE_THRESHOLD: u128 = 10_000_000_000_000_000;
 
 pub struct Proposer {
     config: Arc<RollupConfig>,
-    /// Type-erased provider with wallet fillers.
+    /// Type-erased provider with wallet fillers. Always points at
+    /// `config.l1_rpc_url` — used for both reads and (when no builder
+    /// RPC is configured) writes via `send_transaction`.
     provider: Box<dyn Provider + Send + Sync>,
     /// The signer for ECDSA proof generation.
     signer: PrivateKeySigner,
     /// The signer address (for balance checks).
     signer_address: Address,
+    /// HTTP client for POSTing `eth_sendBundle` to `config.l1_builder_rpc_url`.
+    /// `None` when no builder RPC is configured; in that case writes go
+    /// through `provider.send_transaction`.
+    builder_http: Option<reqwest::Client>,
+    /// Target L1 block number of the most recent bundle submission.
+    ///
+    /// Set by `send_via_bundle` so that `wait_for_l1_receipt` can use the
+    /// bundle's deterministic drop-on-miss semantics: the tx is either
+    /// included in this exact block or discarded, so we know the outcome
+    /// as soon as `target_block` is produced on L1 (~5s max). This
+    /// eliminates the 120s receipt-poll worst-case for dropped bundles
+    /// and structurally prevents "silent confirm after timeout" drift.
+    ///
+    /// `0` when no bundle has been submitted yet OR the most recent
+    /// submission used the `send_transaction` (non-bundle) path; in
+    /// that case `wait_for_l1_receipt` falls through to the legacy
+    /// time-bounded polling loop.
+    last_bundle_target: std::sync::atomic::AtomicU64,
 }
 
 impl Proposer {
@@ -174,11 +205,24 @@ impl Proposer {
             .wallet(wallet)
             .connect_http(config.l1_rpc_url.parse()?);
 
+        let builder_http = if config.l1_builder_rpc_url.is_some() {
+            Some(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .map_err(|e| eyre::eyre!("failed to build builder HTTP client: {e}"))?,
+            )
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             provider: Box::new(provider),
             signer,
             signer_address,
+            builder_http,
+            last_bundle_target: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -257,12 +301,39 @@ impl Proposer {
     /// "what goes into the hash" from "how the hash is signed".
     /// Introduced in PLAN §8 step 1.8 so that `sign_proof` has a
     /// named, typed input struct (closes invariant #22).
+    ///
+    /// `anchor_l1_block_hint`: if `Some(N)`, build the proof targeting
+    /// L1 block `N + 1` and fetch hash/timestamp of block `N` directly,
+    /// rather than reading the current L1 latest. Used when submitting
+    /// a batch whose blocks were stamped with `mix_hash = N` at build
+    /// time — keeps the signed `(parent_hash, timestamp)` consistent
+    /// with what derivation will assign as `l1_context = N` once the
+    /// batch lands at L1 block `N + 1`. Without this hint, fresh
+    /// `latest_l1_block` would have drifted past `N` (especially during
+    /// catchup), the bundle would target `latest+1 ≠ N+1`, and the
+    /// post-confirmation verify path would detect an L1-context
+    /// mismatch and force a sibling reorg.
     async fn build_proof_context(
         &self,
         entries: &[CrossChainExecutionEntry],
+        anchor_l1_block_hint: Option<u64>,
     ) -> Result<ProofContext> {
         let vk = self.verification_key().await?;
-        let (latest_number, latest_hash, latest_timestamp) = self.latest_l1_block().await?;
+        let (latest_number, latest_hash, latest_timestamp) = match anchor_l1_block_hint {
+            Some(n) => {
+                let block = self
+                    .provider
+                    .get_block_by_number(n.into())
+                    .await?
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "anchor L1 block {n} not yet available on RPC for proof context"
+                        )
+                    })?;
+                (n, block.header.hash, block.header.timestamp)
+            }
+            None => self.latest_l1_block().await?,
+        };
         // Predict the next block's timestamp.
         // On L1 with fixed block time (e.g., reth --dev.block-time=12s):
         //   next_ts = latest_ts + block_time
@@ -345,8 +416,13 @@ impl Proposer {
     /// Must cover at least one L1 block time to avoid submitting the
     /// next batch before the current one is confirmed.
     /// 15 × 2s = 30s — covers 2.5 Ethereum blocks (12s) or 6 Gnosis/Chiado
-    /// blocks (5s). The previous value of 7 (14s) was too tight for real
-    /// 5-second Gnosis/Chiado block times under any RPC latency.
+    /// blocks (5s).
+    ///
+    /// Only used on the legacy `eth_sendRawTransaction` path. On the
+    /// bundle-RPC path (`wait_for_bundle_outcome`) the outcome is
+    /// determined by whether the bundle's `target_block` contains the
+    /// tx — that check resolves in ≤ one L1 slot regardless of drop
+    /// rate, so no wide poll window is needed.
     const RECEIPT_POLL_ATTEMPTS: u32 = 15;
 
     /// Delay between receipt polling attempts.
@@ -407,9 +483,34 @@ impl Proposer {
         ))
     }
 
-    /// Maximum estimated calldata gas per batch. Set conservatively below
-    /// typical L1 block gas limits (~30M) to leave room for intrinsic gas.
-    const MAX_CALLDATA_GAS: u64 = 12_000_000;
+    /// Maximum estimated calldata gas per batch. Must be small enough that
+    /// `MAX_CALLDATA_GAS + execution overhead` fits within `POST_BATCH_GAS_LIMIT`,
+    /// which in turn must sit below the L1 block gas limit.
+    const MAX_CALLDATA_GAS: u64 = 7_000_000;
+
+    /// Explicit gas limit for `postBatch` transactions. Set on the tx so that
+    /// alloy's filler chain skips `eth_estimateGas` before broadcast.
+    ///
+    /// Why skip estimation: `publicInputsHash` commits to `block.timestamp`,
+    /// which the builder predicts as `latest_ts + block_time`. Some L1 RPC
+    /// nodes (observed on Chiado 2026-04-22) run `eth_call`/`eth_estimateGas`
+    /// with `block.timestamp = latest_ts` instead of the pending-slot
+    /// timestamp. Under that policy every estimation reverts with
+    /// `InvalidProof()` and the tx never reaches the mempool — deterministic
+    /// 100% failure despite the proof being valid for the real mined block.
+    /// Supplying a gas limit here bypasses estimation so the tx is broadcast;
+    /// mining then uses the actual next-slot `block.timestamp`, which matches
+    /// what we signed.
+    ///
+    /// Sizing: must sit below the L1 block gas limit, or RPC nodes reject
+    /// with `-32000 exceeds block gas limit` pre-mempool. Observed Chiado
+    /// block gas limit ~12.5M (dropping slowly via EIP-1559 elastic target);
+    /// 10M gives headroom for future drops while still comfortably covering
+    /// MAX_CALLDATA_GAS (7M) + ~2-3M execution overhead. For L1s with
+    /// consistently smaller block gas limits this needs to be reduced.
+    /// TODO: dynamic sizing that reads the current L1 block gas limit and
+    /// caps to `block_gas_limit - safety_margin`, removing the hardcode.
+    const POST_BATCH_GAS_LIMIT: u64 = 10_000_000;
 
     /// Submit L2 blocks and optionally cross-chain execution entries to L1
     /// via `postBatch()`. Blocks are aggregated into a single immediate entry
@@ -468,7 +569,17 @@ impl Proposer {
         // next timestamp, computes entry hashes) and sign. The
         // `ProofContext` separation closes invariant #22 by giving
         // `block_timestamp` a named field on the input struct.
-        let proof_ctx = self.build_proof_context(&all_entries).await?;
+        //
+        // When the first pending block carries an `l1_context_block` (set at
+        // build time to the `mix_hash` L1 block number it was stamped with),
+        // anchor the proof context to that block: target = anchor + 1, parent
+        // hash and timestamp fetched for `anchor`. This keeps the signed
+        // `(parent_hash, timestamp)` consistent with the L1 context that
+        // derivation will assign when the batch lands. Falls back to fresh
+        // `latest_l1_block` for tests / single-pending-cross-chain-only paths
+        // where no `PendingBlock` is involved.
+        let anchor_hint = blocks.first().map(|b| b.l1_context_block);
+        let proof_ctx = self.build_proof_context(&all_entries, anchor_hint).await?;
         let proof = self.sign_proof(&proof_ctx, &call_data)?;
 
         let calldata =
@@ -488,7 +599,8 @@ impl Proposer {
 
         let mut tx = alloy_rpc_types::TransactionRequest::default()
             .to(self.config.rollups_address)
-            .input(calldata.into());
+            .input(calldata.into())
+            .gas_limit(Self::POST_BATCH_GAS_LIMIT);
 
         if let Some(hint) = &gas_price_hint {
             tx = tx
@@ -503,12 +615,29 @@ impl Proposer {
             );
         }
 
-        let pending = self.provider.send_transaction(tx).await.map_err(|err| {
-            warn!(target: "based_rollup::proposer", %err, "failed to submit to L1");
-            eyre::eyre!(err)
-        })?;
-
-        let tx_hash = *pending.tx_hash();
+        let tx_hash = if let (Some(http), Some(url)) = (
+            self.builder_http.as_ref(),
+            self.config.l1_builder_rpc_url.as_deref(),
+        ) {
+            // Builder-RPC / bundle mode: construct, sign, and send via
+            // `eth_sendBundle` targeting `proof_ctx.target_block_number`.
+            // Bundle is either included in that block or silently dropped —
+            // matching the proof's committed `(parent_hash, timestamp)`.
+            self.send_via_bundle(&tx, proof_ctx.target_block_number, http, url)
+                .await
+                .map_err(|err| {
+                    warn!(target: "based_rollup::proposer", %err, "failed to submit bundle to builder RPC");
+                    err
+                })?
+        } else {
+            // Standard `eth_sendRawTransaction` path: tx enters public mempool
+            // and lands in whichever block the next proposer picks it up in.
+            let pending = self.provider.send_transaction(tx).await.map_err(|err| {
+                warn!(target: "based_rollup::proposer", %err, "failed to submit to L1");
+                eyre::eyre!(err)
+            })?;
+            *pending.tx_hash()
+        };
         if !blocks.is_empty() {
             let first = blocks.first().expect("non-empty").l2_block_number;
             let last = blocks.last().expect("non-empty").l2_block_number;
@@ -532,11 +661,282 @@ impl Proposer {
         Ok(tx_hash)
     }
 
+    /// Construct, sign, and submit the postBatch transaction via
+    /// `eth_sendBundle` to a block-builder RPC.
+    ///
+    /// Unlike `eth_sendRawTransaction`, `eth_sendBundle` targets a specific L1
+    /// block number: the builder either includes the tx in that block (if it
+    /// is the proposer for that slot and the tx fits) or silently drops the
+    /// bundle. Nothing ever lingers in a mempool to be picked up by a later
+    /// block. That guarantees the signed `(parent_hash, block.timestamp)` in
+    /// `publicInputsHash` matches the actual inclusion context, closing the
+    /// timing race where `eth_sendRawTransaction` can land the tx 1+ blocks
+    /// later than the builder predicted.
+    ///
+    /// When the bundle is dropped, the existing receipt-timeout path in the
+    /// driver re-queues the pending blocks and retries on the next tick with
+    /// a fresh `latest_l1_block`. Nonce is not consumed on drop (the tx never
+    /// mines), so retries use the same nonce value.
+    async fn send_via_bundle(
+        &self,
+        tx: &alloy_rpc_types::TransactionRequest,
+        target_block_number: u64,
+        http: &reqwest::Client,
+        url: &str,
+    ) -> Result<B256> {
+        // Fill in any fields not already supplied by the caller.
+        let chain_id = self.provider.get_chain_id().await?;
+        let nonce = self
+            .provider
+            .get_transaction_count(self.signer_address)
+            .pending()
+            .await?;
+
+        // Cap on `max_priority_fee_per_gas`. EIP-1559 validation requires the
+        // sender's balance to cover `gas_limit * max_fee_per_gas + value`
+        // BEFORE the tx executes — even if `gas_used` and the actual base fee
+        // would charge a fraction of that. With our `gas_limit = 10_000_000`,
+        // any priority fee above ~50 gwei pushes the budget past 0.5 xDAI; on
+        // Chiado, `eth_maxPriorityFeePerGas` has been observed returning
+        // ~230 gwei, which forces a 2.3 xDAI minimum balance just to be
+        // accepted by the L1 mempool / bundle relay. Builder wallets
+        // typically hold ≤2 xDAI, so the tx is silently rejected as invalid
+        // by validators (no error returned to us by the relay's `result:null`
+        // ack).
+        //
+        // 5 gwei is well above the practical Chiado floor (probes land with
+        // 2 gwei) and keeps the worst-case fee budget at
+        // `10_000_000 * 5 gwei = 0.05 xDAI`, two orders of magnitude under
+        // any reasonable builder balance. base_fee is ~0 on Chiado so this
+        // dominates `max_fee`.
+        const PRIORITY_FEE_CAP: u128 = 5_000_000_000; // 5 gwei
+
+        // Gas price: prefer caller's hint, else fetch latest from node.
+        let (max_fee_per_gas, max_priority_fee_per_gas) =
+            match (tx.max_fee_per_gas, tx.max_priority_fee_per_gas) {
+                (Some(m), Some(p)) => (m.min(PRIORITY_FEE_CAP * 2), p.min(PRIORITY_FEE_CAP)),
+                _ => {
+                    let max_priority_fee = self
+                        .provider
+                        .get_max_priority_fee_per_gas()
+                        .await
+                        .unwrap_or(1_000_000_000)
+                        .min(PRIORITY_FEE_CAP);
+                    let latest = self
+                        .provider
+                        .get_block_by_number(alloy_rpc_types::BlockNumberOrTag::Latest)
+                        .await?
+                        .ok_or_else(|| eyre::eyre!("failed to fetch latest L1 block for gas"))?;
+                    let base_fee = latest.header.base_fee_per_gas.unwrap_or(0) as u128;
+                    // max_fee = 2 * base_fee + priority_fee (standard formula).
+                    let max_fee = base_fee.saturating_mul(2).saturating_add(max_priority_fee);
+                    (max_fee, max_priority_fee)
+                }
+            };
+
+        let gas_limit = tx.gas.unwrap_or(Self::POST_BATCH_GAS_LIMIT);
+
+        let input_bytes = tx.input.input.as_ref().cloned().unwrap_or_default();
+
+        let to_address = match tx.to {
+            Some(TxKind::Call(addr)) => addr,
+            _ => {
+                return Err(eyre::eyre!(
+                    "send_via_bundle expects a call tx with a `to` address"
+                ));
+            }
+        };
+
+        let unsigned = TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to: TxKind::Call(to_address),
+            value: U256::ZERO,
+            input: input_bytes,
+            access_list: Default::default(),
+        };
+
+        let sig_hash = unsigned.signature_hash();
+        let sig = self.signer.sign_hash_sync(&sig_hash)?;
+        // `into_signed` computes and caches the tx hash (keccak256 of the
+        // 2718-encoded tx). Using `Signed::new_unchecked(.., Default::default())`
+        // would store a zero hash — the receipt poll would then never match
+        // any real tx.
+        let signed = unsigned.into_signed(sig);
+        let envelope = TxEnvelope::Eip1559(signed);
+        let raw_bytes = envelope.encoded_2718();
+        let tx_hash = *envelope.tx_hash();
+
+        let raw_hex = format!("0x{}", alloy_primitives::hex::encode(&raw_bytes));
+        let target_hex = format!("0x{:x}", target_block_number);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_sendBundle",
+            "params": [{
+                "txs": [raw_hex],
+                "blockNumber": target_hex,
+            }],
+        });
+
+        let resp = http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("builder RPC request failed: {e}"))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| eyre::eyre!("builder RPC read body failed: {e}"))?;
+
+        if !status.is_success() {
+            return Err(eyre::eyre!("builder RPC returned HTTP {status}: {text}"));
+        }
+
+        // Parse JSON-RPC response. An `error` field means the bundle was
+        // rejected outright (e.g. malformed). A `result` field (usually
+        // `null` for rbuilder) means the bundle was accepted; whether it
+        // actually lands in the target block is decided at sealing time.
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| eyre::eyre!("builder RPC response not JSON: {e} (body: {text})"))?;
+        if let Some(err) = parsed.get("error") {
+            return Err(eyre::eyre!("builder RPC error: {err}"));
+        }
+
+        // Record the target so `wait_for_l1_receipt` can use bundle-aware
+        // inclusion check (drop-on-miss semantics) instead of open-ended
+        // receipt polling.
+        self.last_bundle_target
+            .store(target_block_number, std::sync::atomic::Ordering::Relaxed);
+
+        info!(
+            target: "based_rollup::proposer",
+            %tx_hash,
+            target_block = target_block_number,
+            url,
+            "submitted bundle to builder RPC"
+        );
+
+        Ok(tx_hash)
+    }
+
+    /// Wait for the outcome of a bundle submitted via `eth_sendBundle`.
+    ///
+    /// Exploits the builder RPC's drop-on-miss semantics: a bundle is
+    /// either included in the `target_block` it was submitted for, or
+    /// dropped entirely (never retained for later blocks). So the
+    /// outcome is determined the moment `target_block` is produced on L1.
+    /// This yields:
+    ///   - ≤ one L1 slot of wait on drops (vs. the 30–120s receipt-poll
+    ///     window used for arbitrary mempool submissions),
+    ///   - zero "silent confirm after poll timeout" drift — the tx
+    ///     either shows up in the target block or is known-dropped
+    ///     instantly.
+    ///
+    /// Errors and their meanings for the driver:
+    ///   - `Err` with "reverted" in message → tx landed but `_verifyProof`
+    ///     (or similar) reverted on-chain. Caller rewinds to anchor and
+    ///     re-derives.
+    ///   - `Err` with "dropped" in message → bundle didn't land; nonce
+    ///     NOT consumed. Caller re-queues blocks and retries next tick.
+    ///     (Falls into `flush.rs`'s "timeout" branch, which already
+    ///     handles this correctly: re-queue + reset_nonce_unsolicited.)
+    async fn wait_for_bundle_outcome(&self, tx_hash: B256, target_block: u64) -> Result<u64> {
+        const SLOT_MS: u64 = 500;
+        const MAX_WAIT_SECS: u64 = 15; // generous vs. 5s Chiado slot — tolerates one missed slot
+        let deadline = std::time::Instant::now() + Duration::from_secs(MAX_WAIT_SECS);
+
+        // Step 1: wait for target_block to exist on L1.
+        loop {
+            let latest = match self.provider.get_block_number().await {
+                Ok(n) => n,
+                Err(err) => {
+                    warn!(target: "based_rollup::proposer", %err, "RPC failure while waiting for target L1 block, retrying");
+                    tokio::time::sleep(Duration::from_millis(SLOT_MS)).await;
+                    if std::time::Instant::now() >= deadline {
+                        return Err(eyre::eyre!(
+                            "bundle outcome wait: RPC unavailable past deadline (target_block={target_block}, tx_hash={tx_hash})"
+                        ));
+                    }
+                    continue;
+                }
+            };
+            if latest >= target_block {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(SLOT_MS)).await;
+            if std::time::Instant::now() >= deadline {
+                return Err(eyre::eyre!(
+                    "bundle outcome wait: target_block {target_block} not produced within {MAX_WAIT_SECS}s (latest={latest}, tx_hash={tx_hash}) — bundle dropped"
+                ));
+            }
+        }
+
+        // Step 2: fetch target block and check if our tx is in it.
+        let block = self
+            .provider
+            .get_block_by_number(target_block.into())
+            .full()
+            .await
+            .map_err(|e| eyre::eyre!("failed to fetch target L1 block {target_block}: {e}"))?
+            .ok_or_else(|| eyre::eyre!("target L1 block {target_block} unexpectedly missing"))?;
+
+        let included = block.transactions.hashes().any(|h| h == tx_hash);
+
+        if !included {
+            return Err(eyre::eyre!(
+                "postBatch bundle dropped (tx_hash={tx_hash} not in target_block={target_block})"
+            ));
+        }
+
+        // Step 3: landed — fetch receipt to distinguish success vs revert.
+        let receipt = self
+            .provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|e| eyre::eyre!("failed to fetch receipt for included tx {tx_hash}: {e}"))?
+            .ok_or_else(|| eyre::eyre!(
+                "bundle tx {tx_hash} is in block {target_block} but receipt is missing (chain reorg?)"
+            ))?;
+
+        if receipt.status() {
+            info!(
+                target: "based_rollup::proposer",
+                %tx_hash,
+                l1_block_number = target_block,
+                "postBatch confirmed on L1"
+            );
+            Ok(target_block)
+        } else {
+            Err(eyre::eyre!(
+                "postBatch reverted on L1 (tx_hash={tx_hash}, block={target_block})"
+            ))
+        }
+    }
+
     /// Wait for an L1 transaction to be mined and confirmed.
     /// Called after [`send_to_l1`] and after forwarding queued L1 txs.
+    ///
+    /// Branches on submission mode:
+    ///   - If the most recent submission used `send_via_bundle`, uses
+    ///     `wait_for_bundle_outcome` (drop-on-miss semantics, ≤ one L1 slot).
+    ///   - Otherwise (eth_sendRawTransaction via alloy send_transaction),
+    ///     falls through to the legacy time-bounded receipt poll.
     pub async fn wait_for_l1_receipt(&self, tx_hash: B256) -> Result<u64> {
-        let (_tx_hash, l1_block) = self.wait_for_receipt(tx_hash, "postBatch").await?;
-        Ok(l1_block)
+        let target = self
+            .last_bundle_target
+            .swap(0, std::sync::atomic::Ordering::Relaxed);
+        if target > 0 {
+            self.wait_for_bundle_outcome(tx_hash, target).await
+        } else {
+            let (_tx_hash, l1_block) = self.wait_for_receipt(tx_hash, "postBatch").await?;
+            Ok(l1_block)
+        }
     }
 
     /// Convenience wrapper: send postBatch and wait for confirmation in one call.

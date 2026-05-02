@@ -27,6 +27,7 @@ use super::types::{
     compute_forkchoice_state, submit_sibling_payload,
 };
 use alloy_primitives::{B256, Bytes};
+use alloy_provider::Provider;
 use eyre::{Result, WrapErr};
 use reth_provider::{
     BlockHashReader, BlockNumReader, DatabaseProviderFactory, HeaderProvider,
@@ -423,5 +424,239 @@ where
         self.broadcast_sibling_reorg(target, sibling_hash);
 
         Ok(built)
+    }
+
+    /// Rebuild a previously-built (but L1-unconfirmed) L2 block as a sibling
+    /// stamped with the *current* L1 head as `mix_hash`, then drive the engine
+    /// fork choice to that sibling so reth wipes every block past the target.
+    ///
+    /// This is the recovery primitive for the **stale-bundle-anchor** failure
+    /// mode on public L1 with `eth_sendBundle`:
+    ///
+    /// 1. Block N built when L1 was at height H → its `mix_hash = H`.
+    /// 2. Bundle targets `H + 1`. Builder doesn't win that slot, bundle drops.
+    /// 3. L1 advances to `H + k` (k > 0). Block N stays at the front of
+    ///    `pending_submissions`; every subsequent flush re-targets `H + 1`,
+    ///    which is now in the past, and the bundle drops on every retry.
+    ///
+    /// Bare FCU rewind cannot fix this on reth Ethereum engine kind (silent
+    /// no-op per Engine API spec), and the existing `rebuild_block_as_sibling`
+    /// path needs an `expected_root` derived from a prior L1 confirmation —
+    /// neither precondition holds here.
+    ///
+    /// This method instead:
+    /// - Fetches the current L1 head (number, hash) and computes the target
+    ///   block's deterministic timestamp.
+    /// - Re-runs `build_builder_protocol_txs` with the fresh L1 context, which
+    ///   produces a different `mix_hash` (and thus a different state root and
+    ///   block hash) than the canonical block at the same height.
+    /// - Submits the rebuilt block via `submit_sibling_payload` (newPayloadV3 +
+    ///   forkchoiceUpdatedV3 on the sibling hash). Reth wipes every block above
+    ///   `target` from the canonical chain.
+    /// - Replaces `pending_submissions` with this single fresh-anchor block, so
+    ///   the next `flush_to_l1` submits a bundle targeting `current_l1 + 1` and
+    ///   the chain progresses.
+    ///
+    /// On success the driver's `head_hash`, `l2_head_number`, `block_hashes`,
+    /// `builder_l2_nonce`, and derivation cursor are updated to reflect the
+    /// new canonical tip. On failure, no driver state is mutated and the
+    /// caller's `pending_anchor_refresh` request stays in place for retry on
+    /// the next tick.
+    pub(crate) async fn rebuild_with_fresh_l1_context(
+        &mut self,
+        target_l2_block: u64,
+    ) -> Result<()> {
+        if target_l2_block == 0 {
+            eyre::bail!("cannot anchor-refresh genesis (target_l2_block=0)");
+        }
+        let parent_block_number = target_l2_block - 1;
+
+        // Fetch the parent header — this is what `build_derived_block` will
+        // attach the sibling to. Must exist locally (we never anchor-refresh a
+        // block that hasn't been built yet).
+        let parent_header = self
+            .l2_provider
+            .sealed_header(parent_block_number)
+            .wrap_err("anchor refresh: failed to read parent header")?
+            .ok_or_else(|| {
+                eyre::eyre!("anchor refresh: parent block {parent_block_number} not in DB")
+            })?;
+        let parent_hash = parent_header.hash();
+
+        // Read the parent's account state to recover the builder's L2 nonce at
+        // the rebuild point. After reth wipes blocks past `target`, this is
+        // the nonce the builder must sign protocol txs against. Without this
+        // step `build_builder_protocol_txs` would advance from the post-head
+        // value (much higher) and the resulting protocol txs would be rejected.
+        if !self.config.builder_address.is_zero() {
+            let state = self
+                .l2_provider
+                .state_by_block_hash(parent_hash)
+                .wrap_err("anchor refresh: failed to get state at parent")?;
+            use reth_provider::AccountReader;
+            self.builder_l2_nonce = state
+                .basic_account(&self.config.builder_address)
+                .wrap_err("anchor refresh: failed to read builder account")?
+                .map(|acct| acct.nonce)
+                .unwrap_or(0);
+        }
+
+        // Fetch the current L1 head as the new anchor.
+        let l1_provider = self.get_l1_provider().clone();
+        let latest_l1 = l1_provider
+            .get_block_number()
+            .await
+            .wrap_err("anchor refresh: failed to read L1 head")?;
+        let l1_block = l1_provider
+            .get_block_by_number(latest_l1.into())
+            .await
+            .wrap_err("anchor refresh: failed to fetch L1 head block")?
+            .ok_or_else(|| eyre::eyre!("anchor refresh: L1 block {latest_l1} not found"))?;
+        let l1_block_number = latest_l1;
+        let l1_block_hash = l1_block.header.hash;
+
+        // Deterministic L2 timestamp for the target block.
+        let timestamp = self
+            .config
+            .l2_timestamp_checked(target_l2_block)
+            .ok_or_else(|| {
+                eyre::eyre!("anchor refresh: timestamp overflow for L2 block {target_l2_block}")
+            })?;
+
+        info!(
+            target: "based_rollup::driver",
+            target_l2_block,
+            old_head = self.l2_head_number,
+            old_head_hash = %self.head_hash,
+            new_l1_block = l1_block_number,
+            new_l1_hash = %l1_block_hash,
+            builder_nonce = self.builder_l2_nonce,
+            "anchor refresh: rebuilding block with fresh L1 context"
+        );
+
+        // Build the rebuilt block's protocol-tx payload. We pass empty
+        // execution_entries because the rebuild is a chain-recovery action,
+        // not a vehicle for delivering cross-chain entries — those are
+        // re-derived/re-fetched on subsequent ticks.
+        let derived_transactions = self
+            .build_builder_protocol_txs(
+                target_l2_block,
+                timestamp,
+                l1_block_hash,
+                l1_block_number,
+                &[],
+                usize::MAX,
+            )
+            .wrap_err("anchor refresh: build_builder_protocol_txs failed")?;
+
+        debug!(
+            target: "based_rollup::driver",
+            target_l2_block,
+            tx_payload_len = derived_transactions.len(),
+            "anchor refresh: protocol txs built, calling build_derived_block"
+        );
+
+        // Build the sibling block. No `expected_root` check: by definition
+        // the new block has a different mix_hash than the chain's current
+        // block at this height, so a different state_root is *required* for
+        // the sibling reorg to take effect.
+        let (built, execution_data) = self
+            .build_derived_block(
+                parent_block_number,
+                timestamp,
+                l1_block_hash,
+                l1_block_number,
+                &derived_transactions,
+            )
+            .wrap_err_with(|| {
+                format!(
+                    "anchor refresh: build_derived_block failed for L2 block {target_l2_block} \
+                     (parent={parent_block_number}, l1_block={l1_block_number}, \
+                     l1_hash={l1_block_hash}, ts={timestamp})"
+                )
+            })?;
+
+        let sibling_hash = built.hash;
+
+        // Pre-populate the parent-hash deque (same shape as
+        // `rebuild_block_as_sibling`).
+        let mut parent_hashes: VecDeque<B256> = VecDeque::new();
+        let start = parent_block_number.saturating_sub(FORK_CHOICE_DEPTH as u64);
+        for n in start..=parent_block_number {
+            if let Ok(Some(h)) = self.l2_provider.block_hash(n) {
+                parent_hashes.push_back(h);
+            }
+        }
+
+        info!(
+            target: "based_rollup::driver",
+            target_l2_block,
+            parent = parent_block_number,
+            old_head = self.l2_head_number,
+            %sibling_hash,
+            tx_count = built.tx_count,
+            "anchor refresh: submitting sibling payload to engine"
+        );
+
+        let outcome =
+            submit_sibling_payload(&self.engine, execution_data, sibling_hash, &parent_hashes)
+                .await
+                .wrap_err("anchor refresh: submit_sibling_payload failed")?;
+
+        let old_head = self.l2_head_number;
+        let old_hash = self.head_hash;
+
+        // Engine accepted the sibling; mutate driver state to match the new
+        // canonical tip. Reth has wiped every committed block above
+        // `target_l2_block` — the driver's view must match.
+        self.block_hashes = outcome.new_hashes;
+        self.head_hash = sibling_hash;
+        self.l2_head_number = target_l2_block;
+
+        // Drop everything that was built on top of (or alongside) the wiped
+        // blocks. The replaced PendingBlock is queued below.
+        self.clear_internal_state();
+
+        // Reset the derivation cursor so `derive_and_verify_from_l1` does not
+        // try to re-derive blocks at or below the new head. Any L1 batch we
+        // had not yet consumed past this point will be re-processed on the
+        // next tick against the fresh head.
+        self.derivation.set_last_derived_l2_block(target_l2_block);
+
+        // Re-read the builder's L2 nonce from the new head's state. The
+        // protocol-tx build above mutated `builder_l2_nonce` in lock-step with
+        // the txs it produced; this just confirms the chain agrees.
+        self.recover_builder_l2_nonce();
+
+        // Queue the rebuilt block for L1 submission. `clean_state_root` =
+        // `state_root` because no cross-chain entries were processed.
+        // `intermediate_roots` is empty for the same reason.
+        self.pending_submissions
+            .push_back(crate::proposer::PendingBlock {
+                l2_block_number: target_l2_block,
+                pre_state_root: built.pre_state_root,
+                state_root: built.state_root,
+                clean_state_root: crate::cross_chain::CleanStateRoot::new(built.state_root),
+                encoded_transactions: built.encoded_transactions.clone(),
+                intermediate_roots: Vec::new(),
+                l1_context_block: l1_block_number,
+            });
+
+        info!(
+            target: "based_rollup::driver",
+            target_l2_block,
+            old_head,
+            %old_hash,
+            new_hash = %sibling_hash,
+            new_l1_anchor = l1_block_number,
+            "anchor refresh: completed — chain rewound to single fresh block"
+        );
+
+        // Notify any subscribed fullnodes that everything past `target` was
+        // invalidated. Reuses the existing `BlockInvalidated` channel, same as
+        // the issue-#36 sibling-reorg path.
+        self.broadcast_sibling_reorg(target_l2_block, sibling_hash);
+
+        Ok(())
     }
 }

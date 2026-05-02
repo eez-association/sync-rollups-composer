@@ -287,6 +287,7 @@ fn test_config(
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -899,6 +900,7 @@ async fn test_derived_timestamps_are_deterministic() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -1031,6 +1033,7 @@ async fn test_derive_against_dead_rpc_returns_error() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: Address::ZERO,
@@ -1068,6 +1071,7 @@ async fn test_detect_reorg_against_dead_rpc_returns_error() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address: Address::ZERO,
@@ -1125,6 +1129,7 @@ async fn test_proposer_submits_to_l1() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -1153,6 +1158,7 @@ async fn test_proposer_submits_to_l1() {
         ),
         encoded_transactions: payload.clone(),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
     proposer.submit_to_l1(&[pending_block], &[]).await.unwrap();
 
@@ -1172,6 +1178,7 @@ async fn test_proposer_submits_to_l1() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -1228,6 +1235,7 @@ async fn test_proposer_batch_submit() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -1256,6 +1264,7 @@ async fn test_proposer_batch_submit() {
             ),
             encoded_transactions: Bytes::from_static(b"batch1"),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
         PendingBlock {
             l2_block_number: 2,
@@ -1266,6 +1275,7 @@ async fn test_proposer_batch_submit() {
             ),
             encoded_transactions: Bytes::from_static(b"batch2"),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
         PendingBlock {
             l2_block_number: 3,
@@ -1276,6 +1286,7 @@ async fn test_proposer_batch_submit() {
             ),
             encoded_transactions: Bytes::from_static(b"batch3"),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         },
     ];
     proposer.submit_to_l1(&batch, &[]).await.unwrap();
@@ -1303,6 +1314,7 @@ async fn test_proposer_batch_submit() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -2315,6 +2327,7 @@ async fn test_proposer_reads_state_root_after_submissions() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -2347,6 +2360,7 @@ async fn test_proposer_reads_state_root_after_submissions() {
             ),
             encoded_transactions: Bytes::new(),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
 
@@ -2478,6 +2492,7 @@ async fn test_derived_block_timestamps() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -2690,6 +2705,7 @@ async fn test_concurrent_proposer_submissions() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -2717,6 +2733,7 @@ async fn test_concurrent_proposer_submissions() {
             "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -2744,6 +2761,7 @@ async fn test_concurrent_proposer_submissions() {
         ),
         encoded_transactions: Bytes::from_static(b"race"),
         intermediate_roots: vec![],
+        l1_context_block: 0,
     };
 
     // Disable automine so both txs land in the same block
@@ -2826,6 +2844,7 @@ async fn test_large_batch_chunking() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -2860,6 +2879,7 @@ async fn test_large_batch_chunking() {
                 ),
                 encoded_transactions: Bytes::from(format!("chunk_{n}").into_bytes()),
                 intermediate_roots: vec![],
+                l1_context_block: 0,
             })
             .collect();
         proposer.submit_to_l1(&chunk, &[]).await.unwrap();
@@ -3052,6 +3072,7 @@ async fn test_proposer_backfill_from_local_chain() {
                 "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
             ),
             l1_rpc_url_fallback: None,
+            l1_builder_rpc_url: None,
             builder_ws_url: None,
             health_port: 0,
             rollups_address,
@@ -3080,6 +3101,7 @@ async fn test_proposer_backfill_from_local_chain() {
             ),
             encoded_transactions: Bytes::from(format!("p1_block_{n}").into_bytes()),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
     proposer1.submit_to_l1(&batch1, &[]).await.unwrap();
@@ -3119,6 +3141,7 @@ async fn test_proposer_backfill_from_local_chain() {
             ),
             encoded_transactions: Bytes::from(format!("p2_block_{n}").into_bytes()),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
     proposer2.submit_to_l1(&batch2, &[]).await.unwrap();
@@ -3665,6 +3688,7 @@ async fn test_proposer_max_batch_size() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -3693,6 +3717,7 @@ async fn test_proposer_max_batch_size() {
             ),
             encoded_transactions: Bytes::from(format!("prop_max_{n}").into_bytes()),
             intermediate_roots: vec![],
+            l1_context_block: 0,
         })
         .collect();
 
@@ -4340,6 +4365,7 @@ fn test_config_with_crosschain(
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -4601,6 +4627,7 @@ async fn test_proposer_submits_cross_chain_batch() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -4838,6 +4865,7 @@ async fn test_proposer_check_wallet_balance() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -5934,6 +5962,7 @@ async fn test_proposer_signer_address_and_balance() {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
         ),
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
@@ -6231,6 +6260,7 @@ async fn test_cross_chain_full_e2e_counter_increment() {
         builder_mode: false,
         builder_private_key: None,
         l1_rpc_url_fallback: None,
+        l1_builder_rpc_url: None,
         builder_ws_url: None,
         health_port: 0,
         rollups_address,
