@@ -398,9 +398,27 @@ impl Direction for L2ToL1 {
             // Two-step enrichment (matches inline loop behavior):
             // Step 1: Direct L1 call — fast, captures non-protocol results.
             // Step 2: Full simulate_l1_delivery — only on protocol error.
+            //
+            // For Step 1's `from`, use the L1 cross-chain proxy of the L2 sender —
+            // this matches the real `_processCallAtScope` traversal where the proxy
+            // does `executeOnBehalf(destination, calldata)`. Calling with the raw
+            // L2 sender address fails `onlyBridgeProxy`-style modifiers with
+            // UnauthorizedCaller (`0x5c427cd9`), which would be misclassified as a
+            // business-logic failure. Falls back to the raw L2 sender if the proxy
+            // lookup fails — that preserves prior behavior for non-protected
+            // destinations. (issue #46)
+            let from_address = super::delivery::compute_proxy_address_on_l1(
+                &self.client,
+                &self.l1_rpc_url,
+                self.l1_ccm,
+                call.source_address,
+                self.rollup_id,
+            )
+            .await
+            .unwrap_or(call.source_address);
             let sim_req = serde_json::json!([{
                 "transactions": [{
-                    "from": format!("{}", call.source_address),
+                    "from": format!("{}", from_address),
                     "to": format!("{}", call.destination),
                     "data": format!("0x{}", hex::encode(&call.calldata)),
                     "value": format!("0x{:x}", call.value),
